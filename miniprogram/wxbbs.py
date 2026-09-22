@@ -6,6 +6,7 @@ name: 微信笔笔省 - 提现额度
 功能: 领券、查询
 变量: YYB_SERVER (YYB-Go-Enhanced地址@账号ref，多个账号换行分割)
         PROXY_API_URL (代理api，返回一条txt文本，内容为代理ip:端口)
+        LY_NOTIFY (通知开关，默认开启；填 0/false/off/no 关闭)
 # cron: 1 9,16 * * *
 
 ------------更新日志------------
@@ -28,7 +29,7 @@ from datetime import datetime, timedelta
 
 MULTI_ACCOUNT_SPLIT = ["\n", "@"] # 分隔符列表
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
-NOTIFY = os.getenv("LY_NOTIFY") or False # 是否推送日志，默认不推送，True则推送
+NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no") # 是否推送日志，默认开启，填 0/false/off/no 关闭
 YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 
 class YYBGoEnhancedAdapter:
@@ -291,13 +292,53 @@ class AutoTask:
             self.log(f"[{self.nickname}] 领取优惠券发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
 
+    def load_notify(self):
+        """
+        加载青龙官方 notify 模块。
+        优先使用脚本同目录的 notify.py；不存在时依次尝试 CDN 镜像→官方源下载。
+        任何失败都不抛异常（避免在 finally 里报错盖掉真正的业务异常），返回 None。
+        """
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        notify_path = os.path.join(script_dir, "notify.py")
+        if not os.path.exists(notify_path):
+            # 国内直连 raw.githubusercontent.com 常被重置，故 CDN 镜像优先
+            urls = [
+                "https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
+                "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
+                "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
+            ]
+            for url in urls:
+                try:
+                    response = requests.get(url, timeout=15)
+                    if response.status_code == 200 and "def send" in response.text:
+                        with open(notify_path, "wb") as f:
+                            f.write(response.content)
+                        self.log(f"[通知] notify.py 下载成功（{url.split('/')[2]}）")
+                        break
+                except Exception as e:
+                    self.log(f"[通知] notify.py 下载失败（{url.split('/')[2]}）: {e}", level="warning")
+        if not os.path.exists(notify_path):
+            return None
+        try:
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+            import notify
+            return notify
+        except Exception as e:
+            self.log(f"[通知] notify.py 导入失败: {e}", level="error")
+            return None
+
     def run(self):
         """
         运行任务
         """
+        # 推送摘要：每个账号一行；完整运行日志只留在青龙日志里，不推给第三方渠道
+        push_lines = []
+        total_accounts = 0
         try:
             self.log(f"【{self.script_name}】开始执行任务")
             entries = list(self.check_env())
+            total_accounts = len(entries)
             self.log(f"共 {len(entries)} 个账号待执行")
             if not entries:
                 self.log("没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
@@ -328,11 +369,13 @@ class AutoTask:
                 code = self.wechat_code_adapter.get_code(wx_id)
                 if not code:
                     self.log(f"[{self.nickname}] YYB取码失败，跳过该账号", level="error")
+                    push_lines.append(f"{self.nickname}: ❌ YYB取码失败")
                     session.close()
                     continue
                 token = self.login(session, code)
                 if not token:
                     self.log(f"[{self.nickname}] 登录失败，跳过该账号", level="error")
+                    push_lines.append(f"{self.nickname}: ❌ 登录失败")
                     session.close()
                     continue
                 self.token = token
@@ -343,11 +386,13 @@ class AutoTask:
                     code = self.wechat_code_adapter.get_code(wx_id)
                     if not code:
                         self.log(f"[{self.nickname}] 授权失败，跳过该账号", level="error")
+                        push_lines.append(f"{self.nickname}: ❌ 授权失败")
                         session.close()
                         continue
                     token = self.login(session, code)
                     if not token:
                         self.log(f"[{self.nickname}] 重新登录失败，跳过该账号", level="error")
+                        push_lines.append(f"{self.nickname}: ❌ 重新登录失败")
                         session.close()
                         continue
                     self.token = token
@@ -361,6 +406,7 @@ class AutoTask:
                 # 再次获取用户余额
                 self.get_balance(session)
                 self.log(f"[{self.nickname}] 当前提现免费券: {self.points}元")
+                push_lines.append(f"{self.nickname}: ✅ 提现免费券 {self.points}元")
                 # 清理session
                 session.close()
                 self.log(f"------ 账号{index} 执行任务结束 ------")
@@ -369,20 +415,26 @@ class AutoTask:
             self.log(f"【{self.script_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
         finally:
             if NOTIFY:
-                # 如果notify模块不存在，从远程下载至本地
-                if not os.path.exists("notify.py"):
-                    url = "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"
-                    response = requests.get(url)
-                    with open("notify.py", "w", encoding="utf-8") as f:
-                        f.write(response.text)
-                    import notify
-                else:
-                    import notify
-                # 任务结束后推送日志
-                title = f"{self.script_name} 运行日志"
-                header = "作者：临渊\n"
-                content = header + "\n" +"\n".join(self.wechat_code_adapter.log_msgs)
-                notify.send(title, content)
+                # 推送失败不能影响脚本退出状态，整段兜住
+                try:
+                    notify = self.load_notify()
+                    if notify is None:
+                        self.log("[通知] 未找到 notify.py，跳过推送")
+                    else:
+                        # 只推精简摘要（每账号一行）：第三方渠道有正文长度上限，
+                        # 且 PushPlus 免费版在微信里只显示标题，成功数必须进 title。
+                        ok_cnt = sum(1 for _l in push_lines if "✅" in _l)
+                        if total_accounts:
+                            title = f"{self.script_name} {ok_cnt}/{total_accounts} 成功"
+                            if ok_cnt < total_accounts:
+                                title += f"  ❌{total_accounts - ok_cnt}"
+                        else:
+                            title = f"{self.script_name} 无账号可执行"
+                        content = "\n".join(push_lines) or "无账号可执行，请检查 YYB_SERVER / YYB_ONLY_REFS"
+                        notify.send(title, content)
+                        self.log(f"[通知] 推送已提交：{title}")
+                except Exception as e:
+                    self.log(f"[通知] 推送失败: {e}", level="error")
 
 if __name__ == "__main__":
     auto_task = AutoTask("微信支付提现笔笔省")

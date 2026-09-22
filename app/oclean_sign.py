@@ -40,6 +40,57 @@ def log(msg):
     print("· " + msg)
 
 # ────────────────────────────────────────────
+# 通知推送（只推精简摘要，不推全量日志）
+# ────────────────────────────────────────────
+# 开关：默认开启，填 0/false/off/no 可关闭
+NOTIFY = (os.getenv("OCLEAN_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _ensure_notify():
+    """确保脚本同目录有 notify.py（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
+    try:
+        import notify  # noqa: F401
+        return True
+    except Exception:
+        pass
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify.py")
+    for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
+                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
+                 "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
+        try:
+            _r = requests.get(_url, timeout=15)
+            if _r.status_code == 200 and "def send" in _r.text:
+                with open(target, "wb") as _f:
+                    _f.write(_r.content)
+                _dir = os.path.dirname(target)
+                if _dir not in sys.path:
+                    sys.path.insert(0, _dir)
+                log("已自愈下载 notify.py（" + _url.split("/")[2] + "）")
+                return True
+        except Exception as _e:
+            log("notify.py 下载失败（" + _url.split("/")[2] + "）: " + str(_e))
+    return False
+
+
+def send_notify(title, content):
+    """推送到青龙面板配置的通知渠道；失败只打日志，不影响脚本退出状态。"""
+    if not NOTIFY:
+        return
+    try:
+        if not _ensure_notify():
+            log("未安装 notify.py，跳过推送")
+            return
+        from notify import send as _notify_send
+        if len(content) > 3000:
+            content = content[:3000] + "...(内容过长已截断)"
+        _notify_send(title, content)
+    except ImportError:
+        log("未安装 notify.py，跳过推送")
+    except Exception as e:
+        log("推送失败: " + str(e))
+
+
+# ────────────────────────────────────────────
 # 解析青龙环境变量
 # ────────────────────────────────────────────
 def load_cookies():
@@ -121,12 +172,12 @@ def run_one(idx, cookie):
     if status_code is None:
         print("│ ❌ 请求异常: " + raw)
         print()
-        return False, "异常"
+        return False, "异常", " ".join(str(raw).split())[:80]
     st, detail = interpret(jr, raw)
     emoji = {"success": "✅", "already": "🟡", "expired": "🔴", "fail": "❌"}.get(st, "❔")
     print(f"│ {emoji} HTTP {status_code}  {detail}")
     print()
-    return st in ("success", "already"), st
+    return st in ("success", "already"), st, detail
 
 # ────────────────────────────────────────────
 def main():
@@ -147,12 +198,16 @@ def main():
     if not cookies:
         print("⚠️  青龙环境变量 OCLEAN_COOKIE 未设置")
         print("   格式: 一行一个 Shop-Member 值")
+        send_notify("Oclean签到 无账号可执行", "⚠️ 青龙环境变量 OCLEAN_COOKIE 未设置")
         return
 
     ok_count = 0
     expired_count = 0
+    push_lines = []
+    st_emoji = {"success": "✅", "already": "🟡", "expired": "🔴", "fail": "❌", "异常": "⚠️"}
     for i, ck in enumerate(cookies, start=1):
-        ok, st = run_one(i, ck)
+        ok, st, detail = run_one(i, ck)
+        push_lines.append("账号%d: %s %s" % (i, st_emoji.get(st, "❔"), detail))
         if ok:
             ok_count += 1
         elif st == "expired":
@@ -169,6 +224,13 @@ def main():
     print("║" + (" " * max(0, pad3 // 2)) + tail + (" " * max(0, pad3 - pad3 // 2)) + "║")
     print("╚" + "═" * 40 + "╝")
     print()
+
+    # 推送精简摘要：每个账号一行，完整日志只留在青龙面板
+    _title = "Oclean签到 %d/%d 成功" % (ok_count, total)
+    if expired_count:
+        _title += "  🔴失效%d" % expired_count
+    send_notify(_title, "\n".join(push_lines))
+
 
 if __name__ == "__main__":
     main()

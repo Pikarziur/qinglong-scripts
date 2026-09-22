@@ -71,9 +71,53 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s │ %(levelname)-7s │ %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-def send_notify(title, content):
+def _ensure_notify():
+    """确保脚本同目录有 notify.py（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
     try:
+        import notify  # noqa: F401
+        return True
+    except Exception:
+        pass
+    target = Path(__file__).resolve().parent / "notify.py"
+    for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
+                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
+        try:
+            _r = requests.get(_url, timeout=15)
+            if _r.status_code == 200 and "def send" in _r.text:
+                target.write_bytes(_r.content)
+                if str(target.parent) not in sys.path:
+                    sys.path.insert(0, str(target.parent))
+                log.info("已自愈下载 notify.py（%s）" % _url.split("/")[2])
+                return True
+        except Exception as e:
+            log.warning("notify.py 下载失败（%s）: %s" % (_url.split("/")[2], e))
+    return False
+
+
+def _err(e, limit=120):
+    """错误信息压成单行并截断，避免把长文本推给第三方通知渠道。"""
+    s = " ".join(str(e).split())
+    return s[:limit] + ("..." if len(s) > limit else "")
+
+
+def _slim(mask, summary, min_harvest=None):
+    """推送用精简摘要：只保留资源首行 + 最近成熟时间；地块/酒坛明细只进日志。"""
+    first = (summary.split("\n", 1)[0] if summary else "").strip()
+    txt = "👤 %s\n%s" % (mask, first)
+    if min_harvest is not None:
+        txt += "\n⏱️ 最近成熟 %s" % fmt_remaining_from_seconds(min_harvest)
+    return txt
+
+
+def send_notify(title, content):
+    """推送到青龙面板配置的通知渠道；失败只打日志，不影响脚本退出状态。"""
+    try:
+        if not _ensure_notify():
+            log.info("未安装 notify.py，跳过推送")
+            return
         from notify import send as _notify_send
+        if len(content) > 3000:
+            content = content[:3000] + "\n...(内容过长已截断)"
         _notify_send(title, content)
     except ImportError:
         log.info("未安装 notify.py，跳过推送")
@@ -1480,19 +1524,25 @@ if __name__ == "__main__":
         try:
             result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
         except Exception as e:
-            log.error("   ❌ 登录异常: %s，跳过" % e); notify_lines.append("👤 %s\n❌ 登录失败: %s" % (mask, e)); continue
+            log.error("   ❌ 登录异常: %s，跳过" % e); notify_lines.append("👤 %s\n❌ 登录失败: %s" % (mask, _err(e))); continue
 
         log.info("   🔑 登录结果: token=%s  加密=%s" % (
             "✅ 已获取" if result.get("token") else "❌ 失败",
             "✅ 就绪" if result.get("crypto_ready") else "❌ 未就绪"))
 
-        if not result.get("token"): log.error("   ❌ 登录失败，跳过"); continue
-        if not client.crypto: log.error("   ❌ 加密未就绪，跳过"); continue
+        if not result.get("token"):
+            log.error("   ❌ 登录失败，跳过")
+            notify_lines.append("👤 %s\n❌ 登录失败（未拿到 token）" % mask)
+            continue
+        if not client.crypto:
+            log.error("   ❌ 加密未就绪，跳过")
+            notify_lines.append("👤 %s\n❌ 加密未就绪，跳过" % mask)
+            continue
 
         try:
             # 由 run() 内部查服务端判断今日是否已签到/分享（幂等）：不再依赖本地 _daily 标记
             summary, min_harvest, _brewed = run(client, do_daily=True)
-            notify_lines.append("👤 %s\n%s" % (mask, summary))
+            notify_lines.append(_slim(mask, summary, min_harvest))
             if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
         except (Exception, TokenInvalidError) as e:
             msg = str(e)
@@ -1508,22 +1558,26 @@ if __name__ == "__main__":
                     result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
                     if result.get("token"):
                         summary, min_harvest, _brewed = run(client, do_daily=True)
-                        notify_lines.append("👤 %s\n%s" % (mask, summary))
+                        notify_lines.append(_slim(mask, summary, min_harvest))
                         if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
                         log.info("   ✅ 重新登录重试成功")
                     else:
                         log.error("   ❌ 重试登录仍未返回 token")
-                        notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e))
+                        notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, _err(e)))
                 except (Exception, TokenInvalidError) as e2:
                     log.error("   ❌ 重试异常: %s" % e2, exc_info=True)
-                    notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e))
+                    notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, _err(e)))
             else:
                 log.error("   ❌ 执行异常: %s" % e, exc_info=True)
-                notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e))
+                notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, _err(e)))
         time.sleep(random.randint(2, 5))
 
     if notify_lines:
-        content = "作者：\n\n" + "\n\n".join(notify_lines)
+        _ok_cnt = sum(1 for _l in notify_lines if "❌" not in _l)
+        _push_title = "习酒花园 %d/%d 成功" % (_ok_cnt, len(accounts))
+        if _ok_cnt < len(accounts):
+            _push_title += "  ❌%d" % (len(accounts) - _ok_cnt)
+        content = "\n\n".join(notify_lines)
         # 全账号本月酿酒合计(一行汇总)
         try:
             _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
@@ -1536,7 +1590,7 @@ if __name__ == "__main__":
                     content += "\n\n📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed)
         except Exception:
             pass
-        send_notify("习酒花园", content)
+        send_notify(_push_title, content)
 
     # ── 计算下次执行时间 ──
     log.info("═" * 50)

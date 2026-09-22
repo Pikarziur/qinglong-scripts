@@ -10,7 +10,7 @@
 #       旧 token 不落盘、不复用，逻辑更简单，也不存在坏 token 复用问题。
 # ==========================================================
 
-import os, re, time, random, traceback, json
+import os, re, sys, time, random, traceback, json
 import requests
 
 # ============== 新手配置区 ==============
@@ -28,6 +28,55 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.
 LOGIN_URL       = "https://" + HOST + "/api/session/wxSession/v2"
 SIGN_URL        = "https://" + HOST + "/api/user/sign"
 SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
+
+# ———————————— 通知推送（只推精简摘要）————————————
+# 开关：默认开启，填 0/false/off/no 可关闭
+NOTIFY = (os.getenv("CDF_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _ensure_notify():
+    """确保脚本同目录有 notify.py（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
+    try:
+        import notify  # noqa: F401
+        return True
+    except Exception:
+        pass
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify.py")
+    for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
+                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
+                 "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
+        try:
+            _r = requests.get(_url, timeout=15)
+            if _r.status_code == 200 and "def send" in _r.text:
+                with open(target, "wb") as _f:
+                    _f.write(_r.content)
+                _dir = os.path.dirname(target)
+                if _dir not in sys.path:
+                    sys.path.insert(0, _dir)
+                log("已自愈下载 notify.py（" + _url.split("/")[2] + "）")
+                return True
+        except Exception as _e:
+            log("notify.py 下载失败（" + _url.split("/")[2] + "）: " + str(_e))
+    return False
+
+
+def send_notify(title, content):
+    """推送到青龙面板配置的通知渠道；失败只打日志，不影响脚本退出状态。"""
+    if not NOTIFY:
+        return
+    try:
+        if not _ensure_notify():
+            log("未安装 notify.py，跳过推送")
+            return
+        from notify import send as _notify_send
+        if len(content) > 3000:
+            content = content[:3000] + "...(内容过长已截断)"
+        _notify_send(title, content)
+    except ImportError:
+        log("未安装 notify.py，跳过推送")
+    except Exception as e:
+        log("推送失败: " + str(e))
+
 
 # ———————————— 美化小工具 ————————————
 _BAR = "─" * 42
@@ -234,7 +283,7 @@ def run_account(server, ref):
         print("│ ❌ 账号不可用")
         print("│ · 原因: " + str(status_msg))
         print()
-        return False
+        return False, "ref " + str(ref) + ": ❌ " + " ".join(str(status_msg).split())[:80]
     # 登录状态一行简注（每次都是新登录）
     print("├ 登录态 · " + status_msg)
     t_short, t_long, _ = today_str()
@@ -255,7 +304,7 @@ def run_account(server, ref):
     if before is False and after is True:
         print("│ 🎉 本账号首次签到成功！")
     print()
-    return True
+    return True, "ref " + str(ref) + ": " + emoji + " " + tag
 
 def main():
     entries = list(YYBClient(APP_ID).entries())
@@ -276,17 +325,22 @@ def main():
 
     if not entries:
         print("⚠️ 没有可执行账号（青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空）")
+        send_notify("中免会员签到 无账号可执行", "⚠️ 青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空")
         return
 
     success = 0
+    push_lines = []
     for i, (server, ref, _) in enumerate(entries, start=1):
         try:
-            if run_account(server, ref):
+            ok, line = run_account(server, ref)
+            push_lines.append(line)
+            if ok:
                 success += 1
         except Exception as e:
             print("│ ❌ 账号异常: " + str(e))
             print(traceback.format_exc())
             print()
+            push_lines.append("ref " + str(ref) + ": ❌ 账号异常 " + " ".join(str(e).split())[:80])
         if i < total:
             wait = random.randint(3, 8)
             # 不打印休息，避免啰嗦；真卡住了用户能从执行计时看在等
@@ -303,6 +357,9 @@ def main():
     print("║" + (" " * (pad3 // 2)) + tail_title + (" " * (pad3 - pad3 // 2)) + "║")
     print("╚" + ("═" * 42) + "╝")
     print()
+
+    # 推送精简摘要：每个账号一行，完整日志只留在青龙面板
+    send_notify("中免会员签到 %d/%d 成功" % (success, total), "\n".join(push_lines))
 
 if __name__ == "__main__":
     main()

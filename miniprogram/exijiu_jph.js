@@ -70,6 +70,7 @@ function parseYybGoEntry(rawValue) {
 
         log(`\n============ 君品荟签到  ============`)
         log(`\n=================== 共找到 ${xjhdArr.length} 个账号 ===================`)
+        addNotifyStr(`共 ${xjhdArr.length} 个账号`, false)
         if (debug) {
             log(`【debug】 这是你的全部账号数组:\n ${xjhdArr}`);
         }
@@ -126,9 +127,8 @@ function parseYybGoEntry(rawValue) {
                             backImage: backImage
                         }
                     }
-                    addNotifyStr(`✅ 滑块验证结果：${captchaPassed ? "成功" : "失败"}`, true);
-                    if (!captchaPassed) {
-                        addNotifyStr(`⚠️ 滑块校验返回：${JSON.stringify(check || {}).slice(0, 300)}`, true);
+                    if (captchaPassed) {
+                        addNotifyStr(`✅ 滑块验证通过`, true);
                     }
                 } catch (e) {
                     addNotifyStr(`⚠️ 滑块验证异常：${e.message || e}`, true);
@@ -440,14 +440,49 @@ function addNotifyStr(str, is_log = true) {
     msg += str + '\n';
 }
 
-// 发送通知
+// 通知模块：优先用脚本同目录的 notify.js（青龙官方），缺失时从 CDN 自愈下载一份
+async function loadNotifyModule() {
+    const fs = require('fs');
+    const path = require('path');
+    const p = path.join(__dirname, 'notify.js');
+    if (!fs.existsSync(p)) {
+        const urls = [
+            'https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.js',
+            'https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js',
+            'https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js'
+        ];
+        for (const u of urls) {
+            try {
+                const r = await axios.get(u, { timeout: 15000, responseType: 'text' });
+                const body = typeof r.data === 'string' ? r.data : String(r.data);
+                if (r.status === 200 && body.includes('sendNotify')) {
+                    fs.writeFileSync(p, body);
+                    log('已自愈下载 notify.js（' + u.split('/')[2] + '）');
+                    break;
+                }
+            } catch (e) {
+                log('notify.js 下载失败（' + u.split('/')[2] + '）: ' + (e.message || e));
+            }
+        }
+    }
+    if (!fs.existsSync(p)) return null;
+    return require(p);
+}
+
+// 发送通知（只推精简摘要，不推运行日志全文）
 async function SendMsg(message) {
     if (!message || !Notify) return;
     if ($.isNode()) {
         try {
-            const notify = require('./sendNotify');
-            await notify.sendNotify($.name, message);
-        } catch {}
+            const notify = await loadNotifyModule();
+            if (!notify) {
+                log('未安装 notify.js，跳过推送');
+                return;
+            }
+            await notify.sendNotify($.name + ' · ' + xjhdArr.length + '个账号', message);
+        } catch (e) {
+            log('❌ 通知推送失败: ' + (e.message || e));
+        }
     } else {
         $.msg(message);
     }
