@@ -5,7 +5,7 @@
  * 1. 青龙面板 添加环境变量 xsijishe_cookie，值为 Cookie 字符串
  *    或直接把 cookie 写在下方 DEFAULT_COOKIE 中
  * 2. 添加定时任务：task xsijishe_qinglong.js
- * 3. 定时表达式：0 30 8 * * * （每天 08:30 执行）
+ * 3. 定时表达式：30 5 * * * （每天 08:30 执行）
  *
  * 注意：
  * - 需要青龙网络能访问 xsijishe.com
