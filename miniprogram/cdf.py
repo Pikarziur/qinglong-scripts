@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  中免会员（cdf）
+# name:  中免会员 - 签到
 # 接口：/api/session/wxSession/v2（登录）+ /api/user/sign（签到）
 # 青龙环境变量：YYB_SERVER = yyb-go:8000@1  多账号一行一条
 # 新手配置：文件顶部 YYB_ONLY_REFS / SIGN_LNG / SIGN_LAT
 # cron: 1 12,20 * * *
-
-=========================================================
+# 修订：保留 token 缓存，新增「失效自愈」——签到若因 token 过期失败，
+#       清除该账号缓存并强制重新登录后再签一次。
+# ==========================================================
 
 import os, re, time, random, traceback, json
 import requests
@@ -168,6 +169,13 @@ def _ok(jr):
         return False, msg.strip() or ("code=" + str(code)), False
     return True, msg.strip() or "成功", False
 
+# 判断「服务端文案」是否指向 token 失效（用于签到失败时的自愈判定）
+def _is_token_expired(msg):
+    if not msg:
+        return False
+    low = msg.lower()
+    return any(k in low for k in ["login", "token", "auth", "过期", "未登录", "失效", "expire"])
+
 def login_with_code(wx_code):
     h = _common_headers(token=None, page="pages/main/main")
     h["content-type"] = "application/x-www-form-urlencoded"
@@ -195,7 +203,7 @@ def token_still_good(token):
         ok, msg, _ = _ok(jr)
         if ok:
             return True
-        if any(k in (msg or "").lower() for k in ["login", "token", "auth", "过期", "未登录"]):
+        if _is_token_expired(msg):
             return False
         return True
     except Exception:
@@ -211,7 +219,7 @@ def do_sign(token):
         r = requests.post(SIGN_URL, data=data, headers=h, timeout=(10, 30))
         jr = _parse(r)
     except Exception as e:
-        return "异常", "请求异常: " + str(e), extra_lines
+        return "异常", "请求异常: " + str(e), extra_lines, False
     ok, msg, already = _ok(jr)
     if already:
         status = "已签"
@@ -226,7 +234,9 @@ def do_sign(token):
             if d.get(k) not in (None, "", []):
                 extra_lines.append(("奖励" if k in ("points","score","prize","giftName","balance") else "进度")
                                    + " · " + k + ": " + str(d[k]))
-    return status, msg, extra_lines
+    # 仅当「失败/异常」且文案指向 token 失效时，标记为可自愈
+    expired = (status in ("失败", "异常")) and _is_token_expired(msg)
+    return status, msg, extra_lines, expired
 
 def get_today_done(token):
     """返回 (today_done, signText 或 None)；拿不到返回 (None, None)"""
@@ -246,13 +256,14 @@ def get_today_done(token):
             return rec.get("signIn"), rec.get("signText")
     return None, None
 
-def ensure_token(server, ref):
-    """返回 token 字符串；失败返回 None"""
+def ensure_token(server, ref, force=False):
+    """返回 (token, 状态说明)；失败返回 (None, 原因)。
+    force=True 时跳过缓存探活，强制重新取码登录（用于失效自愈）。"""
     key = server.rsplit("://", 1)[-1] + "@" + str(ref)
     cache = load_tokens()
-    old = cache.get(key, {}) if isinstance(cache.get(key), dict) else {}
+    old = cache.get(key) if isinstance(cache.get(key), dict) else {}
     token = old.get("token") if old else None
-    if token and token_still_good(token):
+    if not force and token and token_still_good(token):
         return token, "缓存"
     code, err = YYBClient(APP_ID).get_code(server, ref)
     if not code:
@@ -265,7 +276,7 @@ def ensure_token(server, ref):
     cache[key]["ref"] = ref
     cache[key]["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save_tokens(cache)
-    return token, "新登录"
+    return token, ("强制新登录" if force else "新登录")
 
 def _status_emoji_and_tag(status):
     return {
@@ -291,7 +302,17 @@ def run_account(server, ref):
     sym1 = "✅" if before else "⭕"
     log("签到前 · 今日(" + t_short + ") " + sym1
         + ("  signText=" + str(txt) if txt is not None else ""))
-    status, msg, extra = do_sign(token)
+    status, msg, extra, expired = do_sign(token)
+    # —— 失效自愈：签到因 token 过期失败时，清缓存重登并重试一次 ——
+    if expired:
+        print("│ 🔄 检测到 token 失效，清缓存重新登录后重试…")
+        token2, sm2 = ensure_token(server, ref, force=True)
+        if token2:
+            token = token2
+            status, msg, extra, expired = do_sign(token2)
+            print("│    ↳ 重试登录态 · " + sm2)
+        else:
+            print("│    ↳ 重试登录失败: " + str(sm2))
     emoji, tag = _status_emoji_and_tag(status)
     print("│ " + emoji + " " + tag + "  ──  服务端 msg: " + (msg or ""))
     for line in extra:
