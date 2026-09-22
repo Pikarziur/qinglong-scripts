@@ -1,8 +1,8 @@
 ﻿#  修改脚本 563行的配置信息
 #  脚本同文件夹放青龙面板自带的notify.py推送脚本
 """
-# name: 习酒-酒谷互动
-# cron: 1 0,4,8,12,16,20 * * *
+# name: 习酒酒谷 - 互动
+# cron: 55 0,4,8,12,16,20 * * *
 
 
 习酒花园（微信协议版）- 统一合并版本
@@ -947,7 +947,13 @@ def run(client, do_daily=True):
             r = client.daily_sign()
             log.info("   ✅ 签到成功  💧+%s  🌿+%s  %s" % (r.get("water", 0), r.get("manure", 0), r.get("tips", "")))
         except RuntimeError as e:
-            log.warning("   ⚠️  签到失败: %s" % e)
+            _sign_msg = str(e)
+            # 今日已签会被服务端当错误抛出；do_daily 恒为 True 后每次运行都会走到这里，
+            # 不能一律打成「签到失败」，否则推送里天天显示失败，实际只是已签。
+            if any(k in _sign_msg for k in ["已签", "已经", "重复", "already", "repeat"]):
+                log.info("   ℹ️  今日已签到，跳过")
+            else:
+                log.warning("   ⚠️  签到失败: %s" % _sign_msg)
         # ── 每日分享 ──
         log.info("📤 每日分享...")
         for i in range(3):
@@ -1458,23 +1464,7 @@ if __name__ == "__main__":
         print("❌ 未找到账号，请设置 WX_ID、WXIDXJ 或 YYB_SERVER")
         sys.exit(1)
 
-    CACHE_FILE = Path(__file__).parent / "xijiutoken.json"
-
-    def load_cache():
-        try: return json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
-        except Exception: return {}
-
-    def save_cache(c):
-        try: CACHE_FILE.write_text(json.dumps(c, ensure_ascii=False, indent=2))
-        except Exception: pass
-
-    def token_valid(token):
-        try:
-            p = token.split(".")[1]; p += "=" * (4 - len(p) % 4)
-            return json.loads(base64.b64decode(p).decode()).get("expireTime", 0) > time.time() + 300
-        except Exception: return False
-
-    cache = load_cache()
+    # ── 不落盘：不再读写 xijiutoken.json，每次运行都强制重新登录拿全新 token ──
     notify_lines = []
     all_min_harvests = []
 
@@ -1486,60 +1476,39 @@ if __name__ == "__main__":
         log.info("─" * 50); log.info("👤 [%d/%d] 账号: %s" % (i+1, len(accounts), mask))
 
         client = GardenClient(ocr_server=OCR_SERVER or None)
-        cached_token = cache.get(wxid, "")
+        # 每次运行强制重新登录，拿全新 token（不读缓存、不落盘）
+        try:
+            result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
+        except Exception as e:
+            log.error("   ❌ 登录异常: %s，跳过" % e); notify_lines.append("👤 %s\n❌ 登录失败: %s" % (mask, e)); continue
 
-        if cached_token and token_valid(cached_token):
-            log.info("   🔑 使用缓存 token"); client.set_token(cached_token)
-            wx = WxAdapter(WX_SERVER)
-            try:
-                enc = wx.get_user_encrypt_key(wxid, APPID)
-                if enc.get("success"):
-                    client.set_crypto(enc["encrypt_key"], enc["iv"], version=enc.get("version", 3))
-                    log.info("   🔐 加密密钥已获取  version=%s" % enc.get("version"))
-                else: cached_token = ""
-            except Exception as e: log.warning("   ⚠️  获取加密密钥异常: %s" % e); cached_token = ""
+        log.info("   🔑 登录结果: token=%s  加密=%s" % (
+            "✅ 已获取" if result.get("token") else "❌ 失败",
+            "✅ 就绪" if result.get("crypto_ready") else "❌ 未就绪"))
 
-        if not cached_token or not token_valid(cached_token):
-            log.info("   🔄 token 无效或已过期，重新登录...")
-            try:
-                result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
-            except Exception as e:
-                log.error("   ❌ 登录异常: %s，跳过" % e); notify_lines.append("👤 %s\n❌ 登录失败: %s" % (mask, e)); continue
-
-            log.info("   🔑 登录结果: token=%s  加密=%s" % (
-                "✅ 已获取" if result.get("token") else "❌ 失败",
-                "✅ 就绪" if result.get("crypto_ready") else "❌ 未就绪"))
-
-            if not result.get("token"): log.error("   ❌ 登录失败，跳过"); continue
-            cache[wxid] = client.token; save_cache(cache)
-
+        if not result.get("token"): log.error("   ❌ 登录失败，跳过"); continue
         if not client.crypto: log.error("   ❌ 加密未就绪，跳过"); continue
 
         try:
-            today = datetime.now().strftime("%Y-%m-%d"); do_daily = cache.get(wxid + "_daily") != today
-            summary, min_harvest, _brewed = run(client, do_daily=do_daily)
+            # 由 run() 内部查服务端判断今日是否已签到/分享（幂等）：不再依赖本地 _daily 标记
+            summary, min_harvest, _brewed = run(client, do_daily=True)
             notify_lines.append("👤 %s\n%s" % (mask, summary))
-            if do_daily: cache[wxid + "_daily"] = today; save_cache(cache)
             if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
         except (Exception, TokenInvalidError) as e:
             msg = str(e)
-            # 缓存 token 失效的共性表现：[5001] 加密校验失败、[4012] 非法的用户 token 参数等。
-            # 直接清空该账号缓存 token 并当场重新登录重试，无需手动执行清理脚本。
+            # 运行时 token 失效的共性表现：[5001] 加密校验失败、[4012] 非法的用户 token 参数等。
+            # 当场重新登录重试，不写本地缓存。
             TOKEN_INVALID = ("5001" in msg or "加密校验失败" in msg
                              or "4012" in msg or "非法的用户 token" in msg
                              or "token" in msg.lower() and ("失效" in msg or "非法" in msg or "无效" in msg or "过期" in msg)
                              or isinstance(e, TokenInvalidError))
-            if TOKEN_INVALID and cache.get(wxid):
-                cache.pop(wxid, None); save_cache(cache)
-                log.warning("   ⚠️  检测到 token 失效(%s)，立即清除缓存 token 并重新登录重试..." % msg.split("]")[0].strip("["))
+            if TOKEN_INVALID:
+                log.warning("   ⚠️  检测到 token 失效(%s)，立即重新登录重试..." % msg.split("]")[0].strip("["))
                 try:
                     result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
                     if result.get("token"):
-                        cache[wxid] = client.token; save_cache(cache)
-                        today = datetime.now().strftime("%Y-%m-%d"); do_daily = cache.get(wxid + "_daily") != today
-                        summary, min_harvest, _brewed = run(client, do_daily=do_daily)
+                        summary, min_harvest, _brewed = run(client, do_daily=True)
                         notify_lines.append("👤 %s\n%s" % (mask, summary))
-                        if do_daily: cache[wxid + "_daily"] = today; save_cache(cache)
                         if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
                         log.info("   ✅ 重新登录重试成功")
                     else:

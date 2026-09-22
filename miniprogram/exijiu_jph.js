@@ -1,11 +1,11 @@
 /*
-君品荟签到
+# name: 习酒君品荟 - 签到
 
 变量：
   YYB_SERVER    YYB-Go-Enhanced 地址@账号标识，多账号一行一个，必须配置
                 示例：yyb-go:8000@openid
 
-# cron: 6 12,20 * * *
+# cron: 11 9,16 * * *
 
 
 
@@ -355,7 +355,7 @@ async function getpoints(token__) {
             try {
                 let d = res.data;
                 if (d.success) {
-                    pointss = d.data.points;
+                    const pointss = d.data.points;
                     //log(`✅ 总积分：${pointss}`);
                     addNotifyStr(`总积分：${pointss}`);
                 } else {

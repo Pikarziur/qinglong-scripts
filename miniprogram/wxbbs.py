@@ -1,12 +1,12 @@
 """
 作者: 临渊
 日期: 2025/8/21
-name: 提现笔笔省
+name: 微信笔笔省 - 提现额度
 入口: 微信小程序 (https://a.c1ns.cn/X3ucP)
 功能: 领券、查询
 变量: YYB_SERVER (YYB-Go-Enhanced地址@账号ref，多个账号换行分割)
         PROXY_API_URL (代理api，返回一条txt文本，内容为代理ip:端口)
-# cron: 21 12,20 * * *
+# cron: 1 9,16 * * *
 
 ------------更新日志------------
 2025/8/21   V1.0    初始化脚本
@@ -192,53 +192,8 @@ class AutoTask:
             self.log(f"[检查环境变量] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             raise
 
-    def save_account_info(self, account_info):
-        """
-        保存账号信息
-        :param account_info: 账号信息（新获取的列表）
-        """
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wxzftxbbs_account_info.json")
-        # 读取旧数据
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                old_list = json.load(f)
-        else:
-            old_list = []
-        # 构建 wx_id 到账号的映射，方便查找和更新
-        old_dict = {item['wx_id']: item for item in old_list}
-        # self.log(f"旧数据: {old_dict}")
-        for new_item in account_info:
-            old_dict[new_item['wx_id']] = new_item  # 有则更新，无则新增
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(list(old_dict.values()), f, ensure_ascii=False, indent=2)
-            self.log(f"保存新数据: 成功")
-
-    def remove_account_info(self, wx_id):
-        """
-        删除账号信息
-        :param wx_id: 微信id
-        """
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wxzftxbbs_account_info.json")
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                old_list = json.load(f)
-            old_list = [item for item in old_list if item['wx_id'] != wx_id]
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(old_list, f, ensure_ascii=False, indent=2)
-            self.log(f"删除账号信息: 成功")
-
-    def load_account_info(self):
-        """
-        加载账号信息
-        :return: 账号信息
-        """
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wxzftxbbs_account_info.json")
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                account_info = json.load(f)
-            return account_info
-        else:
-            return []
+    # ── 已移除本地 token 缓存（原 save/load/remove_account_info）──
+    # 改为每次运行强制重新取码 + 登录，参照 cdf.py 的不落盘方案。
 
     def login(self, session, code):
         """
@@ -256,7 +211,7 @@ class AutoTask:
             if int(response_json['errcode']) == 0:
                 self.token = response_json['data']['session_token']
                 session.headers['Session-Token'] = self.token
-                # self.log(f"[{self.nickname}] 登录成功 获取token: {self.token}")
+                # 注意：不要在此打印 token 明文（青龙日志会持久化并可能推送出去）
                 return self.token
             else:
                 self.log(f"[登录] 失败 错误信息: {response_json.get('msg', '未知错误')}", level="warning")
@@ -342,11 +297,10 @@ class AutoTask:
         """
         try:
             self.log(f"【{self.script_name}】开始执行任务")
-            account_info_list = []
-            local_account_info = self.load_account_info()
-            self.log(f"本地共{len(local_account_info)}个账号")
-            entries = self.check_env()
-            if entries is None:
+            entries = list(self.check_env())
+            self.log(f"共 {len(entries)} 个账号待执行")
+            if not entries:
+                self.log("没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
                 return
             for index, wx_id in enumerate(entries, 1):
                 # 清理账号信息
@@ -370,45 +324,34 @@ class AutoTask:
                         #     proxy = self.get_proxy()
                         #     session.proxies.update({"http": f"http://{proxy}", "https": f"http://{proxy}"})
 
-                token = None
-                # 查找本地账号
-                if local_account_info:
-                    for info in local_account_info:
-                        if info['wx_id'] == wx_id:
-                            token = info['token']
-                            # self.log(f"[登录] 找到本地token: {token}")
-                            break
-                # 本地没有则授权获取
+                # 每次运行强制重新取码 + 登录，拿全新 token（不落盘、不复用本地缓存）
+                code = self.wechat_code_adapter.get_code(wx_id)
+                if not code:
+                    self.log(f"[{self.nickname}] YYB取码失败，跳过该账号", level="error")
+                    session.close()
+                    continue
+                token = self.login(session, code)
                 if not token:
+                    self.log(f"[{self.nickname}] 登录失败，跳过该账号", level="error")
+                    session.close()
+                    continue
+                self.token = token
+                session.headers['Session-Token'] = token
+                # 校验刚登录的 token（失效则重登一次，仍失败则跳过；全程不落盘）
+                if self.get_balance(session) is None:
+                    self.log(f"[{self.nickname}] 登录态校验失败，尝试重登一次", level="warning")
                     code = self.wechat_code_adapter.get_code(wx_id)
                     if not code:
-                        self.log(f"[{self.nickname}] YYB取码失败，跳过该账号", level="error")
+                        self.log(f"[{self.nickname}] 授权失败，跳过该账号", level="error")
                         session.close()
                         continue
                     token = self.login(session, code)
                     if not token:
-                        self.log(f"[{self.nickname}] 登录失败，跳过该账号", level="error")
+                        self.log(f"[{self.nickname}] 重新登录失败，跳过该账号", level="error")
                         session.close()
                         continue
-                    account_info_list.append({"wx_id": wx_id, "token": token})
-                else:
                     self.token = token
                     session.headers['Session-Token'] = token
-                # 检测token是否有效
-                if self.get_balance(session) is None:
-                    self.remove_account_info(wx_id)
-                    code = self.wechat_code_adapter.get_code(wx_id)
-                    if code:
-                        token = self.login(session, code)
-                        if not token:
-                            self.log(f"[{self.nickname}] 重新登录失败，跳过该账号", level="error")
-                            session.close()
-                            continue
-                        account_info_list.append({"wx_id": wx_id, "token": token})
-                    else:
-                        self.log(f"[{self.nickname}] 授权失败，跳过该账号", level="error")
-                        session.close()
-                        continue
                 # 获取优惠券列表
                 gifts_list = self.get_gifts_list(session)
                 for gift in gifts_list:
@@ -421,9 +364,7 @@ class AutoTask:
                 # 清理session
                 session.close()
                 self.log(f"------ 账号{index} 执行任务结束 ------")
-            # 保存新账号信息
-            if account_info_list:
-                self.save_account_info(account_info_list)
+            # 不落盘：每次运行的 token 均为临时登录获取，不写入本地文件
         except Exception as e:
             self.log(f"【{self.script_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
         finally:

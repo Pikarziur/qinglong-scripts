@@ -5,9 +5,9 @@
 # 接口：/api/session/wxSession/v2（登录）+ /api/user/sign（签到）
 # 青龙环境变量：YYB_SERVER = yyb-go:8000@1  多账号一行一条
 # 新手配置：文件顶部 YYB_ONLY_REFS / SIGN_LNG / SIGN_LAT
-# cron: 1 12,20 * * *
-# 修订：保留 token 缓存，新增「失效自愈」——签到若因 token 过期失败，
-#       清除该账号缓存并强制重新登录后再签一次。
+# cron: 6 9,16 * * *
+# 修订：不缓存 token —— 每次运行都强制重新取码 + 登录，拿全新 token。
+#       旧 token 不落盘、不复用，逻辑更简单，也不存在坏 token 复用问题。
 # ==========================================================
 
 import os, re, time, random, traceback, json
@@ -25,11 +25,9 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.
       "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.75(0x18004b66) NetType/WIFI Language/zh_CN")
 # ========================================
 
-TOKEN_FILE = "cdf_token.json"
 LOGIN_URL       = "https://" + HOST + "/api/session/wxSession/v2"
 SIGN_URL        = "https://" + HOST + "/api/user/sign"
 SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
-SIGN_TEXT_URL   = "https://" + HOST + "/api/user/signText"
 
 # ———————————— 美化小工具 ————————————
 _BAR = "─" * 42
@@ -58,28 +56,49 @@ def today_str():
         time.strftime("%Y-%m-%d"),
     )
 
-# ———————————— 基础组件（和上版一样但更精简） ————————————
-def _base_dir():
-    try:
-        return os.path.dirname(os.path.abspath(__file__))
-    except Exception:
-        return os.getcwd()
+# ———————————— 基础组件 ————————————
+def _common_headers(token=None, page="pages/main/main"):
+    h = {
+        "Host": HOST,
+        "User-Agent": UA,
+        "Referer": ("https://servicewechat.com/" + APP_ID + "/"
+                    + APP_VERSION_PATH + "/page-frame.html"),
+        "pageUrl": page,
+        "cdf-v": CDF_VERSION,
+        "Accept-Encoding": "gzip,compress,br,deflate",
+    }
+    if token:
+        h["x-access-token"] = token
+    return h
 
-def load_tokens():
-    p = os.path.join(_base_dir(), TOKEN_FILE)
+def _parse(resp):
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_tokens(obj):
-    p = os.path.join(_base_dir(), TOKEN_FILE)
-    try:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
+        return resp.json()
     except Exception:
         pass
+    m = re.search(r"\{.*\}", (resp.text or "").strip(), re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+def _ok(jr):
+    """返回 (ok, msg, already)"""
+    if not isinstance(jr, dict):
+        return False, "响应非 JSON", False
+    code = jr.get("code")
+    msg = (jr.get("msg") or "") + " " + (jr.get("message") or "")
+    success = jr.get("success")
+    already = any(k in msg for k in ["已签", "重复", "已经", "already", "repeat", "明天再来", "无需重复"])
+    if already:
+        return True, msg.strip() or "今日已签到", True
+    if success is False:
+        return False, msg.strip() or "success=false", False
+    if code != 1:
+        return False, msg.strip() or ("code=" + str(code)), False
+    return True, msg.strip() or "成功", False
 
 class YYBClient:
     def __init__(self, appid):
@@ -126,56 +145,6 @@ class YYBClient:
         except Exception as e:
             return None, str(e)
 
-def _common_headers(token=None, page="pages/main/main"):
-    h = {
-        "Host": HOST,
-        "User-Agent": UA,
-        "Referer": ("https://servicewechat.com/" + APP_ID + "/"
-                    + APP_VERSION_PATH + "/page-frame.html"),
-        "pageUrl": page,
-        "cdf-v": CDF_VERSION,
-        "Accept-Encoding": "gzip,compress,br,deflate",
-    }
-    if token:
-        h["x-access-token"] = token
-    return h
-
-def _parse(resp):
-    try:
-        return resp.json()
-    except Exception:
-        pass
-    m = re.search(r"\{.*\}", (resp.text or "").strip(), re.S)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except Exception:
-        return None
-
-def _ok(jr):
-    """返回 (ok, msg, already)"""
-    if not isinstance(jr, dict):
-        return False, "响应非 JSON", False
-    code = jr.get("code")
-    msg = (jr.get("msg") or "") + " " + (jr.get("message") or "")
-    success = jr.get("success")
-    already = any(k in msg for k in ["已签", "重复", "已经", "already", "repeat", "明天再来", "无需重复"])
-    if already:
-        return True, msg.strip() or "今日已签到", True
-    if success is False:
-        return False, msg.strip() or "success=false", False
-    if code != 1:
-        return False, msg.strip() or ("code=" + str(code)), False
-    return True, msg.strip() or "成功", False
-
-# 判断「服务端文案」是否指向 token 失效（用于签到失败时的自愈判定）
-def _is_token_expired(msg):
-    if not msg:
-        return False
-    low = msg.lower()
-    return any(k in low for k in ["login", "token", "auth", "过期", "未登录", "失效", "expire"])
-
 def login_with_code(wx_code):
     h = _common_headers(token=None, page="pages/main/main")
     h["content-type"] = "application/x-www-form-urlencoded"
@@ -194,21 +163,6 @@ def login_with_code(wx_code):
         return None, "登录响应里没拿到 token"
     return token, None
 
-def token_still_good(token):
-    h = _common_headers(token, page="packages/game/signin/signin")
-    h["content-type"] = "application/x-www-form-urlencoded"
-    try:
-        r = requests.post(SIGN_TEXT_URL, data="next=0", headers=h, timeout=(10, 25))
-        jr = _parse(r)
-        ok, msg, _ = _ok(jr)
-        if ok:
-            return True
-        if _is_token_expired(msg):
-            return False
-        return True
-    except Exception:
-        return False
-
 def do_sign(token):
     h = _common_headers(token, page="packages/game/signin/signin")
     h["content-type"] = "application/x-www-form-urlencoded"
@@ -219,7 +173,7 @@ def do_sign(token):
         r = requests.post(SIGN_URL, data=data, headers=h, timeout=(10, 30))
         jr = _parse(r)
     except Exception as e:
-        return "异常", "请求异常: " + str(e), extra_lines, False
+        return "异常", "请求异常: " + str(e), extra_lines
     ok, msg, already = _ok(jr)
     if already:
         status = "已签"
@@ -234,9 +188,7 @@ def do_sign(token):
             if d.get(k) not in (None, "", []):
                 extra_lines.append(("奖励" if k in ("points","score","prize","giftName","balance") else "进度")
                                    + " · " + k + ": " + str(d[k]))
-    # 仅当「失败/异常」且文案指向 token 失效时，标记为可自愈
-    expired = (status in ("失败", "异常")) and _is_token_expired(msg)
-    return status, msg, extra_lines, expired
+    return status, msg, extra_lines
 
 def get_today_done(token):
     """返回 (today_done, signText 或 None)；拿不到返回 (None, None)"""
@@ -256,27 +208,15 @@ def get_today_done(token):
             return rec.get("signIn"), rec.get("signText")
     return None, None
 
-def ensure_token(server, ref, force=False):
-    """返回 (token, 状态说明)；失败返回 (None, 原因)。
-    force=True 时跳过缓存探活，强制重新取码登录（用于失效自愈）。"""
-    key = server.rsplit("://", 1)[-1] + "@" + str(ref)
-    cache = load_tokens()
-    old = cache.get(key) if isinstance(cache.get(key), dict) else {}
-    token = old.get("token") if old else None
-    if not force and token and token_still_good(token):
-        return token, "缓存"
+def ensure_token(server, ref):
+    """每次都强制重新取码 + 登录，返回 (token, 状态说明)；失败返回 (None, 原因)。"""
     code, err = YYBClient(APP_ID).get_code(server, ref)
     if not code:
         return None, "YYB取码失败: " + str(err)
     token, err = login_with_code(code)
     if not token:
         return None, "登录失败: " + str(err)
-    cache.setdefault(key, {})
-    cache[key]["token"] = token
-    cache[key]["ref"] = ref
-    cache[key]["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    save_tokens(cache)
-    return token, ("强制新登录" if force else "新登录")
+    return token, "新登录"
 
 def _status_emoji_and_tag(status):
     return {
@@ -295,24 +235,14 @@ def run_account(server, ref):
         print("│ · 原因: " + str(status_msg))
         print()
         return False
-    # 登录状态一行简注（一般是缓存/新登录，不展开避免啰嗦）
+    # 登录状态一行简注（每次都是新登录）
     print("├ 登录态 · " + status_msg)
     t_short, t_long, _ = today_str()
     before, txt = get_today_done(token)
     sym1 = "✅" if before else "⭕"
     log("签到前 · 今日(" + t_short + ") " + sym1
         + ("  signText=" + str(txt) if txt is not None else ""))
-    status, msg, extra, expired = do_sign(token)
-    # —— 失效自愈：签到因 token 过期失败时，清缓存重登并重试一次 ——
-    if expired:
-        print("│ 🔄 检测到 token 失效，清缓存重新登录后重试…")
-        token2, sm2 = ensure_token(server, ref, force=True)
-        if token2:
-            token = token2
-            status, msg, extra, expired = do_sign(token2)
-            print("│    ↳ 重试登录态 · " + sm2)
-        else:
-            print("│    ↳ 重试登录失败: " + str(sm2))
+    status, msg, extra = do_sign(token)
     emoji, tag = _status_emoji_and_tag(status)
     print("│ " + emoji + " " + tag + "  ──  服务端 msg: " + (msg or ""))
     for line in extra:
