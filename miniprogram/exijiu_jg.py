@@ -5,7 +5,7 @@
 # cron: 55 0,4,8,12,16,20 * * *
 
 
-习酒花园（微信协议版）- 统一合并版本
+习酒 酒谷
 
 入口: 微信小程序 习酒 (wx489f950decfeb93e)
 后端: apimallwm.exijiu.com / xcx.exijiu.com
