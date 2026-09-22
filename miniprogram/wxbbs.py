@@ -32,6 +32,14 @@ MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，Tr
 NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no") # 是否推送日志，默认开启，填 0/false/off/no 关闭
 YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 
+# 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
+# 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它
+_NOTIFY_DIR = os.path.dirname(os.path.abspath(__file__))
+if not os.path.exists(os.path.join(_NOTIFY_DIR, "notify.py")):
+    _NOTIFY_DIR = os.path.dirname(_NOTIFY_DIR)   # 脚本同目录没有 → 用仓库根那份
+if _NOTIFY_DIR not in sys.path:
+    sys.path.insert(0, _NOTIFY_DIR)
+
 class YYBGoEnhancedAdapter:
     """YYB-Go-Enhanced 的 wx.login code 客户端。"""
 
@@ -295,11 +303,11 @@ class AutoTask:
     def load_notify(self):
         """
         加载青龙官方 notify 模块。
-        优先使用脚本同目录的 notify.py；不存在时依次尝试 CDN 镜像→官方源下载。
+        使用仓库根共享的 notify.py（脚本同目录有旧副本时优先用它，向后兼容）；
+        不存在时依次尝试 CDN 镜像→官方源→ghproxy 下载。
         任何失败都不抛异常（避免在 finally 里报错盖掉真正的业务异常），返回 None。
         """
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        notify_path = os.path.join(script_dir, "notify.py")
+        notify_path = os.path.join(_NOTIFY_DIR, "notify.py")
         if not os.path.exists(notify_path):
             # 国内直连 raw.githubusercontent.com 常被重置，故 CDN 镜像优先
             urls = [
@@ -320,8 +328,6 @@ class AutoTask:
         if not os.path.exists(notify_path):
             return None
         try:
-            if script_dir not in sys.path:
-                sys.path.insert(0, script_dir)
             import notify
             return notify
         except Exception as e:

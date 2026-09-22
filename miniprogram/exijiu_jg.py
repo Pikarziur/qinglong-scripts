@@ -1,5 +1,5 @@
 ﻿#  修改脚本 563行的配置信息
-#  脚本同文件夹放青龙面板自带的notify.py推送脚本
+#  通知推送：仓库根目录放一份青龙自带的 notify.py，全部脚本共用（缺失时脚本会自动下载）
 """
 # name: 习酒酒谷 - 互动
 # cron: 55 0,4,8,12,16,20 * * *
@@ -71,22 +71,30 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s │ %(levelname)-7s │ %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
+# 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
+# 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它
+_NOTIFY_DIR = os.path.dirname(os.path.abspath(__file__))
+if not os.path.exists(os.path.join(_NOTIFY_DIR, "notify.py")):
+    _NOTIFY_DIR = os.path.dirname(_NOTIFY_DIR)   # 脚本同目录没有 → 用仓库根那份
+if _NOTIFY_DIR not in sys.path:
+    sys.path.insert(0, _NOTIFY_DIR)
+
+
 def _ensure_notify():
-    """确保脚本同目录有 notify.py（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
+    """确保共享的 notify.py 就位（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
     try:
         import notify  # noqa: F401
         return True
     except Exception:
         pass
-    target = Path(__file__).resolve().parent / "notify.py"
+    target = Path(_NOTIFY_DIR) / "notify.py"
     for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
-                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
+                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
+                 "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
         try:
             _r = requests.get(_url, timeout=15)
             if _r.status_code == 200 and "def send" in _r.text:
                 target.write_bytes(_r.content)
-                if str(target.parent) not in sys.path:
-                    sys.path.insert(0, str(target.parent))
                 log.info("已自愈下载 notify.py（%s）" % _url.split("/")[2])
                 return True
         except Exception as e:

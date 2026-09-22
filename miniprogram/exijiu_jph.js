@@ -440,11 +440,13 @@ function addNotifyStr(str, is_log = true) {
     msg += str + '\n';
 }
 
-// 通知模块：优先用脚本同目录的 notify.js（青龙官方），缺失时从 CDN 自愈下载一份
+// 通知模块：共享 notify.js 放在仓库根（脚本上一级），5 个脚本共用一份；缺失时从 CDN 自愈下载
 async function loadNotifyModule() {
     const fs = require('fs');
     const path = require('path');
-    const p = path.join(__dirname, 'notify.js');
+    // 优先仓库根共享副本，兼容旧布局的脚本同目录副本
+    const cands = [path.join(__dirname, '..', 'notify.js'), path.join(__dirname, 'notify.js')];
+    const p = cands.find(f => fs.existsSync(f)) || cands[0];
     if (!fs.existsSync(p)) {
         const urls = [
             'https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.js',
