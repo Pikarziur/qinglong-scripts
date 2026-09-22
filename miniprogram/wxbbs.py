@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 MULTI_ACCOUNT_SPLIT = ["\n", "@"] # 分隔符列表
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
 NOTIFY = os.getenv("LY_NOTIFY") or False # 是否推送日志，默认不推送，True则推送
-YYB_ONLY_REFS = ["2"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 
 class YYBGoEnhancedAdapter:
     """YYB-Go-Enhanced 的 wx.login code 客户端。"""
