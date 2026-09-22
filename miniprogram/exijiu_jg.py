@@ -76,7 +76,7 @@ def send_notify(title, content):
         from notify import send as _notify_send
         _notify_send(title, content)
     except ImportError:
-        log.warning("未找到notify.py，跳过推送")
+        log.info("未安装 notify.py，跳过推送")
     except Exception as e:
         log.warning(f"推送失败: {e}")
 
@@ -991,7 +991,7 @@ def run(client, do_daily=True):
         sorghum=int(info.get("sorghum") or 0), wheat=int(info.get("wheat") or 0),
         wine_yeast=int(info.get("wine_yeast") or 0), active_plots=len(active),
     )
-    log.info("   🌾 种植策略: %s（酒曲 %s 块，已解锁 %d 块地）" % (CROP_TYPE.get(seed_type), info.get("wine_yest"), len(active)))
+    log.info("   🌾 种植策略: %s（酒曲 %s 块，已解锁 %d 块地）" % (CROP_TYPE.get(seed_type), info.get("wine_yeast"), len(active)))
 
     water = int(info.get("water") or 0); manure = int(info.get("manure") or 0)
     for plot in plots:
@@ -1117,7 +1117,7 @@ def run(client, do_daily=True):
         info = client.member_info() or info
         sorghum = int(info.get("sorghum") or 0); wheat = int(info.get("wheat") or 0)
         wine_yeast = int(info.get("wine_yeast") or 0); wine_vol = int(info.get("wine") or 0)
-        log.info("   共 %d 个酒坛  │  🌾高粱: %s斤  🌾小麦: %s斤  🍺酒曲: %s块  🍶酒: %sL" % (len(wines), sorghum, wheat, wine_yeast, wine_vol))
+        log.info("   共 %d 个酒坛" % len(wines))
         if not wines:
             can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
             if can_put >= 200:
@@ -1143,7 +1143,7 @@ def run(client, do_daily=True):
                 time.sleep(1); can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
                 if can_put >= 200:
                     log.info("      🌾 立即投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
-                    try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功: %s" % r); sorghum -= can_put; wine_yeast -= can_put // 200
+                    try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
                     except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
                 else:
@@ -1163,7 +1163,7 @@ def run(client, do_daily=True):
                     time.sleep(1); can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
                     if can_put >= 200:
                         log.info("      🌾 立即投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
-                        try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功: %s" % r); sorghum -= can_put; wine_yeast -= can_put // 200
+                        try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
                         except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
                         time.sleep(1)
                     else:
@@ -1181,7 +1181,7 @@ def run(client, do_daily=True):
                 can_put = min(max_by_sorghum, max_by_yeast)
                 if can_put >= 200:
                     log.info("   🍶 酒坛 %s [空坛] → 投粮 %s 斤高粱（消耗酒曲 %s 块）" % (wid, can_put, can_put // 200))
-                    try: r = client.discharge_grain({"id": wid, "volumn": can_put}); log.info("      ✅ 投粮成功: %s" % r); sorghum -= can_put; wine_yeast -= can_put // 200
+                    try: r = client.discharge_grain({"id": wid, "volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
                     except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
                 else:
@@ -1195,12 +1195,12 @@ def run(client, do_daily=True):
             put_wheat = min((wheat // 100) * 100, 1000)
             log.info("🍺 制曲：%s 斤小麦 → 预计 +%s 块酒曲" % (put_wheat, put_wheat // 100 * 10))
             try:
-                r = client.make_yeast({"volumn": put_wheat}); log.info("   ✅ 制曲成功: %s" % r)
+                r = client.make_yeast({"volumn": put_wheat}); log.info("   ✅ 制曲成功：-%s 斤小麦 → +%s 块酒曲" % (put_wheat, put_wheat // 100 * 10))
                 info2 = client.member_info() or {}; sorghum2 = int(info2.get("sorghum") or 0); wine_yeast2 = int(info2.get("wine_yeast") or 0)
                 can_put = min((sorghum2 // 200) * 200, 5000, wine_yeast2 * 200)
                 if can_put >= 200:
                     log.info("   🌾 制曲后投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
-                    try: r2 = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功: %s" % r2)
+                    try: r2 = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200))
                     except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
             except RuntimeError as e: log.warning("   ❌ 制曲失败：%s" % e)
@@ -1225,7 +1225,7 @@ def run(client, do_daily=True):
             log.info("   共 %d 道题，待答 %d 道" % (len(questions), len(todo)))
             for q in todo:
                 qid, answer = q.get("id"), q.get("answer", ""); log.info("   ❓ [%s] %s  →  %s" % (qid, q.get("title", "")[:25], answer))
-                try: time.sleep(3); r = client.answer_results(qid, answer); log.info("      ✅ 答题成功: %s" % r)
+                try: time.sleep(3); r = client.answer_results(qid, answer); log.info("      ✅ 答题成功：💧+%s 🌿+%s" % ((r or {}).get("water", 0), (r or {}).get("manure", 0)))
                 except RuntimeError as e: log.warning("      ❌ 答题失败：%s" % e)
                 time.sleep(1)
         except RuntimeError as e: log.warning("   ❌ 获取题目失败：%s" % e)
@@ -1267,7 +1267,7 @@ def run(client, do_daily=True):
                             if min_harvest_secs is None or w_remaining < min_harvest_secs: min_harvest_secs = w_remaining
                         except Exception: pass
         except Exception: pass
-        if min_harvest_secs is not None: log.info("⏱️  下次最早可操作时间: %s" % fmt_remaining_from_seconds(min_harvest_secs))
+        if min_harvest_secs is not None: log.info("⏱️  最近成熟（地块/酒坛）: %s" % fmt_remaining_from_seconds(min_harvest_secs))
     except Exception as e: log.warning("⚠️  重新获取地块状态失败: %s" % e)
 
     # ── 任务汇总 ──
@@ -1459,7 +1459,7 @@ if __name__ == "__main__":
     if not accounts:
         accounts = parse_yyb_server_accounts(os.getenv("YYB_SERVER", ""))
         if accounts:
-            print("ℹ️ 未配置 WX_ID/WXIDXJ，已从 YYB_SERVER 读取 %d 个账号" % len(accounts))
+            log.info("🔑 未配置 WX_ID/WXIDXJ，已从 YYB_SERVER 读取 %d 个账号" % len(accounts))
     if not accounts:
         print("❌ 未找到账号，请设置 WX_ID、WXIDXJ 或 YYB_SERVER")
         sys.exit(1)
