@@ -4,8 +4,14 @@
 # name:  中免会员 - 签到
 # 接口：/api/session/wxSession/v2（登录）+ /api/user/sign（签到）
 # 青龙环境变量：YYB_SERVER = yyb-go:8000@1  多账号一行一条
+#               CDF_NOTIFY  通知开关，默认开启；填 0/false/off/no 关闭
 # 新手配置：文件顶部 YYB_ONLY_REFS / SIGN_LNG / SIGN_LAT
 # cron: 6 9,16 * * *
+#
+# 通知推送：共用仓库根目录的 notify.py（青龙面板自带那份），见下方 send_notify()。
+#   注意：notify 采用「延迟导入」——import 写在 _ensure_notify() / send_notify() 内部，
+#   顶部 import 区看不到它。这样 notify.py 缺失时脚本仍能跑完，只是不推送，不会 ImportError 挂掉。
+#   仓库根没有 notify.py 时会自动从 CDN 下载（三源回退），无需手工补文件。
 # 修订：不缓存 token —— 每次运行都强制重新取码 + 登录，拿全新 token。
 #       旧 token 不落盘、不复用，逻辑更简单，也不存在坏 token 复用问题。
 # ==========================================================
