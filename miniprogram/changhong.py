@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 name: 长虹智慧家居签到
-cron: 18 8 * * *
+# cron: 6 9,16 * * *
 依赖: requests；通知使用青龙自带 notify.py。
 YYB_SERVER: 服务地址@账号ID或OpenID，多账号换行；可直接复用现有变量。
 CH_AGGR_ID: 可选，手动指定签到活动ID；默认从首页“签到”菜单发现。
