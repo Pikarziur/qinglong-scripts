@@ -1,6 +1,6 @@
 ﻿/*
- * name:福利吧 - 签到
- * 35 5 * * * 
+ * name：福利吧 - 签到
+ * cron：35 5 * * * 
  * 使用方法：
  * 青龙面板 → 环境变量 → 名称 wnflb2023_cookie，值粘贴 Cookie 或直接写在下方 DEFAULT_COOKIE 中
 
