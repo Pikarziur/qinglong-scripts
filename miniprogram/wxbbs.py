@@ -1,16 +1,20 @@
-"""
-name: 微信笔笔省 - 提现额度
-入口: 微信小程序 (https://a.c1ns.cn/X3ucP)
-功能: 领券、查询
-变量: YYB_SERVER (YYB-Go-Enhanced地址@账号ref，多个账号换行分割)
-        PROXY_API_URL (代理api，返回一条txt文本，内容为代理ip:端口)
-        LY_NOTIFY (通知开关，默认开启；填 0/false/off/no 关闭)
-# cron: 21 7,16 * * *
-
-------------更新日志------------
-2025/8/21   V1.0    初始化脚本
-2026/8/7    V2.0    适配YYB-Go-Enhanced及青龙单文件运行
-"""
+# =========================================================
+# name: 微信笔笔省 - 提现额度
+# cron: 50 7,16 * * *
+# =========================================================
+#
+# 任务流程：
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+#   3. 用 code 完成登录（jscode → session_token）
+#   4. 查询余额 / 领券 / 提现额度等任务，输出汇总并发送通知
+# 可控参数：
+#   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
+#   YYB_ONLY_REFS   白名单常量。默认 ["1"]（只跑 ref=1）；留空 [] 跑全部
+#   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
+#   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
+#
+# =========================================================
 
 YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 
@@ -436,6 +440,10 @@ class AutoTask:
                         else:
                             title = f"{self.script_name} 无账号可执行"
                         content = "\n".join(push_lines) or "无账号可执行，请检查 YYB_SERVER / YYB_ONLY_REFS"
+                        # 控制台执行汇总
+                        self.log(f"──── {self.script_name} 执行汇总 ────")
+                        self.log(f"账号 {total_accounts}｜成功 {ok_cnt}｜失败 {total_accounts - ok_cnt}")
+                        self.log("────────────────────────────")
                         notify.send(title, content)
                         self.log(f"[通知] 推送已提交：{title}")
                 except Exception as e:

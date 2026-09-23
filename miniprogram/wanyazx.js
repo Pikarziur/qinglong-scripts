@@ -1,13 +1,28 @@
 /*
 # name: 丸丫甄选
-# cron: 41 7,16 * * *
+# cron: 44 7,16 * * *
 */
 
-// YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 sendNotify。
+// ────────────────────────────────────────────
+// 任务流程：
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+//   3. 用 code 走有赞 authorize 静默登录，换取 session
+//   4. 查询签到活动(check-in-info)，执行签到(checkinV2)，并查询积分
+//   5. 输出汇总（含今日领取 / 总积分）并由 $.done 发送通知
+// 可控参数：
+//   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
+//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+// ────────────────────────────────────────────
+
+const YYB_ONLY_REFS = [];  // 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+
 // ===== YYB-Go-Enhanced + QingLong standalone adapter =====
 function _yybRoutes() {
-    const routes = String(process.env.YYB_SERVER || '').split(/\r?\n/)
-        .map(v => v.trim()).filter(Boolean).map((line, index) => {
+    const onlyRefs = (YYB_ONLY_REFS || []).map(r => _yybCleanRef(String(r)));
+    const routes = String(process.env.YYB_SERVER || '')
+        .split(/[\s&]+/).map(v => v.trim()).filter(Boolean)
+        .map((line, index) => {
             const at = line.lastIndexOf('@');
             if (at <= 0 || at >= line.length - 1) {
                 throw new Error(`YYB_SERVER 第 ${index + 1} 行格式错误，应为 地址@账号标识`);
@@ -16,7 +31,12 @@ function _yybRoutes() {
             if (!/^https?:\/\//i.test(server)) server = `http://${server}`;
             return { server, ref: line.slice(at + 1).trim() };
         });
-    if (!routes.length) throw new Error('未配置 YYB_SERVER（每行：地址@账号标识）');
+    if (!routes.length) throw new Error('未配置 YYB_SERVER（地址@账号标识，支持换行/空格/& 分隔）');
+    if (onlyRefs.length) {
+        const filtered = routes.filter(x => onlyRefs.includes(_yybCleanRef(x.ref)));
+        console.log(`[账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${routes.length} 个账号`);
+        return filtered;
+    }
     return routes;
 }
 
@@ -215,6 +235,12 @@ function short(value, max = 200) {
     return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function parsePoints(text = "") {
+    const nums = String(text).match(/\d+/g);
+    if (!nums) return 0;
+    return nums.reduce((s, n) => s + Number(n), 0);
+}
+
 function readTokenCache() {
     try {
         if (!fs.existsSync(TOKEN_CACHE_FILE)) return {};
@@ -270,6 +296,9 @@ class Task {
         this.isShow = false;
         this.signedBefore = false;
         this.continuesDay = 0;
+        this.todayStatus = "未执行";
+        this.todayEarned = 0;
+        this.totalPoints = null;
     }
 
     async run() {
@@ -401,6 +430,7 @@ class Task {
                 `账号[${this.index}] 登录成功: ${data.nick_name || data.nickName || ""} ${maskPhone(data.mobile) || ""}`
             );
         } catch (e) {
+            this.todayStatus = "登录失败";
             $.log(`账号[${this.index}] 登录失败: ${e.message || e}`);
         }
     }
@@ -437,6 +467,10 @@ class Task {
             // 幂等预检：服务端明确 isCheckin=true 表示今日已签，跳过提交
             this.signedBefore = !!act?.isCheckin;
             this.continuesDay = Number(act?.continuesDay || 0) || 0;
+            if (this.signedBefore) {
+                this.todayStatus = "今日已签";
+                this.todayEarned = parsePoints(todayReward);
+            }
             const todayReward = (act?.dailyRewards || []).map(x => x?.desc).filter(Boolean).join("、");
             const milestones = (act?.rewards || [])
                 .map(x => `${x?.duration || "?"}天/${x?.prize?.[0]?.desc?.middle ?? "?"}${x?.prize?.[0]?.desc?.right || ""}`)
@@ -471,13 +505,17 @@ class Task {
                 .map((item) => item?.infos?.title)
                 .filter(Boolean)
                 .join(", ");
+            this.todayStatus = "签到成功";
+            this.todayEarned = parsePoints(awards);
             $.log(`账号[${this.index}] 签到成功: ${data?.desc || ""}${awards ? ` ${awards}` : ""}`);
         } catch (e) {
             const message = String(e.message || e);
             if (isRepeatCheckin(message)) {
+                this.todayStatus = "今日已签";
                 $.log(`账号[${this.index}] 今日已签到`);
                 return;
             }
+            this.todayStatus = "签到失败";
             $.log(`账号[${this.index}] 签到失败: ${message}`);
             if (isTokenError(message)) this.removeCachedToken();
         }
@@ -489,6 +527,7 @@ class Task {
             const data = await this.request({ path: "/wscump/integral/user_points.json" });
             const pts = data?.current_points ?? data?.real_points;
             if (pts !== undefined && pts !== null) {
+                this.totalPoints = Number(pts);
                 $.log(`账号[${this.index}] 当前积分: ${pts}`);
                 return;
             }
@@ -499,12 +538,37 @@ class Task {
     }
 }
 
+function printSummary(results) {
+    if (!results || !results.length) return;
+    $.log("");
+    $.log("========== 丸丫甄选 今日签到汇总 ==========");
+    let success = 0, already = 0, fail = 0, earnedTotal = 0;
+    for (const t of results) {
+        const phone = t.userInfo?.mobile ? maskPhone(t.userInfo.mobile) : "";
+        const tag = phone ? ` (${phone})` : "";
+        const earned = t.todayEarned > 0 ? ` 今日+${t.todayEarned}积分` : "";
+        const total = (t.totalPoints !== null && t.totalPoints !== undefined) ? ` 总积分${t.totalPoints}` : "";
+        $.log(`账号${t.index}${tag} ${t.todayStatus}${earned}${total}`);
+        if (t.todayStatus === "签到成功") success++;
+        else if (t.todayStatus === "今日已签") already++;
+        else fail++;
+        earnedTotal += (t.todayEarned || 0);
+    }
+    $.log("------------------------------------------");
+    $.log(`共 ${results.length} 个账号｜签到成功 ${success}｜今日已签 ${already}｜失败 ${fail}｜今日累计 +${earnedTotal} 积分`);
+    $.log("==========================================");
+}
+
 !(async () => {
+    const results = [];
     await $.checkEnv(ckName);
     for (const openid of $.userList) {
-        await new Task(openid).run();
+        const task = new Task(openid);
+        await task.run();
+        results.push(task);
         await $.wait(800);
     }
+    printSummary(results);
 })()
     .catch((e) => $.log(e.message || e))
     .finally(() => $.done());

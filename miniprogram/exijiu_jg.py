@@ -1,43 +1,34 @@
-﻿#  修改脚本 563行的配置信息
+﻿
 #  通知推送：仓库根目录放一份青龙自带的 notify.py，全部脚本共用（缺失时脚本会自动下载）
-"""
+# =========================================================
 # name: 习酒酒谷 - 互动
 # cron: 55 0,4,8,12,16,20 * * *
+# =========================================================
 
-
-习酒 酒谷
-
-入口: 微信小程序 习酒 (wx489f950decfeb93e)
-后端: apimallwm.exijiu.com / xcx.exijiu.com
-功能: 自动签到、种高粱、酿酒、答题、抽奖、制曲
-
-
-环境变量配置说明：
-========================================
-必填：
-  YYB_SERVER      YYB-Go-Enhanced 地址@账号ref，多账号一行一个
-
-选填：
-  WX_ID/WXIDXJ    只运行指定账号，格式：ref#备注，多账号换行或 & 分隔
-                  未配置时自动读取 YYB_SERVER 中的全部账号ref（受顶部 YYB_ONLY_REFS 过滤）
-  WECHAT_SERVER   旧微信协议服务回退地址
-                  默认：http://127.0.0.1:8011
-  OCR_SERVER      滑块验证码识别服务地址（ddddocr）
-                  默认：http://localhost:7777
-                  不设则遇到滑块验证时报错
-  GARDEN_SEED_TYPE  播种作物类型
-                  0 = 自动判断（默认）：酒曲充足种高粱，不足种小麦
-                  1 = 强制种高粱
-                  2 = 强制种小麦
-  GARDEN_AUTO_EXCHANGE  自动兑换积分开关
-                  0 = 关闭（默认）
-                  1 = 开启，有酒时自动兑换积分（1L=1积分）
-  GARDEN_AUTO_WINE  自动酿酒开关
-                  0 = 关闭酿酒（不投粮、不制酒、不处理酒坛）
-                  1 = 开启酿酒（默认）
-
-
-"""
+# =========================================================
+#
+# 任务流程：
+#   1. 读取账号：优先 WX_ID/WXIDXJ；否则 YYB_SERVER + YYB_ONLY_REFS 经 YYBGO
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 code，必要时用 OCR_SERVER 识别滑块
+#   3. auto_login_with_retry 登录（失败自动重试，默认 3 次）
+#   4. 执行每日任务：签到 / 分享 / 浇水 / 种酒 / 收酒（幂等防重复）
+#   5. token 失效时当场重登重试；输出汇总与本月酿酒合计并发送通知
+# 可控参数：
+#   YYB_SERVER      必填（无 WX_ID 时）。格式「地址@ref#备注」，换行分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   WX_ID/WXIDXJ    可选。只跑指定账号，格式 ref#备注，换行/& 分隔
+#   WECHAT_SERVER    可选。旧协议回退地址，默认 http://127.0.0.1:8011
+#   OCR_SERVER       可选。滑块识别服务，默认 http://localhost:7777
+#   GARDEN_SEED_TYPE 播种类型：0 自动(默认)/1 高粱/2 小麦
+#   GARDEN_AUTO_EXCHANGE  自动兑积分：0 关(默认)/1 开
+#   GARDEN_AUTO_WINE 自动酿酒：0 关/1 开(默认)
+#   GARDEN_MONTH_BASE_L  本月酿酒起点(L)，默认 0
+#   GARDEN_WATER_WINDOW  浇水有效窗口(秒)，默认 7200
+#   GARDEN_ENCRYPT_KEY/IV  加密密钥/向量（高级，按需填）
+#   QL_HOST/PORT/USERNAME/PASSWORD/CLIENT_ID/CLIENT_SECRET  可选。青龙面板地址，用于更新定时
+#   LOGIN_MAX_RETRY  登录重试次数，默认 3
+#
+# =========================================================
 
 # ============== 新手配置区 ==============
 YYB_ONLY_REFS = []  # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
@@ -1606,6 +1597,11 @@ if __name__ == "__main__":
                     content += "\n\n📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed)
         except Exception:
             pass
+        # 控制台执行汇总
+        print("=" * 52)
+        print("🌿 习酒花园 执行汇总｜账号 %d｜成功 %d｜失败 %d" % (
+            len(accounts), _ok_cnt, len(accounts) - _ok_cnt))
+        print("=" * 52)
         send_notify(_push_title, content)
 
     # ── 计算下次执行时间 ──

@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # =========================================================
 # name:  中免会员 - 签到
-# 接口：/api/session/wxSession/v2（登录）+ /api/user/sign（签到）
-# 青龙环境变量：YYB_SERVER = yyb-go:8000@1  多账号一行一条
-#               CDF_NOTIFY  通知开关，默认开启；填 0/false/off/no 关闭
-# 新手配置：文件顶部 YYB_ONLY_REFS / SIGN_LNG / SIGN_LAT
 # cron: 0 7,16 * * *
+# =========================================================
 #
-# 通知推送：共用仓库根目录的 notify.py（青龙面板自带那份），见下方 send_notify()。
-#   注意：notify 采用「延迟导入」——import 写在 _ensure_notify() / send_notify() 内部，
-#   顶部 import 区看不到它。这样 notify.py 缺失时脚本仍能跑完，只是不推送，不会 ImportError 挂掉。
-#   仓库根没有 notify.py 时会自动从 CDN 下载（三源回退），无需手工补文件。
-# 修订：不缓存 token —— 每次运行都强制重新取码 + 登录，拿全新 token。
-#       旧 token 不落盘、不复用，逻辑更简单，也不存在坏 token 复用问题。
-# ==========================================================
+# 任务流程：
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取每个账号的 wx.login code
+#   3. 用 code 请求登录接口换取会员 token（每次运行强制重新登录，不落盘）
+#   4. 调用签到接口完成每日签到，并查询今日是否已签 / 连续签到天数
+# 可控参数：
+#   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行 / 空格 / & 分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   CDF_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
+#
+# =========================================================
 
-YYB_ONLY_REFS = ["1", "2"]   # 填上前两个账号的 ref 值
+YYB_ONLY_REFS = []   # 填上前两个账号的 ref 值
 
 import os, re, sys, time, random, traceback, json
 import requests
@@ -359,6 +359,7 @@ def main():
             time.sleep(wait)
 
     # ══════════ 底部结果盒 ══════════
+    print("──── 中免会员 执行汇总 ────")
     print("╔" + ("═" * 42) + "╗")
     ok_rate = str(success) + " / " + str(total)
     if success == total:

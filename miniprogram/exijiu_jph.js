@@ -1,18 +1,21 @@
 /*
 # name: 习酒君品荟 - 签到
-
-变量：
-  YYB_SERVER    YYB-Go-Enhanced 地址@账号标识，多账号一行一个，必须配置
-                示例：yyb-go:8000@openid
-                过滤哪些 ref 由文件顶部 YYB_ONLY_REFS 控制，留空 [] = 跑全部
-
-# cron: 11 7,16 * * *
-
-
-
-可选：
-  JPH_NOTIFY     通知开关，默认 1；填 0 关闭 sendNotify
+# cron: 18 7,16 * * *
 */
+
+// ────────────────────────────────────────────
+// 任务流程：
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+//   3. 完成签到（打卡 / 新人礼等）任务
+//   4. 输出账号结果并发送精简摘要通知
+// 可控参数：
+//   YYB_SERVER      必填。格式「地址@ref#备注」，换行分隔
+//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+//   JPH_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
+//   OCR_SERVER       可选。滑块识别服务，默认 http://ocr.fj.us.ci
+// ────────────────────────────────────────────
+
 // 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 const YYB_ONLY_REFS = [];
 
@@ -155,6 +158,7 @@ function parseYybGoEntry(rawValue) {
             await getpoints(xj_token);
             await $await(10000)
         }
+        log('──── 习酒 执行汇总 ────');
         await SendMsg(msg);
     }
 })()

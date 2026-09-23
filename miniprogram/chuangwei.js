@@ -1,21 +1,23 @@
 #!/usr/bin/env node
-// name:创维小程序
-/**
- * 创维小程序
- * cron: 31 7,16 * * *
- *
- * 流程：
- * YYB_SERVER -> /wxapp/getCode -> /v2/user/exchange -> ticket -> /v2/user/signin -> Authorization
- * -> 固定5个任务：/userScoreStatusInfo + /v1/complete-task/{taskCode}
- * -> 额外签到（兑吧连续签到）：index-nav(register) -> duiba-nologin -> autoLogin -> doSign
- *
- * 环境变量：
- * - YYB_SERVER              必填；YYB-Go-Enhanced地址@账号标识，多账号每行一条
-* - CHUANGW_APPID           默认 wxff438d3c60c63fb6
- * - CHUANGW_APP_PATH        默认 /pages/login/login
- * - CHUANGW_RUN_TASKS       默认1，0=只登录拿token
- * - CHUANGW_NOTIFY          默认1，0=关闭青龙 notify.py 汇总通知
- */
+/*
+# name: 创维小程序
+# cron: 12 7,16 * * *
+*/
+
+// ────────────────────────────────────────────
+// 任务流程：
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+//   3. 登录创维小程序，依次执行固定任务（共 5 个）
+//   4. 输出汇总并发送通知（未注册创维的账号自动跳过）
+// 可控参数：
+//   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
+//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+//   CHUANGW_APPID / APP_VERSION / SDK_VERSION / APP_PATH / APP_SYSTEM / APP_MODEL
+//                  可选。小程序设备指纹参数，不填用内置默认（iPhone 15 Pro Max / iOS 26.1）
+//   CHUANGW_RUN_TASKS  任务总开关，默认 1（开）；填 0 跳过所有任务只登录
+//   CHUANGW_NOTIFY  通知开关，默认开启；填 0 关闭
+// ────────────────────────────────────────────
 
 'use strict';
 
@@ -23,6 +25,8 @@ const crypto = require('crypto');
 const vm = require('vm');
 const path = require('path');
 const { spawnSync } = require('child_process');
+
+const YYB_ONLY_REFS = [];  // 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
 
 const ENV_NAME = 'chuangw';
 const UC_API = 'https://uc-api.skyallhere.com/miniprogram/api';
@@ -70,8 +74,9 @@ function normalizeServer(raw) {
 }
 
 function parseAccounts(raw) {
+  const onlyRefs = (YYB_ONLY_REFS || []).map(r => String(r).trim());
   const accounts = [];
-  String(raw || '').split(/\r?\n/).forEach((line, index) => {
+  String(raw || '').split(/[\s&]+/).forEach((line, index) => {
     const value = line.trim();
     if (!value) return;
     const at = value.lastIndexOf('@');
@@ -86,6 +91,11 @@ function parseAccounts(raw) {
     if (!server || !ref) throw new Error(`YYB_SERVER第${index + 1}行地址或账号标识为空`);
     accounts.push({ server, ref, note });
   });
+  if (onlyRefs.length) {
+    const filtered = accounts.filter(a => onlyRefs.includes(a.ref));
+    console.log(`[账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${accounts.length} 个账号`);
+    return filtered;
+  }
   return accounts;
 }
 
@@ -903,6 +913,7 @@ sys.exit(2)
   hr('═');
   console.log(`🎉 全部账号处理完成：成功 ${accounts.length - failed - skipped}，跳过 ${skipped}，失败 ${failed}`);
   hr('═');
+  console.log('──── 创维 执行汇总 ────');
   sendQingLongNotify('创维小程序', [
     `📊 成功 ${accounts.length - failed - skipped}｜跳过 ${skipped}｜失败 ${failed}`,
     '',

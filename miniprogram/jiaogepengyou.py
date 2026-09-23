@@ -1,26 +1,25 @@
-# cron: 26 7,16 * * *
-#!/usr/bin/env python3
+# =========================================================
 # name: 交个朋友积分签到
+# cron: 24 7,16 * * *
+# =========================================================
+#
+# 任务流程：
+#   1. 读取账号：优先用 IYOUKE_TOKEN（手动 bearer）；否则读 YYB_SERVER + YYB_ONLY_REFS 经 YYBGO
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+#   3. 用 code 请求 appLogin 换取 access_token（每次运行重新登录，不落盘）
+#   4. 执行签到 / 积分任务，输出汇总并发送通知
+# 可控参数：
+#   IYOUKE_TOKEN    可选。手动 bearer token，空格分隔多账号，优先级最高（免 YYB）
+#   YYB_SERVER      必填（无 IYOUKE_TOKEN 时）。格式「地址@ref」，空格/换行分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   IYOUKE_NOTIFY   通知开关，默认开启；填 0/false/off/no 关闭
+#   IYOUKE_APP_ID   可选。小程序 AppID，默认 wx3b294e7a0ba29bc3
+#   IYOUKE_VERSION  可选。接口版本号，默认 3.5.4
+#
+# =========================================================
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-交个朋友（iyouke.com）微信小程序「积分签到」自动脚本（配合 YYBGO 自动取码）。
-
-【接口来源】抓包自 Quantumult X（2026-09-23），小程序 appid=wx3b294e7a0ba29bc3。
-【签到动作】GET https://smp-api.iyouke.com/dtapi/pointsSign/user/sign?date=YYYY/MM/DD
-【鉴权】请求头 Authorization: bearer<token>，token 来自 iyouke 登录态（24h 有效）。
-
-【登录链路】POST /dtapi/appLogin，body {"appType":1,"principal":"<wx.login code>"}，
-  返回 access_token（bearer，expires_in=86400）。code 由 YYBGO 提供（wx.login）。
-
-【账号配置】两种模式，任选其一：
-  ① 配合 YYBGO（推荐，自动取码，无需手动 token）：青龙环境变量 YYB_SERVER 填 YYBGO 地址
-       YYB_SERVER     yyb-go:8000@1 yyb-go:8000@2     # 空格/换行分隔，每项 地址@ref
-       YYB_ONLY_REFS  []                              # 留空=跑全部；填 "1 2"=只跑这些 ref
-     脚本用 YYBGO 的 wx.login code 调 appLogin 取 token，每次运行强制重新登录（不落盘）。
-  ② 手动 token（兜底，优先级最高，免 YYB）：青龙环境变量 IYOUKE_TOKEN 直接填 bearer token
-       IYOUKE_TOKEN  <token1> <token2>               # 空格分隔；24h 需重抓
-"""
 
 import os
 import sys
@@ -310,6 +309,7 @@ def main() -> int:
             print(f"⚠️ 推送失败: {e}")
     else:
         print("（通知已关闭 IYOUKE_NOTIFY=0，跳过推送）")
+    print("──── 交个朋友 执行汇总 ────")
     print(f"\n{title}\n" + "\n".join(lines))
     return 1 if any_fail else 0
 

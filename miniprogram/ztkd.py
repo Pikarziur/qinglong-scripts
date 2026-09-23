@@ -1,25 +1,32 @@
+# =========================================================
 # name: 中通快递
-# cron: 26 7,16 * * *
+# cron: 56 7,16 * * *
+# =========================================================
+#
+# 任务流程：
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+#   3. 完成微信登录（wxlogin）
+#   4. 执行快递签到任务并查询前后积分变化，输出汇总并发送通知
+# 可控参数：
+#   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
+#   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
+#
+# =========================================================
 
-"""
-name:  中通快递
-入口: 微信小程序
-功能: 签到
-变量: YYB_SERVER (YYB-Go服务地址@微信账号标识，多账号用换行分割)
-    PROXY_API_URL (代理api，返回一条txt文本，内容为代理ip:端口)
-定时: 一天两次
-cron: 1 8,13 * * *
-------------更新日志------------
-# name: 中通快递
-2025/6/25   V1.0    初始化脚本
-2025/7/7    V1.1    适配更多协议
-2025/7/21   V1.2    适配更多协议
-2025/7/22   V1.3    修改协议适配器导入方式
-2025/7/28   V1.4    修改头部注释，以便拉库
-2026/8/17   V2.0    移除 getCode 依赖，改用 YYB-Go-Enhanced 获取微信 code，更新登录协议
-2026/9/23   V2.1    增加签到前后积分查询，并清晰显示积分变化
-2026/9/23   V2.2    美化多账号通知，增加账号结果、积分变化和执行汇总
-"""
+YYB_ONLY_REFS = []  # 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+
+
+def _yyb_clean_ref(value):
+    """去除 ref 的备注(# 后缀)与协议前缀(wx:/yyb:/wmpf:/syzs:)，用于白名单比对。"""
+    text = str(value or "").split("#", 1)[0].strip()
+    for prefix in ("wx:", "yyb:", "wmpf:", "syzs:"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text
+
 
 import random
 import time
@@ -31,7 +38,7 @@ import traceback
 from datetime import datetime
 
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
-NOTIFY = os.getenv("LY_NOTIFY") or False # 是否推送日志，默认不推送，True则推送
+NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")  # 通知开关，默认开启；填 0/false/off/no 关闭
 
 class AutoTask:
     def __init__(self, site_name):
@@ -121,7 +128,8 @@ class AutoTask:
                 self.log("[检查环境变量]没有找到 YYB_SERVER，请按 地址@微信账号标识 配置", level="error")
                 return
 
-            for line_no, raw in enumerate(yyb_server.splitlines(), 1):
+            only_refs = [_yyb_clean_ref(r) for r in YYB_ONLY_REFS]
+            for line_no, raw in enumerate(yyb_server.replace("&", " ").split(), 1):
                 raw = raw.strip()
                 if not raw:
                     continue
@@ -129,10 +137,13 @@ class AutoTask:
                     self.log(f"[检查环境变量]YYB_SERVER 第{line_no}行格式错误，已跳过", level="error")
                     continue
                 server, ref = raw.rsplit("@", 1)
-                if not server.strip() or not ref.strip():
+                ref = ref.strip()
+                if only_refs and _yyb_clean_ref(ref) not in only_refs:
+                    continue
+                if not server.strip() or not ref:
                     self.log(f"[检查环境变量]YYB_SERVER 第{line_no}行地址或账号标识为空，已跳过", level="error")
                     continue
-                yield server.strip(), ref.strip()
+                yield server.strip(), ref
         except Exception as e:
             self.log(f"[检查环境变量]发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             raise
@@ -364,7 +375,9 @@ class AutoTask:
             elapsed_seconds = round(time.monotonic() - started_at)
             title, content = self.build_notification(elapsed_seconds)
             print(f"\n{content}")
-            if notify is None:
+            if not NOTIFY:
+                self.log("[通知]LY_NOTIFY=0，已关闭通知", level="info")
+            elif notify is None:
                 self.log("[通知]通知模块加载失败，未发送通知", level="warning")
             else:
                 try:

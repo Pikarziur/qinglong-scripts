@@ -1,6 +1,27 @@
-# cron: 16 7,16 * * *
-#!/usr/bin/env python3
+# =========================================================
 # name: 嘉立创
+# cron: 32 7,16 * * *
+# =========================================================
+#
+# 任务流程：
+#   1. 读取账号：优先 JLC_AUTH（token#secret）；否则 YYB_SERVER + YYB_ONLY_REFS 经 YYBGO
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code，完成 CAS 登录
+#   3. 查询当日签到状态，执行签到 signIn
+#   4. 领券 receiveVoucher（第七天自动领 8 豆豆），并查询豆豆总额
+#   5. 输出汇总并发送通知
+# 可控参数：
+#   JLC_AUTH        可选。格式 token#secret，多账号用 & / 换行分隔，免 YYB
+#   YYB_SERVER      必填（无 JLC_AUTH 时）。格式「地址@ref#备注」，空格/换行/& 分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   JLC_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
+#   JLC_CAS_APP_ID  可选。CAS 应用 ID，默认 JLC_MOBILE_APP
+#   JLC_PLATFORM_TYPE 可选。平台类型，默认 MP-WEIXIN
+#   JLC_SOURCE      可选。来源标识，默认 2
+#   JLC_MINI_APPID  可选。小程序 AppID，默认 wx6c7b851c877dba42
+#   JLC_MP_ENV / JLC_MP_VERSION  可选。环境/版本，默认 release / 1.117.4
+#
+# =========================================================
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -619,6 +640,7 @@ def main() -> int:
 
     log_lines.append("\n-------- 执 行 结 束 --------")
     print("\n-------- 执 行 结 束 --------")
+    print("──── JLC 执行汇总 ────")
 
     # 推送精简摘要（不刷全量日志；成功数进标题，适配 PushPlus 免费版微信只显示标题）
     if JLC_NOTIFY:

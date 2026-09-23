@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
+# =========================================================
 # name: 漓泉啤酒生态营地
-# cron: 36 7,16 * * *
-# YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 notify.py。
-# -*- coding: utf-8 -*-
-"""
-name: 漓泉啤酒生态营地
-cron: 30 9 * * *
-"""
-# 漓泉啤酒生态营地 - 每日签到得积分
-# 入口: 微信小程序「漓泉啤酒生态营地」-> 会员中心 -> 每日签到
-# 说明: 通过 yyb_go 自动获取存活账号并换取 wx.login code, 复刻小程序的
-#       会员静默登录 (mbr/members/wxLogin/{code}) 拿到 Token, 再完成每日签到。
-# 接口契约 (来自小程序主包 common/vendor.js 反编译):
-#   登录  GET  /api/mbr/members/wxLogin/{code}?appId=<appid>
-#            -> errcode==0 且 data.b2cMemberId/openid 存在; data.token 为会话凭证
-#   鉴权  请求头 Token: <token>   (响应拦截器: errcode||code, 200 成功, 401 会话失效)
-#   状态  GET  /api/b2c/member/sign/task/list  -> data.signRes.{sign, signNum,
-#            taskSignDtoList[{signTime, signStatus}]}   sign==true / 今日行
-#            signStatus=="sign" 即今日已签 (幂等预检依据)
-#   签到  POST /api/b2c/member/sign/task  body {}  -> code==200, data.signRes.sign==true
-#   积分  GET  /api/b2c/member/pointsAndCouponCardNumAndShopCardInfo?unionId=<unionId>
-#            -> data.MemberCouponShopPointsVo.pointsNum   (仅用于上报余额)
-# 环境变量：
-#   YYB_SERVER      YYB-Go-Enhanced 路由，每行：地址@账号标识
-#   账号直接来自 YYB_SERVER；无需配置 WX_ID / lqpj
+# cron: 38 7,16 * * *
+# =========================================================
+#
+# 任务流程：
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+#   3. 登录并进入小程序，完成每日签到 / 领券等任务
+#   4. 输出汇总并发送通知（本脚本无独立开关，始终发送）
+# 可控参数：
+#   YYB_SERVER      必填。格式「地址@ref#备注」，空格/换行/& 分隔
+#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   QL_DIR          可选。token 缓存目录，默认 /ql/data/config/yyb_token_caches
+#
+# =========================================================
+
+YYB_ONLY_REFS = []  # 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+
 
 import json
 import os
@@ -38,8 +32,9 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ===== YYB-Go-Enhanced + QingLong standalone adapter =====
 def _yyb_routes():
+    only_refs = [_yyb_clean_ref(r) for r in YYB_ONLY_REFS]
     routes = []
-    for number, line in enumerate(os.getenv("YYB_SERVER", "").splitlines(), 1):
+    for number, line in enumerate(os.getenv("YYB_SERVER", "").replace("&", " ").split(), 1):
         line = line.strip()
         if not line:
             continue
@@ -53,7 +48,11 @@ def _yyb_routes():
             server = "http://" + server
         routes.append({"server": server, "ref": ref.strip()})
     if not routes:
-        raise RuntimeError("未配置 YYB_SERVER（每行：地址@账号标识）")
+        raise RuntimeError("未配置 YYB_SERVER（地址@账号标识，支持换行/空格/& 分隔）")
+    if only_refs:
+        filtered = [r for r in routes if _yyb_clean_ref(r["ref"]) in only_refs]
+        print(f"[账号过滤] YYB_ONLY_REFS={YYB_ONLY_REFS} 命中 {len(filtered)}/{len(routes)} 个账号")
+        return filtered
     return routes
 
 
@@ -533,6 +532,9 @@ def main():
         time.sleep(1)
 
     print("\n=============== 漓泉啤酒 签到结束 ===============")
+    print("──── 漓泉啤酒 执行汇总 ────")
+    print(f"账号 {len(entries)}｜成功 {ok_count}｜失败 {len(entries) - ok_count}")
+    print("────────────────────────")
     title = f"漓泉啤酒签到 {ok_count}/{len(entries)} 成功"
     try:
         send(title, "\n\n".join(summaries))

@@ -1,14 +1,23 @@
 ﻿// name:红色火箭
 // cron: 0 10,13,16 * * *
 //  红色火箭（华泰基金指慧家）
-
-//  环境变量：
-//    YYB_SERVER         必填，格式：地址@账号ref，多账号换行
-//                       过滤哪些 ref 由文件顶部 YYB_ONLY_REFS 控制，留空 [] = 全部
-//    WX_ID              可选，仅运行指定ref，格式：ref#备注，多账号换行或 & 分隔
-//    WECHAT_SERVER      可选，旧微信协议服务回退地址
-//    HSJJ_AUTO_CLAIM_H5 设为 '0' 或 'false' 关闭自动提现（默认开启）
-
+//
+// 任务流程：
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
+//   3. 换取 openId/unionId，手机号授权登录拿 token
+//   4. 签到(doSign) → ROE 口令红包 → 查询红包列表 → 领取未领红包
+//   5. 输出账号汇总（积分 / 红包 / 提现）并发送通知
+// 可控参数：
+//   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
+//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+//   WX_ID           可选。旧协议单账号变量（多账号建议用 YYB_SERVER）
+//   WECHAT_SERVER    可选。旧协议回退服务地址
+//   HSJJ_ACTIVITY_PAGE_ID  可选。活动页 ID，默认 7541
+//   HSJJ_AUTO_CLAIM_H5     历史红包自动领取，默认开；填 0 关闭
+//   HSJJ_MKTZB_OPENID      可选。mktzb openid 兜底
+//   debug           调试开关，默认 0；填 1 打印详细请求
+//
 
 'use strict';
 
@@ -116,9 +125,15 @@ try { notify = require('./sendNotify'); } catch (e) { notify = null; }
 
 // 消息收集
 let _logMessages = [];
+let _summaryMessages = [];
 function log(str) {
     console.log(str);
     _logMessages.push(str);
+}
+// 只进「结尾汇总」的日志，用于推送（避免把全量运行日志刷给通知渠道）
+function slog(str) {
+    console.log(str);
+    _summaryMessages.push(str);
 }
 
 // 响应体打印统一收口：默认只输出前 limit 个字符，避免整段响应体刷屏。
@@ -135,7 +150,7 @@ function shortJson(value, limit = 300) {
 }
 async function push_notification() {
     const title = "红色火箭（华泰基金）";
-    const content = _logMessages.join('\n');
+    const content = _summaryMessages.join('\n') || _logMessages.join('\n');
     if (notify && typeof notify.sendNotify === 'function') {
         try {
             await notify.sendNotify(title, content);
@@ -1498,11 +1513,11 @@ async function main() {
     }
 
     // 汇总输出
-    log('\n' + '='.repeat(50));
-    log('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
+    slog('\n' + '='.repeat(50));
+    slog('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
 
     // 输出每个账号的汇总信息
-    log('\n📋 账号汇总:');
+    slog('\n📋 账号汇总:');
     let totalClaimed = 0;
     for (const account of accounts) {
         const display = account.note || account.wxid;
@@ -1511,13 +1526,13 @@ async function main() {
         const pendingRedPacketAmount = account.pendingRedPacketAmount || 0;
         const claimedAmount = account.claimedAmount || 0;
         totalClaimed += claimedAmount;
-        log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
+        slog('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
     }
     if (totalClaimed > 0) {
-        log('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
+        slog('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
     }
 
-    // 推送通知
+    // 推送通知（只发上面的结尾汇总，不再推全量日志）
     await push_notification();
 }
 

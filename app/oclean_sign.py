@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # =========================================================
 # name: Oclean签到
-# 接口：POST https://mall.oclean.com/API/VshopProcess.ashx
-# 青龙环境变量：OCLEAN_COOKIE   一行一个 Shop-Member 值，多账号一行一条
-#               OCLEAN_SHOP_MEMBER  回退变量，单账号时可用（OCLEAN_COOKIE 为空才生效）
-#               OCLEAN_NOTIFY  通知开关，默认开启；填 0/false/off/no 关闭
-# cron: 0 5 * * *
+# cron: 5 7,16 * * *
 #
-# 通知推送：共用仓库根目录的 notify.py（青龙面板自带那份），见下方 send_notify()。
-#   注意：notify 采用「延迟导入」——import 写在 _ensure_notify() / send_notify() 内部，
-#   顶部 import 区看不到它。这样 notify.py 缺失时脚本仍能跑完，只是不推送，不会 ImportError 挂掉。
-#   仓库根没有 notify.py 时会自动从 CDN 下载（三源回退），无需手工补文件。
-
-
+# 任务流程：
+#   1. 读取 OCLEAN_COOKIE（或回退 OCLEAN_SHOP_MEMBER）中的 Shop-Member 值
+#   2. 逐个账号 POST 签到接口完成每日签到
+#   3. 解析响应判断成功 / 已签 / Cookie 失效，并打印积分
+#   4. 末尾输出执行汇总并发送通知
+# 可控参数：
+#   OCLEAN_COOKIE       必填。一行一个 Shop-Member 值，多账号换行
+#   OCLEAN_SHOP_MEMBER  可选。单账号回退变量，OCLEAN_COOKIE 为空时才生效
+#   OCLEAN_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
+#
 # =========================================================
 
 import os
@@ -227,6 +227,7 @@ def main():
             time.sleep(1)
 
     # 汇总
+    print("──── Oclean 执行汇总 ────")
     print("╔" + "═" * 40 + "╗")
     tail = f"🎉 完成  {ok_count}/{total}"
     if expired_count:

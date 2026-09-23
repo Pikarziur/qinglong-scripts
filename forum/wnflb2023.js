@@ -1,15 +1,26 @@
-﻿
-// name:福利吧 - 签到
-// cron: 0 5 * * *
+
+/*
+# name:福利吧 - 签到
+# cron: 10 7,16 * * *
+*/
 
 
-//  环境变量：
-//    wnflb2023_cookie         必填，格式：地址@账号ref，多账号换行
-
+// ────────────────────────────────────────────
+// 任务流程：
+//   1. 读取 wnflb2023_cookie，校验含 S5r8_2132_auth 字段
+//   2. 访问论坛首页，正则提取签到所需的 formhash
+//   3. 请求 fx_checkin 签到接口完成每日签到
+//   4. 根据响应 / Set-Cookie 判断成功 / 已签 / Cookie 过期，输出汇总并通知
+// 可控参数：
+//   wnflb2023_cookie   必填。论坛登录 Cookie，需含 S5r8_2132_auth
+//   WNFLB_NOTIFY        通知开关，默认开启；填 0/false/off/no 关闭
+// ────────────────────────────────────────────
 
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const fs = require('fs');
+const path = require('path');
 
 // ========== 配置 ==========
 const DEFAULT_COOKIE = ''; // 不使用环境变量时粘贴到这里
@@ -17,6 +28,37 @@ const DEFAULT_COOKIE = ''; // 不使用环境变量时粘贴到这里
 
 const COOKIE = process.env.wnflb2023_cookie || DEFAULT_COOKIE;
 const SITE = 'https://www.wnflb2023.com';
+
+// ========== 青龙通知（共享仓库根 notify.js，缺失时 CDN 回退；WNFLB_NOTIFY=0 关闭）==========
+const WNFLB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.WNFLB_NOTIFY || '1').trim().toLowerCase());
+async function loadWnflbNotify() {
+    const cands = [path.join(__dirname, '..', 'notify.js'), path.join(__dirname, 'notify.js'), '/ql/data/scripts/notify.js', '/ql/scripts/notify.js'];
+    const p = cands.find(f => fs.existsSync(f)) || cands[0];
+    if (!fs.existsSync(p)) {
+        const urls = [
+            'https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.js',
+            'https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js',
+            'https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js'
+        ];
+        for (const u of urls) {
+            try {
+                const r = await fetch(u, { timeout: 15000 });
+                const body = await r.text();
+                if (r.status === 200 && body.includes('sendNotify')) { fs.writeFileSync(p, body); break; }
+            } catch (e) { /* 忽略，尝试下一个源 */ }
+        }
+    }
+    return fs.existsSync(p) ? require(p) : null;
+}
+async function sendQingLongNotify(title, content) {
+    if (!WNFLB_NOTIFY) { log('WNFLB_NOTIFY=0，已关闭通知'); return; }
+    try {
+        const notify = await loadWnflbNotify();
+        if (!notify) { log('未安装 notify.js，跳过推送'); return; }
+        await notify.sendNotify(title, content);
+        log('✅ 通知发送成功');
+    } catch (e) { log('⚠️ 通知发送失败: ' + (e.message || e)); }
+}
 
 function log(msg) { console.log(`[WN签到] ${msg}`); }
 
@@ -55,19 +97,21 @@ function getCookieVal(name, cookieStr) {
 }
 
 async function main() {
+    const summaryLines = [];
+    const slog = (m) => { log(m); summaryLines.push(m); };
     log('========== WN2023 签到 ==========');
 
-    if (!COOKIE) { log('未配置 Cookie'); return; }
-    if (!getCookieVal('S5r8_2132_auth', COOKIE)) { log('Cookie 缺少 S5r8_2132_auth'); return; }
+    if (!COOKIE) { slog('未配置 Cookie'); return; }
+    if (!getCookieVal('S5r8_2132_auth', COOKIE)) { slog('Cookie 缺少 S5r8_2132_auth'); return; }
 
     // 1. 访问首页，拿 formhash
     log('访问首页...');
     let resp;
     try { resp = await request(SITE + '/'); }
-    catch (e) { log(`请求失败: ${e.message}`); return; }
+    catch (e) { slog(`请求失败: ${e.message}`); return; }
 
     const fhMatch = resp.body.match(/formhash=([a-f0-9]{8})/);
-    if (!fhMatch) { log('未找到 formhash，Cookie 可能已过期'); return; }
+    if (!fhMatch) { slog('未找到 formhash，Cookie 可能已过期'); return; }
     const formhash = fhMatch[1];
     log(`formhash: ${formhash}`);
 
@@ -83,18 +127,22 @@ async function main() {
     // 3. 处理响应头里的 Set-Cookie（签到成功会返回 creditnotice/creditbase/creditrule）
     const setCookie = signResp.headers['set-cookie'] || [];
     if (setCookie.some(c => c.includes('creditrule'))) {
-        log('🎉 签到成功！');
+        slog('🎉 签到成功！');
     } else if (body.includes('成功') || body.includes('每日签到')) {
-        log('🎉 签到成功！');
+        slog('🎉 签到成功！');
     } else if (body.includes('已签') || body.includes('重复')) {
-        log('✅ 今天已签到');
+        slog('✅ 今天已签到');
     } else if (body.includes('login') || signResp.status === 302) {
-        log('❌ Cookie 已过期，请重新登录');
+        slog('❌ Cookie 已过期，请重新登录');
     } else {
-        log(`⚠️ 响应片段: ${body.substring(0, 200)}`);
+        slog(`⚠️ 响应片段: ${body.substring(0, 200)}`);
     }
 
     log('========== 签到结束 ==========');
+    log('──── 福利吧 执行汇总 ────');
+    log(summaryLines.join('\n') || '无结果（可能未配置 Cookie）');
+    log('────────────────────────');
+    await sendQingLongNotify('福利吧签到 执行汇总', summaryLines.join('\n') || '未配置 Cookie 或无签到结果');
 }
 
 main().catch(e => log(`脚本异常: ${e.message}`));
