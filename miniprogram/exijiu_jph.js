@@ -6,7 +6,7 @@
                 示例：yyb-go:8000@openid
                 过滤哪些 ref 由文件顶部 YYB_ONLY_REFS 控制，留空 [] = 跑全部
 
-# cron: 11 9,16 * * *
+# cron: 11 7,16 * * *
 
 
 

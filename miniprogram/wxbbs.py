@@ -5,7 +5,7 @@ name: 微信笔笔省 - 提现额度
 变量: YYB_SERVER (YYB-Go-Enhanced地址@账号ref，多个账号换行分割)
         PROXY_API_URL (代理api，返回一条txt文本，内容为代理ip:端口)
         LY_NOTIFY (通知开关，默认开启；填 0/false/off/no 关闭)
-# cron: 16 9,16 * * *
+# cron: 21 7,16 * * *
 
 ------------更新日志------------
 2025/8/21   V1.0    初始化脚本

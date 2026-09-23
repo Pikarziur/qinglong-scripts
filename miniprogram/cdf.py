@@ -6,7 +6,7 @@
 # 青龙环境变量：YYB_SERVER = yyb-go:8000@1  多账号一行一条
 #               CDF_NOTIFY  通知开关，默认开启；填 0/false/off/no 关闭
 # 新手配置：文件顶部 YYB_ONLY_REFS / SIGN_LNG / SIGN_LAT
-# cron: 0 9,16 * * *
+# cron: 0 7,16 * * *
 #
 # 通知推送：共用仓库根目录的 notify.py（青龙面板自带那份），见下方 send_notify()。
 #   注意：notify 采用「延迟导入」——import 写在 _ensure_notify() / send_notify() 内部，
