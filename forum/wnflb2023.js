@@ -1,13 +1,9 @@
 ﻿/*
- * 我能帮2023 (wnflb2023.com) 青龙面板签到脚本
- *  name:福利吧 - 签到
- * ------------------------------------------
+ * name:福利吧 - 签到
+ * 35 5 * * * 
  * 使用方法：
- * 1. 青龙面板 → 环境变量 → 名称 wnflb2023_cookie，值粘贴 Cookie
- *    或直接写在下方 DEFAULT_COOKIE 中
- * 2. 定时任务：task wnflb2023_qinglong.js
- * 3. cron：35 5 * * * 
- *
+ * 青龙面板 → 环境变量 → 名称 wnflb2023_cookie，值粘贴 Cookie 或直接写在下方 DEFAULT_COOKIE 中
+
  * 这个站没有 Cloudflare 防护，青龙直接请求就行。
  */
 
