@@ -1,5 +1,7 @@
+/*
 # name: 丸丫甄选
 # cron: 41 7,16 * * *
+*/
 
 // YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 sendNotify。
 // ===== YYB-Go-Enhanced + QingLong standalone adapter =====
@@ -74,8 +76,6 @@ async function _sendQingLongNotify(title, content) {
 const qlNotify = { sendNotify: _sendQingLongNotify, send: _sendQingLongNotify };
 // ===== adapter end =====
 
-// name: 丸丫甄选
-// cron: 18 8 * * *
 /*
 ------------------------------------------
 @Author: sm
@@ -92,10 +92,12 @@ const qlNotify = { sendNotify: _sendQingLongNotify, send: _sendQingLongNotify };
 接口契约（h5.youzan.com，有赞 SaaS 通用签到，与本仓库 yz19.js 同一套）：
   静默登录 POST /wscshop/weapp/authorize.json  {appId, clientBiz, code}
         -> {accessToken|access_token, sessionId, kdtId, ...}
-  签到活动 GET  /wscump/checkin/show_checkin_page_v2.json -> {checkinId, isShow}
-  执行签到 GET  /wscump/checkin/checkinV2.json?checkinId=<id>
-        -> {desc, list[{infos:{title}}]}；重复签到报「已达最大参与次数」
-  积分余额 GET  /wscump/integral/user_points.json -> {current_points|real_points}
+ 签到活动 GET  /wscump/checkin/check-in-info.json -> {checkInId}（camelCase）
+ 活动详情 GET  /wscump/checkin/get_activity_by_yzuid_v2.json?checkinId=<id>
+        -> {isCheckin, continuesDay, dailyRewards[{desc}], rewards[{duration,prize[{desc:{middle,right}}}]}
+ 执行签到 GET  /wscump/checkin/checkinV2.json?checkinId=<id>
+        -> {desc, list[{infos:{title}}], success}；今日已签由 get_activity 的 isCheckin 预检
+ 积分余额 GET  /wscump/integral/user_points.json -> {current_points|real_points}（214027 抓包未含，留作兼容探测）
   公共 query：app_id / kdt_id / access_token；公共头：Extra-Data(sid/version/...)
   统一响应：code==0 成功，否则 msg 为错误原因
 ------------------------------------------
@@ -198,7 +200,7 @@ const MINI_APP_ID = "wx35322299c6492f6e";
 const CLIENT_BIZ = "weapp_wsc";
 const KDT_ID = "100939936";
 const USER_VERSION = "2.219.11.101";
-const PAGE_VERSION = "0"; // Referer 里的版本号，仅用于伪装来源，不参与校验
+const PAGE_VERSION = "49"; // Referer 里的版本号，仅用于伪装来源，不参与校验（214027 抓包实采 servicewechat.com/wx35322299c6492f6e/49/page-frame.html）
 const API_BASE = "https://h5.youzan.com";
 const TOKEN_CACHE_FILE = path.join(__dirname, "wanyazhenxuan_token_cache.json");
 const USER_AGENT =
@@ -267,6 +269,7 @@ class Task {
         this.checkinId = "";
         this.isShow = false;
         this.signedBefore = false;
+        this.continuesDay = 0;
     }
 
     async run() {
@@ -335,6 +338,7 @@ class Task {
             "Referer": `https://servicewechat.com/${MINI_APP_ID}/${PAGE_VERSION}/page-frame.html`,
             "Accept": "*/*",
             "Extra-Data": JSON.stringify({
+                is_weapp: 1,
                 sid: this.sessionId || "",
                 version: USER_VERSION,
                 clientType: "weapp-miniprogram",
@@ -403,7 +407,7 @@ class Task {
 
     async checkToken() {
         try {
-            await this.request({ path: "/wscump/integral/user_points.json" });
+            await this.request({ path: "/wscump/checkin/check-in-info.json" });
             return true;
         } catch (e) {
             return false;
@@ -412,19 +416,40 @@ class Task {
 
     async showCheckinPage() {
         try {
-            const data = await this.request({ path: "/wscump/checkin/show_checkin_page_v2.json" });
-            this.checkinId = data?.checkinId || "";
-            this.isShow = !!data?.isShow;
-            // 幂等预检：仅当服务端明确给出「今日已签」标记时才跳过提交
-            this.signedBefore =
-                data?.todayCheckin === true || data?.isCheckin === true || data?.hasCheckinToday === true;
-            $.log(
-                `账号[${this.index}] 签到活动: checkinId=${this.checkinId || "未获取"} isShow=${this.isShow}` +
-                    (this.signedBefore ? " 今日已签" : "")
-            );
+            const info = await this.request({ path: "/wscump/checkin/check-in-info.json" });
+            this.checkinId = info?.checkInId || info?.checkinId || "";
+            this.isShow = true;
+            $.log(`账号[${this.index}] 签到活动: checkInId=${this.checkinId || "未获取"}`);
         } catch (e) {
             $.log(`账号[${this.index}] 获取签到活动失败: ${e.message || e}`);
             if (isTokenError(e.message || e)) this.removeCachedToken();
+            return;
+        }
+        if (!this.checkinId) {
+            $.log(`账号[${this.index}] 未获取到 checkInId，跳过签到`);
+            return;
+        }
+        try {
+            const act = await this.request({
+                path: "/wscump/checkin/get_activity_by_yzuid_v2.json",
+                params: { checkinId: this.checkinId },
+            });
+            // 幂等预检：服务端明确 isCheckin=true 表示今日已签，跳过提交
+            this.signedBefore = !!act?.isCheckin;
+            this.continuesDay = Number(act?.continuesDay || 0) || 0;
+            const todayReward = (act?.dailyRewards || []).map(x => x?.desc).filter(Boolean).join("、");
+            const milestones = (act?.rewards || [])
+                .map(x => `${x?.duration || "?"}天/${x?.prize?.[0]?.desc?.middle ?? "?"}${x?.prize?.[0]?.desc?.right || ""}`)
+                .filter(Boolean)
+                .join("、");
+            $.log(
+                `账号[${this.index}] 今日${this.signedBefore ? "已签" : "未签"}` +
+                    (this.continuesDay ? ` 连续${this.continuesDay}天` : "") +
+                    (todayReward ? ` 今日奖励:${todayReward}` : "") +
+                    (milestones ? ` 连签奖励:${milestones}` : "")
+            );
+        } catch (e) {
+            $.log(`账号[${this.index}] 获取签到状态失败: ${e.message || e}`);
         }
     }
 
@@ -459,12 +484,18 @@ class Task {
     }
 
     async getPoints() {
+        // 抓包(214027)未包含积分余额接口；user_points.json 为有赞通用契约的兼容探测，失败则降级为连签天数
         try {
             const data = await this.request({ path: "/wscump/integral/user_points.json" });
-            $.log(`账号[${this.index}] 当前积分: ${data?.current_points ?? data?.real_points ?? "未知"}`);
+            const pts = data?.current_points ?? data?.real_points;
+            if (pts !== undefined && pts !== null) {
+                $.log(`账号[${this.index}] 当前积分: ${pts}`);
+                return;
+            }
         } catch (e) {
-            $.log(`账号[${this.index}] 查询积分失败: ${e.message || e}`);
+            // 部分店铺无此余额接口，忽略
         }
+        if (this.continuesDay) $.log(`账号[${this.index}] 连续签到: ${this.continuesDay} 天`);
     }
 }
 
