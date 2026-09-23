@@ -12,6 +12,8 @@ name: 微信笔笔省 - 提现额度
 2026/8/7    V2.0    适配YYB-Go-Enhanced及青龙单文件运行
 """
 
+YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+
 import json
 import random
 import re
@@ -28,7 +30,6 @@ from datetime import datetime, timedelta
 MULTI_ACCOUNT_SPLIT = ["\n", "@"] # 分隔符列表
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
 NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no") # 是否推送日志，默认开启，填 0/false/off/no 关闭
-YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 
 # 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
 # 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它

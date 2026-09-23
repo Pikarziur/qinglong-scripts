@@ -19,7 +19,7 @@
 
 选填：
   WX_ID/WXIDXJ    只运行指定账号，格式：ref#备注，多账号换行或 & 分隔
-                  未配置时自动读取 YYB_SERVER 中的全部账号ref
+                  未配置时自动读取 YYB_SERVER 中的全部账号ref（受顶部 YYB_ONLY_REFS 过滤）
   WECHAT_SERVER   旧微信协议服务回退地址
                   默认：http://127.0.0.1:8011
   OCR_SERVER      滑块验证码识别服务地址（ddddocr）
@@ -39,6 +39,9 @@
 
 """
 
+# ============== 新手配置区 ==============
+YYB_ONLY_REFS = []  # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+# ========================================
 
 import os
 import sys
@@ -956,6 +959,9 @@ def parse_yyb_server_accounts(raw):
         ref = ref.strip()
         if not ref or ref in seen:
             continue
+        # 只保留 YYB_ONLY_REFS 里列出的 ref；空列表 = 全保留
+        if YYB_ONLY_REFS and ref not in YYB_ONLY_REFS:
+            continue
         seen.add(ref)
         accounts.append({"id": ref, "note": ""})
     return accounts
@@ -1514,6 +1520,8 @@ if __name__ == "__main__":
             log.info("🔑 未配置 WX_ID/WXIDXJ，已从 YYB_SERVER 读取 %d 个账号" % len(accounts))
     if not accounts:
         print("❌ 未找到账号，请设置 WX_ID、WXIDXJ 或 YYB_SERVER")
+        if YYB_ONLY_REFS:
+            print("⚠️ 顶部 YYB_ONLY_REFS = %s 过滤后无账号，留空 [] 可跑全部" % YYB_ONLY_REFS)
         sys.exit(1)
 
     # ── 不落盘：不再读写 xijiutoken.json，每次运行都强制重新登录拿全新 token ──

@@ -16,11 +16,12 @@
 #       旧 token 不落盘、不复用，逻辑更简单，也不存在坏 token 复用问题。
 # ==========================================================
 
+YYB_ONLY_REFS = ["1", "2"]   # 填上前两个账号的 ref 值
+
 import os, re, sys, time, random, traceback, json
 import requests
 
 # ============== 新手配置区 ==============
-YYB_ONLY_REFS = ["1", "2"]   # 填上前两个账号的 ref 值
 APP_ID = "wxdf26125d1f97992c"
 SIGN_LNG = ""
 SIGN_LAT = ""

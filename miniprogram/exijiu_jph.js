@@ -4,6 +4,7 @@
 变量：
   YYB_SERVER    YYB-Go-Enhanced 地址@账号标识，多账号一行一个，必须配置
                 示例：yyb-go:8000@openid
+                过滤哪些 ref 由文件顶部 YYB_ONLY_REFS 控制，留空 [] = 跑全部
 
 # cron: 11 9,16 * * *
 
@@ -12,6 +13,9 @@
 可选：
   JPH_NOTIFY     通知开关，默认 1；填 0 关闭 sendNotify
 */
+// 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+const YYB_ONLY_REFS = [];
+
 const $ = new Env('君品荟签到');
 const axios = require('axios');
 
@@ -424,11 +428,12 @@ async function Envs() {
     xjhdArr = YYB_SERVER.split(/\r?\n/).map(i => i.trim()).filter(i => {
         if (!i) return false;
         const parsed = parseYybGoEntry(i);
-        if (!parsed.server || !parsed.ref) log(`跳过无效 YYB_SERVER 配置：${i}`);
-        return parsed.server && parsed.ref;
+        if (!parsed.server || !parsed.ref) { log(`跳过无效 YYB_SERVER 配置：${i}`); return false; }
+        if (YYB_ONLY_REFS.length && !YYB_ONLY_REFS.includes(String(parsed.ref))) return false;
+        return true;
     });
     if (!xjhdArr.length) {
-        log(`YYB_SERVER 中没有有效账号`);
+        log(`YYB_SERVER 中没有有效账号（或全被 YYB_ONLY_REFS 过滤，留空 [] 可跑全部）`);
         return false;
     }
     return true;

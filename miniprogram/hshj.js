@@ -4,12 +4,16 @@
 
 //  环境变量：
 //    YYB_SERVER         必填，格式：地址@账号ref，多账号换行
+//                       过滤哪些 ref 由文件顶部 YYB_ONLY_REFS 控制，留空 [] = 全部
 //    WX_ID              可选，仅运行指定ref，格式：ref#备注，多账号换行或 & 分隔
 //    WECHAT_SERVER      可选，旧微信协议服务回退地址
 //    HSJJ_AUTO_CLAIM_H5 设为 '0' 或 'false' 关闭自动提现（默认开启）
 
 
 'use strict';
+
+// 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+const YYB_ONLY_REFS = [];
 
 const axios = require('axios');
 const fs = require('fs');
@@ -27,6 +31,7 @@ function getYybEntries() {
             let server = line.slice(0, at).trim().replace(/\/+$/, '');
             const ref = line.slice(at + 1).trim();
             if (!server || !ref) return null;
+            if (YYB_ONLY_REFS.length && !YYB_ONLY_REFS.includes(ref)) return null;
             if (!/^https?:\/\//i.test(server)) server = `http://${server}`;
             return { server, ref };
         })
@@ -114,6 +119,19 @@ let _logMessages = [];
 function log(str) {
     console.log(str);
     _logMessages.push(str);
+}
+
+// 响应体打印统一收口：默认只输出前 limit 个字符，避免整段响应体刷屏。
+// 需要看完整响应时开 debug=1 —— 各 debug 分支已单独打印原始数据。
+function shortJson(value, limit = 300) {
+    let text;
+    try {
+        text = typeof value === 'string' ? value : JSON.stringify(value);
+    } catch {
+        text = String(value);
+    }
+    if (typeof text !== 'string') text = String(text);
+    return text.length > limit ? text.slice(0, limit) + '...' : text;
 }
 async function push_notification() {
     const title = "红色火箭（华泰基金）";
@@ -457,7 +475,7 @@ async function getPhoneCodeInfo(wxid) {
         const phoneCode = walk(respData);
         if (phoneCode) return { phoneCode, mobile };
     }
-    log('  ⚠️ 获取手机号code失败: ' + (respData ? JSON.stringify(respData).substring(0, 300) : 'null'));
+    log('  ⚠️ 获取手机号code失败: ' + (respData ? shortJson(respData, 300) : 'null'));
     return { phoneCode: '', mobile: '' };
 }
 
@@ -530,8 +548,7 @@ async function login(phoneCode, openId, unionId) {
             isRegister: resp.data.isRegister
         };
     }
-    const respStr = typeof resp === 'string' ? resp : JSON.stringify(resp);
-    log('  登录失败: ' + (resp?.message ? resp.message + ' - ' : '') + respStr);
+    log('  登录失败: ' + (resp?.message ? resp.message + ' - ' : '') + shortJson(resp));
     return null;
 }
 
@@ -541,7 +558,7 @@ async function getOpenIdAndUnionId(code) {
     if (resp.data?.code === '200' && resp.data?.data?.openId) {
         return { openId: resp.data.data.openId, unionId: resp.data.data.unionId };
     }
-    throw new Error('获取openId失败: ' + JSON.stringify(resp.data));
+    throw new Error('获取openId失败: ' + shortJson(resp.data));
 }
 
 // 校验缓存登录态：能正常访问轻量接口就认为 token/openId/userId 可用。
@@ -685,10 +702,12 @@ async function getEncryptKey(wxid) {
             opt: 1
         });
         respData = resp.data;
+        // 与 YYB 分支对称：仅 debug 时输出原始响应，便于排查两种返回格式差异
+        if (debug) log('  [牛子][debug] getuserencryptkey 原始响应: ' + shortJson(respData, 1200));
     }
 
-    // 原始响应始终打印（便于排查 YYB/牛子 不同返回格式），不再依赖 debug 开关
-    log('  [encryptKey][raw] ' + JSON.stringify(respData).substring(0, 1500));
+    // 成功路径不再打印响应体（结果已由调用方以 version 形式输出）；
+    // 失败时下方打印 300 字符预览，需要完整体请开 debug=1。
 
     if (respData && (respData.Code === 0 || respData.code === 0 || respData.Success === true || respData.Data || respData.data || respData.result || respData.openid)) {
         try {
@@ -733,7 +752,7 @@ async function getEncryptKey(wxid) {
             return fb;
         }
     } catch {}
-    throw new Error('获取加密密钥失败, 响应预览: ' + JSON.stringify(respData).substring(0, 600));
+    throw new Error('获取加密密钥失败, 响应预览: ' + shortJson(respData, 300));
 }
 
 // 签到
@@ -802,7 +821,7 @@ async function doSign(session, wxid, cache, cacheKey) {
         log('  ✅ 签到成功: +' + point + '积分，连续' + days + '天');
         return true;
     }
-    log('  ⚠️ 签到失败: ' + (resp?.message || JSON.stringify(resp)));
+    log('  ⚠️ 签到失败: ' + (resp?.message || shortJson(resp)));
     return false;
 }
 
@@ -812,7 +831,7 @@ async function getTotalPoint(token, openId, userId) {
     if (resp?.code === '200' && resp?.data) {
         return Number(resp.data.totalPoint || 0);
     }
-    log('  ⚠️ 查询当前积分失败: ' + (resp?.message || resp?.msg || JSON.stringify(resp)));
+    log('  ⚠️ 查询当前积分失败: ' + (resp?.message || resp?.msg || shortJson(resp)));
     return 0;
 }
 
@@ -994,10 +1013,10 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
             log('  🎉 兑换成功! 标题: ' + (data.title || roeAnswer) + ' 积分: ' + data.rewardAmount);
             return { success: true, type: 'point', amount: Number(data.rewardAmount) || 0, data, existingClaim: existingClaimResult, activity };
         }
-        log('  ⚠️ ' + (data?.content || JSON.stringify(data)));
+        log('  ⚠️ ' + (data?.content || shortJson(data)));
         return { success: false, existingClaim: existingClaimResult };
     }
-    log('  ⚠️ 提交失败: ' + (resp?.message || JSON.stringify(resp)));
+    log('  ⚠️ 提交失败: ' + (resp?.message || shortJson(resp)));
     return { success: false, existingClaim: existingClaimResult };
 }
 
@@ -1173,7 +1192,7 @@ async function claimRedPacket(token, openId, userId, requestId, ticketCode, acti
     if (claimResp.data?.success) return { success: true, data: claimResp.data, amount };
     // c0004 = 红包发放中，说明领取请求已经进入发放队列。
     if (claimResp.data?.message === 'c0004') return { success: true, data: claimResp.data, amount, message: '红包发放中' };
-    return { success: false, message: JSON.stringify(claimResp.data) };
+    return { success: false, message: shortJson(claimResp.data, 200) };
 }
 
 /**
@@ -1437,6 +1456,7 @@ async function main() {
 
     if (!taskVar.trim()) {
         log('环境变量未设置: ' + ckName);
+        if (YYB_ONLY_REFS.length) log('提示: 顶部 YYB_ONLY_REFS=' + JSON.stringify(YYB_ONLY_REFS) + ' 过滤后无账号，留空 [] 可跑全部');
         await push_notification();
         process.exit(0);
     }
