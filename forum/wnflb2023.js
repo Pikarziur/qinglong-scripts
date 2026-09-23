@@ -1,11 +1,11 @@
-﻿/*
- * name：福利吧 - 签到
- * cron：35 5 * * * 
- * 使用方法：
- * 青龙面板 → 环境变量 → 名称 wnflb2023_cookie，值粘贴 Cookie 或直接写在下方 DEFAULT_COOKIE 中
+﻿
+// name:福利吧 - 签到
+// cron: 0 5 * * *
 
- * 这个站没有 Cloudflare 防护，青龙直接请求就行。
- */
+
+//  环境变量：
+//    wnflb2023_cookie         必填，格式：地址@账号ref，多账号换行
+
 
 const https = require('https');
 const http = require('http');
