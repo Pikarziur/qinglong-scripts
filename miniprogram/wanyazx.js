@@ -156,7 +156,13 @@ class Env {
         this.userCount = list.length;
         if (!this.userList.length) console.log('未配置可用的 YYB_SERVER 或脚本专用账号变量');
     }
-    async done() { try { const notify = qlNotify; await notify.sendNotify(this.name, this.logs.join('\n')); } catch (e) { console.log('通知发送失败', e); } }
+    async done() {
+        try {
+            const notify = qlNotify;
+            const content = (LAST_RESULTS && buildSummaryContent(LAST_RESULTS)) || this.logs.join('\n');
+            await notify.sendNotify("====== 丸丫甄选 汇总日志 ======", content);
+        } catch (e) { console.log('通知发送失败', e); }
+    }
 }
 
 const $ = new Env("丸丫甄选签到");
@@ -538,24 +544,33 @@ class Task {
     }
 }
 
+let LAST_RESULTS = null;
+function buildSummaryContent(results) {
+    const seq = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    const lines = [];
+    for (let i = 0; i < results.length; i++) {
+        const t = results[i];
+        const em = seq[i] || `${i + 1}.`;
+        const phone = t.userInfo?.mobile ? maskPhone(t.userInfo.mobile) : "";
+        const tag = phone ? `（${phone}）` : "";
+        let acct = `${em} [账号${t.index}${tag}]`;
+        if (t.totalPoints !== null && t.totalPoints !== undefined) {
+            acct += ` 总积分${t.totalPoints}`;
+            if (t.todayEarned > 0) acct += `(+${t.todayEarned})`;
+        }
+        lines.push(acct);
+        if (t.todayStatus === "签到成功") lines.push("✔️ 签到成功");
+        else if (t.todayStatus === "今日已签") lines.push("✔️ 今日已签");
+        else lines.push("❌ " + (t.todayStatus || "签到失败"));
+    }
+    return lines.join("\n");
+}
 function printSummary(results) {
     if (!results || !results.length) return;
+    LAST_RESULTS = results;
     $.log("");
-    $.log("========== 丸丫甄选 今日签到汇总 ==========");
-    let success = 0, already = 0, fail = 0, earnedTotal = 0;
-    for (const t of results) {
-        const phone = t.userInfo?.mobile ? maskPhone(t.userInfo.mobile) : "";
-        const tag = phone ? ` (${phone})` : "";
-        const earned = t.todayEarned > 0 ? ` 今日+${t.todayEarned}积分` : "";
-        const total = (t.totalPoints !== null && t.totalPoints !== undefined) ? ` 总积分${t.totalPoints}` : "";
-        $.log(`账号${t.index}${tag} ${t.todayStatus}${earned}${total}`);
-        if (t.todayStatus === "签到成功") success++;
-        else if (t.todayStatus === "今日已签") already++;
-        else fail++;
-        earnedTotal += (t.todayEarned || 0);
-    }
-    $.log("------------------------------------------");
-    $.log(`共 ${results.length} 个账号｜签到成功 ${success}｜今日已签 ${already}｜失败 ${fail}｜今日累计 +${earnedTotal} 积分`);
+    $.log("──── 丸丫甄选 执行汇总 ────");
+    $.log(buildSummaryContent(results));
     $.log("==========================================");
 }
 

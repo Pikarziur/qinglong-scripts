@@ -914,10 +914,28 @@ sys.exit(2)
   console.log(`🎉 全部账号处理完成：成功 ${accounts.length - failed - skipped}，跳过 ${skipped}，失败 ${failed}`);
   hr('═');
   console.log('──── 创维 执行汇总 ────');
-  sendQingLongNotify('创维小程序', [
+  // 构建分账号汇总（面向 notify，简洁精要；多任务按任务行 ✔️/❌，跳过也归一展示）
+  const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+  const summaryOut = [];
+  for (let i = 0; i < results.length; i++) {
+    const block = results[i];
+    const headerMatch = block.match(/^【(.+?)】/);
+    const ident = headerMatch ? headerMatch[1] : `账号${i + 1}`;
+    const em = seqEmoji[i] || `${i + 1}.`;
+    summaryOut.push(`${em} [${ident}]`);
+    const bodyLines = block.split('\n').slice(1).filter(l => l.trim());
+    for (const bl of bodyLines) {
+      const t = bl.trim();
+      if (t.startsWith('✅')) summaryOut.push('✔️ ' + t.slice(1).trim());
+      else if (t.startsWith('❌')) summaryOut.push('❌ ' + t.slice(1).trim());
+      else if (t.startsWith('⏭️')) summaryOut.push('⏭️ ' + t.slice(1).trim());
+      else summaryOut.push(t);
+    }
+  }
+  sendQingLongNotify('====== 创维 汇总日志 ======', [
     `📊 成功 ${accounts.length - failed - skipped}｜跳过 ${skipped}｜失败 ${failed}`,
     '',
-    ...results.flatMap((item, index) => index === results.length - 1 ? [item] : [item, '']),
+    summaryOut.join('\n'),
   ].join('\n'));
   if (failed > 0) process.exitCode = 1;
 })();

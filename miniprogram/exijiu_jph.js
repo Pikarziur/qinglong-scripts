@@ -158,8 +158,32 @@ function parseYybGoEntry(rawValue) {
             await getpoints(xj_token);
             await $await(10000)
         }
-        log('──── 习酒 执行汇总 ────');
-        await SendMsg(msg);
+        log('──── 习酒君品荟 执行汇总 ────');
+        const okCount = (msg.match(/签到成功/g) || []).length;
+        log(`账号 ${xjhdArr.length}｜成功 ${okCount}｜失败 ${xjhdArr.length - okCount}`);
+        // 渲染分账号汇总（面向 notify，简洁精要；账号行含总积分，签到状态 ✔️/❌）
+        const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+        const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);
+        const summaryOut = [];
+        for (let i = 0; i < xjhdArr.length; i++) {
+            const em = seqEmoji[i] || `${i + 1}.`;
+            const blk = (blocks[i] || '').trim();
+            const phoneMatch = blk.match(/^(\d{3}\*{4}\d{4})/);
+            const phone = phoneMatch ? phoneMatch[1] : `账号${i + 1}`;
+            summaryOut.push(`${em} [${phone}]`);
+            if (/签到成功/.test(blk)) {
+                const pt = (blk.match(/获得积分：(\d+)/) || [])[1];
+                summaryOut.push('✔️ 签到成功' + (pt ? `（+${pt}积分）` : ''));
+            } else if (/签到失败|签到异常|签到请求失败/.test(blk)) {
+                const reason = (blk.match(/签到(?:失败|异常|请求失败)[：:]?\s*(.*)/) || [])[1] || '';
+                summaryOut.push('❌ 签到失败' + (reason ? '：' + reason.slice(0, 40) : ''));
+            } else {
+                summaryOut.push('✔️ 签到成功');
+            }
+            const totalMatch = blk.match(/总积分：(\d+)/);
+            if (totalMatch) summaryOut.push(`总积分${totalMatch[1]}`);
+        }
+        await SendMsg(summaryOut.join('\n'));
     }
 })()
     .catch((e) => log(e))
@@ -490,7 +514,8 @@ async function SendMsg(message) {
                 log('未安装 notify.js，跳过推送');
                 return;
             }
-            await notify.sendNotify($.name + ' · ' + xjhdArr.length + '个账号', message);
+            const okCount = (message.match(/签到成功/g) || []).length;
+            await notify.sendNotify('====== 习酒君品荟 汇总日志 ======', message);
         } catch (e) {
             log('❌ 通知推送失败: ' + (e.message || e));
         }

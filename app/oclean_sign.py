@@ -235,13 +235,27 @@ def main():
     pad3 = 40 - 2 - len(tail)
     print("║" + (" " * max(0, pad3 // 2)) + tail + (" " * max(0, pad3 - pad3 // 2)) + "║")
     print("╚" + "═" * 40 + "╝")
+    print(f"账号 {total}｜成功 {ok_count}｜失败 {total - ok_count}")
     print()
 
-    # 推送精简摘要：每个账号一行，完整日志只留在青龙面板
-    _title = "Oclean签到 %d/%d 成功" % (ok_count, total)
-    if expired_count:
-        _title += "  🔴失效%d" % expired_count
-    send_notify(_title, "\n".join(push_lines))
+    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
+    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    _content = []
+    for _i, _pl in enumerate(push_lines, 1):
+        # _pl 形如 "账号%d: ✅ 签到成功" / "账号%d: 🔴 Cookie 失效"
+        if ": " in _pl:
+            _acct, _rest = _pl.split(": ", 1)
+        else:
+            _acct, _rest = f"账号{_i}", _pl
+        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+        _content.append(f"{_em} [{_acct}]")
+        if _rest.startswith("✅") or _rest.startswith("🟡"):
+            _content.append("✔️ " + _rest[1:].lstrip())
+        elif _rest.startswith("🔴") or _rest.startswith("⚠️") or _rest.startswith("❌"):
+            _content.append("❌ " + _rest[1:].lstrip())
+        else:
+            _content.append(_rest)
+    send_notify("====== Oclean 汇总日志 ======", "\n".join(_content))
 
 
 if __name__ == "__main__":

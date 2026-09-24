@@ -369,10 +369,28 @@ def main():
     pad3 = 42 - 2 - len(tail_title)
     print("║" + (" " * (pad3 // 2)) + tail_title + (" " * (pad3 - pad3 // 2)) + "║")
     print("╚" + ("═" * 42) + "╝")
+    print(f"账号 {total}｜成功 {success}｜失败 {total - success}")
     print()
 
-    # 推送精简摘要：每个账号一行，完整日志只留在青龙面板
-    send_notify("中免会员签到 %d/%d 成功" % (success, total), "\n".join(push_lines))
+    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
+    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    _content = []
+    for _i, _line in enumerate(push_lines, 1):
+        # _line 形如 "ref xxx: ✅ 签到成功" / "ref xxx: ❌ 账号异常 ..."
+        if ": " in _line:
+            _ref, _rest = _line.split(": ", 1)
+            _ref = _ref[4:] if _ref.startswith("ref ") else _ref
+        else:
+            _ref, _rest = "账号" + str(_i), _line
+        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+        _content.append(f"{_em} [{_ref}]")
+        if _rest.startswith("✅") or _rest.startswith("⭕"):
+            _content.append("✔️ " + _rest[1:].lstrip())
+        elif _rest.startswith("❌"):
+            _content.append("❌ " + _rest[1:].lstrip())
+        else:
+            _content.append(_rest)
+    send_notify("====== 中免会员 汇总日志 ======", "\n".join(_content))
 
 if __name__ == "__main__":
     main()

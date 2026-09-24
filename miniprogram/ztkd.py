@@ -237,47 +237,28 @@ class AutoTask:
         self.log(f"[积分]: 初始积分 {before} → 完成后积分 {after}（变化 {after - before:+d}）")
 
     def build_notification(self, elapsed_seconds):
-        """生成适合青龙通知展示的账号明细和执行汇总。"""
-        normal_count = sum(1 for item in self.account_results if item["normal"])
-        abnormal_count = len(self.account_results) - normal_count
-        total_delta = sum(
-            item["final_points"] - item["initial_points"]
-            for item in self.account_results
-            if item["initial_points"] is not None and item["final_points"] is not None
-        )
-        title = (
-            f"📦 {self.site_name}签到｜正常 {normal_count}｜"
-            f"异常 {abnormal_count}｜积分 {total_delta:+d}"
-        )
-        sections = [f"📦 {self.site_name}签到", ""]
-        for item in self.account_results:
-            sections.extend(["━━━━━━━━━━━━━━", f"👤 账号 {item['index']}"])
-            login_icon = "✅" if item["login"] == "认证成功" else "❌"
-            sections.append(f"{login_icon} 登录：{item['login']}")
-            if item["sign"] == "签到成功":
-                sign_icon = "✅"
-            elif item["sign"] == "今日已签到":
-                sign_icon = "ℹ️"
+        """生成面向 notify 的分账号简洁汇总（账号行含总积分(+变化)，签到状态 ✔️/❌）。"""
+        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        lines = []
+        for _i, item in enumerate(self.account_results, 1):
+            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+            _acct = f"{_em} [账号{item['index']}]"
+            _init = item.get("initial_points")
+            _final = item.get("final_points")
+            if _final is not None:
+                _acct += f" 总积分{_final}"
+                if _init is not None:
+                    _delta = _final - _init
+                    if _delta != 0:
+                        _acct += f"(+{_delta})"
+            lines.append(_acct)
+            if item["normal"]:
+                lines.append("✔️ 签到成功")
             else:
-                sign_icon = "❌"
-            sections.append(f"{sign_icon} 签到：{item['sign']}")
-            before = item["initial_points"]
-            after = item["final_points"]
-            if before is None or after is None:
-                sections.append("⚠️ 积分：查询失败")
-            else:
-                sections.append(f"💰 积分：{before} → {after}（{after - before:+d}）")
-            sections.append("")
-        sections.extend([
-            "━━━━━━━━━━━━━━",
-            "📊 执行汇总",
-            f"账号总数：{len(self.account_results)}",
-            f"✅ 正常：{normal_count}",
-            f"⚠️ 异常：{abnormal_count}",
-            f"💰 本次增加：{total_delta} 积分",
-            f"⏱️ 执行耗时：{elapsed_seconds} 秒",
-        ])
-        return title, "\n".join(sections)
+                _reason = item.get("sign") or item.get("login") or "失败"
+                lines.append("❌ 签到失败：" + str(_reason))
+        title = f"====== {self.site_name} 汇总日志 ======"
+        return title, "\n".join(lines)
 
     def run(self):
         """

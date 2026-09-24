@@ -1581,10 +1581,24 @@ if __name__ == "__main__":
 
     if notify_lines:
         _ok_cnt = sum(1 for _l in notify_lines if "❌" not in _l)
-        _push_title = "习酒花园 %d/%d 成功" % (_ok_cnt, len(accounts))
-        if _ok_cnt < len(accounts):
-            _push_title += "  ❌%d" % (len(accounts) - _ok_cnt)
-        content = "\n\n".join(notify_lines)
+        # 渲染分账号汇总（面向 notify，简洁精要；多任务按任务行 ✔️/❌，无积分只显示账号）
+        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        _content = []
+        for _i, _l in enumerate(notify_lines, 1):
+            _parts = _l.split("\n")
+            _header = _parts[0]
+            _mask = _header[2:].strip() if _header.startswith("👤") else _header
+            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+            _content.append(f"{_em} [{_mask}]")
+            for _bl in _parts[1:]:
+                _bl = _bl.strip()
+                if not _bl:
+                    continue
+                if "❌" in _bl:
+                    _content.append("❌ " + _bl.replace("❌", "").strip())
+                else:
+                    _content.append("✔️ " + _bl.lstrip("✅✔️").strip())
+        content = "\n".join(_content)
         # 全账号本月酿酒合计(一行汇总)
         try:
             _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
@@ -1599,10 +1613,10 @@ if __name__ == "__main__":
             pass
         # 控制台执行汇总
         print("=" * 52)
-        print("🌿 习酒花园 执行汇总｜账号 %d｜成功 %d｜失败 %d" % (
-            len(accounts), _ok_cnt, len(accounts) - _ok_cnt))
+        print("──── 习酒花园 执行汇总 ────")
+        print("账号 %d｜成功 %d｜失败 %d" % (len(accounts), _ok_cnt, len(accounts) - _ok_cnt))
         print("=" * 52)
-        send_notify(_push_title, content)
+        send_notify("====== 习酒花园 汇总日志 ======", content)
 
     # ── 计算下次执行时间 ──
     log.info("═" * 50)

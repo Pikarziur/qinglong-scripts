@@ -7,7 +7,9 @@
 #   1. 读取账号：优先用 IYOUKE_TOKEN（手动 bearer）；否则读 YYB_SERVER + YYB_ONLY_REFS 经 YYBGO
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 用 code 请求 appLogin 换取 access_token（每次运行重新登录，不落盘）
-#   4. 执行签到 / 积分任务，输出汇总并发送通知
+#   4. 签到：先 GET /dtapi/pointsSign/user/pointsInfo/query 看 signTodayResult 是否今日已签；
+#      未签才 GET /dtapi/pointsSign/user/sign?date=YYYY/MM/DD 签到，再查 pointsInfo 取总积分与连续天数
+#   5. 输出汇总并发送通知（已签/签到成功/失败一目了然）
 # 可控参数：
 #   IYOUKE_TOKEN    可选。手动 bearer token，空格分隔多账号，优先级最高（免 YYB）
 #   YYB_SERVER      必填（无 IYOUKE_TOKEN 时）。格式「地址@ref」，空格/换行分隔
@@ -79,7 +81,7 @@ SCRIPT_NAME = "交个朋友积分签到"
 API_BASE = "https://smp-api.iyouke.com"
 ENV_VERSION = "release"
 REFERER = f"https://servicewechat.com/{APP_ID}/101/page-frame.html"
-XY_EXTRA = f"appid={APP_ID};version={APP_VERSION};envVersion={ENV_VERSION};senceId=1005"
+XY_EXTRA = f"appid={APP_ID};version={APP_VERSION};envVersion={ENV_VERSION};senceId=1089"
 USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.75(0x18004b66) "
@@ -146,7 +148,7 @@ def app_login(wx_code: str) -> str:
         "appId": APP_ID,
         "envVersion": ENV_VERSION,
         "content-type": "application/json",
-        "xy-extra-data": f"appid={APP_ID};version={APP_VERSION};envVersion={ENV_VERSION};senceId=1106",
+        "xy-extra-data": f"appid={APP_ID};version={APP_VERSION};envVersion={ENV_VERSION};senceId=1089",
         "version": APP_VERSION,
         "Accept-Encoding": "gzip,compress,br,deflate",
         "User-Agent": USER_AGENT,
@@ -210,34 +212,57 @@ def _req_get(token: str, path: str, params: Optional[Dict] = None) -> Optional[D
 
 
 def sign_one(token: str) -> Dict[str, Any]:
+    """执行单个账号签到：先查 pointsInfo 判断是否已签，未签才调用 sign，
+    再查 pointsInfo 取最新总积分与连续天数。对齐 HAR 真实链路。"""
+    result: Dict[str, Any] = {"ok": False, "signed": False, "reward": 0,
+                              "total": None, "series": None, "msg": ""}
+
+    # 1) 签到前状态：signTodayResult=true 表示今日已签；pointsNums=当前总积分
+    pre = _req_get(token, "/dtapi/pointsSign/user/pointsInfo/query")
+    pre_data = (pre or {}).get("data") or {}
+    if pre_data.get("pointsNums") is not None:
+        result["total"] = int(pre_data["pointsNums"])
+    if pre_data.get("seriesDays") is not None:
+        result["series"] = int(pre_data["seriesDays"])
+    if pre_data.get("signTodayResult") is True:
+        result["signed"] = True
+        result["msg"] = "今日已签"
+        return result
+
+    # 2) 未签 → 执行签到（GET /dtapi/pointsSign/user/sign?date=YYYY/MM/DD）
     today = time.strftime("%Y/%m/%d")
     resp = _req_get(token, "/dtapi/pointsSign/user/sign", params={"date": today})
-    result: Dict[str, Any] = {"ok": False, "signed": False, "reward": 0,
-                              "total": None, "msg": ""}
     if not resp:
         result["msg"] = "网络/解析失败"
         return result
-    errmsg = str(resp.get("errorMsg") or resp.get("error_msg")
-                 or resp.get("msg") or resp.get("message") or "")
-    if resp.get("success") is True and resp.get("error") == 0:
-        data = resp.get("data") or {}
-        reward = int(data.get("signReward") or 0)
-        result["reward"] = reward
-        if reward > 0:
-            result["ok"] = True
-            result["msg"] = f"签到+{reward}积分"
-        else:
-            result["signed"] = True  # signReward=0 视为今日已签
+    if resp.get("success") is not True and resp.get("error") not in (0, None):
+        errmsg = str(resp.get("errorMsg") or resp.get("error_msg")
+                     or resp.get("msg") or resp.get("message") or resp)
+        if "已签" in errmsg or "重复" in errmsg:
+            result["signed"] = True  # 服务端明确"已签到/重复签到" → 视为今日已签
             result["msg"] = "今日已签"
-    elif "已签" in errmsg or "重复" in errmsg:
-        result["signed"] = True  # 服务端明确"已签到/重复签到" → 视为今日已签，不算失败
-        result["msg"] = "今日已签"
-    else:
-        result["msg"] = errmsg or str(resp)
-    # 查总积分（仅用于展示）
-    p = _req_get(token, "/dtapi/pointsSign/user/pointsInfo/query")
-    if p and p.get("success") and p.get("data"):
-        result["total"] = int(p["data"].get("pointsNums") or 0)
+        else:
+            result["msg"] = errmsg or str(resp)
+        return result
+
+    # 3) 签到成功：取本次奖励（signReward 基础奖励 + extraSignReward 额外奖励）
+    data = resp.get("data") or {}
+    reward = int(data.get("signReward") or 0)
+    extra = int(data.get("extraSignReward") or 0)
+    result["reward"] = reward + extra
+    result["ok"] = True
+    msg = f"签到+{reward}积分"
+    if extra:
+        msg += f"（额外+{extra}）"
+    result["msg"] = msg
+
+    # 4) 签到后状态：取权威总积分与连续天数
+    post = _req_get(token, "/dtapi/pointsSign/user/pointsInfo/query")
+    post_data = (post or {}).get("data") or {}
+    if post_data.get("pointsNums") is not None:
+        result["total"] = int(post_data["pointsNums"])
+    if post_data.get("seriesDays") is not None:
+        result["series"] = int(post_data["seriesDays"])
     return result
 
 
@@ -281,7 +306,8 @@ def main() -> int:
                 continue
         res = sign_one(token)
         print(f"  {res['msg']}"
-              + (f"，总积分 {res['total']}" if res["total"] is not None else ""))
+              + (f"，总积分 {res['total']}" if res["total"] is not None else "")
+              + (f"，连续 {res['series']} 天" if res.get("series") is not None else ""))
         results.append({"ok": res["ok"], "signed": res["signed"],
                         "reward": res["reward"], "total": res["total"],
                         "msg": res["msg"], "idx": idx, "remark": acc["remark"]})
@@ -290,27 +316,37 @@ def main() -> int:
 
     success = sum(1 for r in results if r["ok"])
     signed = sum(1 for r in results if r["signed"])
-    title = f"{SCRIPT_NAME}｜成功 {success}/{len(results)}（已签 {signed}）"
-    lines = []
-    for r in results:
+    # 渲染分账号汇总（面向 notify，简洁精要；账号行含总积分(+今日变化)，已签也用✔️）
+    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    _content = []
+    for _i, r in enumerate(results, 1):
+        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+        _total = r["total"]
+        _reward = r.get("reward") or 0
+        _acct = f"{_em} [{r['remark']}]"
+        if _total is not None:
+            _acct += f" 总积分{_total}"
+            if _reward > 0:
+                _acct += f"(+{_reward})"
+        _content.append(_acct)
         if r["ok"]:
-            parts = [f"签到+{r['reward']}积分"]
-            if r["total"] is not None:
-                parts.append(f"总积分{r['total']}")
-            lines.append(f"✅ [{r['remark']}] {'，'.join(parts)}")
+            _sign = "✔️ 签到成功"
+            if r.get("series") is not None:
+                _sign += f"（连续{r['series']}天）"
+            _content.append(_sign)
         elif r["signed"]:
-            lines.append(f"🔄 [{r['remark']}] 今日已签")
+            _content.append("✔️ 今日已签")
         else:
-            lines.append(f"❌ [{r['remark']}] {r['msg']}")
+            _content.append("❌ 签到失败：" + str(r.get("msg") or ""))
     if IYOUKE_NOTIFY:
         try:
-            notify_send(title, "\n".join(lines))
+            notify_send("====== 交个朋友 汇总日志 ======", "\n".join(_content))
         except Exception as e:
             print(f"⚠️ 推送失败: {e}")
     else:
         print("（通知已关闭 IYOUKE_NOTIFY=0，跳过推送）")
     print("──── 交个朋友 执行汇总 ────")
-    print(f"\n{title}\n" + "\n".join(lines))
+    print("\n".join(_content))
     return 1 if any_fail else 0
 
 

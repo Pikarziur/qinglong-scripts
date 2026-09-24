@@ -259,7 +259,7 @@ class Changhong:
         return status
 
 
-def notify(message):
+def notify(message, title=None):
     # 通知开关默认开：CH_NOTIFY 填 0/false/off/no 才关
     if os.getenv("CH_NOTIFY", "1").strip().lower() in ("0", "false", "off", "no"):
         return
@@ -269,7 +269,7 @@ def notify(message):
         if str(folder) not in sys.path:
             sys.path.append(str(folder))
     try:
-        importlib.import_module("notify").send(TITLE, message)
+        importlib.import_module("notify").send(title or TITLE, message)
         print("青龙通知模块调用完成（送达情况以通知渠道为准）")
     except Exception as exc:
         print(f"青龙通知不可用或调用失败（{type(exc).__name__}），不影响签到结果")
@@ -283,19 +283,19 @@ def main():
         lines = [x for x in lines if entry_ref(x) in YYB_ONLY_REFS]
         if not lines:
             print("⚠️ 顶部 YYB_ONLY_REFS = %s 过滤后无账号，留空 [] 可跑全部" % YYB_ONLY_REFS)
-    results, failed = [], False
+    results, fail_count = [], 0
     if not lines:
         results.append("未配置 YYB_SERVER")
-        failed = True
+        fail_count = 1
     for index, line in enumerate(lines, 1):
         client = None
         try:
             client = Changhong(*parse_entry(line))
             result = client.run()
         except TaskError as exc:
-            result, failed = str(exc), True
+            result = str(exc); fail_count += 1
         except Exception as exc:
-            result, failed = f"处理异常（{type(exc).__name__}）", True
+            result = f"处理异常（{type(exc).__name__}）"; fail_count += 1
         finally:
             if client:
                 client.close()
@@ -305,12 +305,24 @@ def main():
         print(results[0])
     # 控制台执行汇总
     _n = len(lines)
-    _fail = 1 if failed else 0
     print("──── 长虹 执行汇总 ────")
-    print(f"账号 {_n}｜失败 {_fail}")
+    print(f"账号 {_n}｜成功 {_n - fail_count}｜失败 {fail_count}")
     print("────────────────────")
-    notify("\n".join(results))
-    return 1 if failed else 0
+    # 渲染分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
+    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    _content = []
+    for _i, _r in enumerate(results, 1):
+        _acct, _sep, _rest = _r.partition("：")
+        _acct = _acct if _sep else f"账号{_i}"
+        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+        _content.append(f"{_em} [{_acct}]")
+        _rest = _rest.strip()
+        if "异常" in _rest or "失败" in _rest or _rest.startswith("❌"):
+            _content.append("❌ " + (_rest[1:].lstrip() if _rest.startswith("❌") else _rest))
+        else:
+            _content.append("✔️ " + _rest)
+    notify("\n".join(_content), "====== 长虹 汇总日志 ======")
+    return 1 if fail_count else 0
 
 
 if __name__ == "__main__":

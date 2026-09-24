@@ -148,9 +148,9 @@ function shortJson(value, limit = 300) {
     if (typeof text !== 'string') text = String(text);
     return text.length > limit ? text.slice(0, limit) + '...' : text;
 }
-async function push_notification() {
-    const title = "红色火箭（华泰基金）";
-    const content = _summaryMessages.join('\n') || _logMessages.join('\n');
+async function push_notification(successCount, total, summaryContent) {
+    const title = '====== 红色火箭 汇总日志 ======';
+    const content = summaryContent || _summaryMessages.join('\n') || _logMessages.join('\n');
     if (notify && typeof notify.sendNotify === 'function') {
         try {
             await notify.sendNotify(title, content);
@@ -1472,7 +1472,7 @@ async function main() {
     if (!taskVar.trim()) {
         log('环境变量未设置: ' + ckName);
         if (YYB_ONLY_REFS.length) log('提示: 顶部 YYB_ONLY_REFS=' + JSON.stringify(YYB_ONLY_REFS) + ' 过滤后无账号，留空 [] 可跑全部');
-        await push_notification();
+        await push_notification(successCount, accounts.length);
         process.exit(0);
     }
 
@@ -1514,7 +1514,8 @@ async function main() {
 
     // 汇总输出
     slog('\n' + '='.repeat(50));
-    slog('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
+    slog('──── 红色火箭 执行汇总 ────');
+    slog('账号 ' + accounts.length + '｜成功 ' + successCount + '/' + accounts.length);
 
     // 输出每个账号的汇总信息
     slog('\n📋 账号汇总:');
@@ -1532,8 +1533,26 @@ async function main() {
         slog('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
     }
 
-    // 推送通知（只发上面的结尾汇总，不再推全量日志）
-    await push_notification();
+    // 构建分账号汇总（面向 notify，简洁精要；账号行含总积分(+今日变化)，任务行 ✔️/❌）
+    const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    const summaryContent = [];
+    for (let i = 0; i < accounts.length; i++) {
+        const account = accounts[i];
+        const display = account.note || account.wxid;
+        const em = seqEmoji[i] || `${i + 1}.`;
+        let acctLine = `${em} [${display}]`;
+        if (account.currentPoint) acctLine += ` 总积分${account.currentPoint}(+${account.roeReward || 0})`;
+        summaryContent.push(acctLine);
+        if (account.currentPoint) {
+            summaryContent.push('✔️ 积分领取成功');
+            const rp = Math.max(account.historyRedPacketAmount || 0, account.redPacketAmount || 0);
+            summaryContent.push(`✔️ 红包 ${formatMoney(rp)}元（本次提现 ${formatMoney(account.claimedAmount || 0)}元）`);
+        } else {
+            summaryContent.push('❌ 执行失败');
+        }
+    }
+    // 推送通知（只发分账号汇总，不再推全量日志）
+    await push_notification(successCount, accounts.length, summaryContent.join('\n'));
 }
 
 main().catch(e => { log('❌ 脚本异常: ' + e.message); log(e.stack); });

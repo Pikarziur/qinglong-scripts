@@ -444,7 +444,25 @@ class AutoTask:
                         self.log(f"──── {self.script_name} 执行汇总 ────")
                         self.log(f"账号 {total_accounts}｜成功 {ok_cnt}｜失败 {total_accounts - ok_cnt}")
                         self.log("────────────────────────────")
-                        notify.send(title, content)
+                        # 渲染分账号汇总（面向 notify，简洁精要；多任务型按任务行 ✔️/❌）
+                        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+                        _fmt = []
+                        for _i, _pl in enumerate(content.splitlines(), 1):
+                            if not _pl.strip():
+                                continue
+                            if ": " in _pl:
+                                _nick, _rest = _pl.split(": ", 1)
+                            else:
+                                _nick, _rest = f"账号{_i}", _pl
+                            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+                            _fmt.append(f"{_em} [{_nick}]")
+                            if _rest.startswith("✅"):
+                                _fmt.append("✔️ " + _rest[1:].lstrip())
+                            elif _rest.startswith("❌"):
+                                _fmt.append("❌ " + _rest[1:].lstrip())
+                            else:
+                                _fmt.append(_rest)
+                        notify.send("====== 微信支付提现笔笔省 汇总日志 ======", "\n".join(_fmt))
                         self.log(f"[通知] 推送已提交：{title}")
                 except Exception as e:
                     self.log(f"[通知] 推送失败: {e}", level="error")

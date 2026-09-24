@@ -139,10 +139,21 @@ async function main() {
     }
 
     log('========== 签到结束 ==========');
+    const wnOk = summaryLines.some(l => l.includes('签到成功') || l.includes('已签到'));
     log('──── 福利吧 执行汇总 ────');
-    log(summaryLines.join('\n') || '无结果（可能未配置 Cookie）');
+    // 推送分账号汇总（面向 notify，简洁精要；单账号，纯签到无积分）
+    const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    const summaryContent = [];
+    summaryContent.push(`${seqEmoji[0]} [福利吧]`);
+    const _lastWn = summaryLines.filter(l => l.trim()).slice(-1)[0] || '';
+    if (wnOk) {
+        summaryContent.push('✔️ 签到成功');
+    } else {
+        summaryContent.push('❌ 签到失败' + (_lastWn ? '：' + _lastWn.slice(0, 50) : ''));
+    }
+    log(summaryContent.join('\n'));
     log('────────────────────────');
-    await sendQingLongNotify('福利吧签到 执行汇总', summaryLines.join('\n') || '未配置 Cookie 或无签到结果');
+    await sendQingLongNotify('====== 福利吧 汇总日志 ======', summaryContent.join('\n'));
 }
 
 main().catch(e => log(`脚本异常: ${e.message}`));

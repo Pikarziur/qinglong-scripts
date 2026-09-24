@@ -642,27 +642,27 @@ def main() -> int:
     print("\n-------- 执 行 结 束 --------")
     print("──── JLC 执行汇总 ────")
 
-    # 推送精简摘要（不刷全量日志；成功数进标题，适配 PushPlus 免费版微信只显示标题）
+    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
     if JLC_NOTIFY:
-        success = sum(1 for r in results if r.get("ok"))
-        title = f"{SCRIPT_NAME}｜成功 {success}/{len(results)}"
-        summary = []
-        for r in results:
-            remark = r.get("remark") or "?"
+        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        _content = []
+        for _i, r in enumerate(results, start=1):
+            _remark = r.get("remark") or f"账号{_i}"
+            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+            _content.append(f"{_em} [{_remark}]")
             if r.get("ok"):
-                parts = []
-                if r.get("gain_signin"):
-                    parts.append(f"签到+{r['gain_signin']}豆豆")
-                elif r.get("signed"):
-                    parts.append("已签到")
-                if r.get("gain_day7"):
-                    parts.append(f"第7天+{r['gain_day7']}豆豆")
-                if r.get("total") is not None:
-                    parts.append(f"总数{r['total']}")
-                summary.append(f"✅ [{remark}] {'，'.join(parts) if parts else '完成'}")
+                if r.get("signed") and not r.get("gain_signin"):
+                    _content.append("✔️ 签到成功（今日已签）")
+                else:
+                    _parts = []
+                    if r.get("gain_signin"):
+                        _parts.append(f"签到+{r['gain_signin']}豆豆")
+                    if r.get("gain_day7"):
+                        _parts.append(f"第7天+{r['gain_day7']}豆豆")
+                    _content.append("✔️ 签到成功" + ("，" + "，".join(_parts) if _parts else ""))
             else:
-                summary.append(f"❌ [{remark}] 执行失败")
-        try_send_notify(title, "\n".join(summary))
+                _content.append("❌ 签到失败")
+        try_send_notify("====== JLC 嘉立创 汇总日志 ======", "\n".join(_content))
 
     return 1 if any_fail else 0
 

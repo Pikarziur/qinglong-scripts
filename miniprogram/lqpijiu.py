@@ -517,27 +517,39 @@ def main():
     print("=============== 漓泉啤酒 签到开始 ===============")
     summaries = []
     ok_count = 0
+    acct_results = []
     for i, entry in enumerate(entries, 1):
         parts = entry.split("#", 1)
         openid = parts[0].strip()
         remark = parts[1].strip() if len(parts) > 1 else ""
+        ident = remark or openid
         print(f"\n-------------- 账号 {i}{('/' + remark) if remark else ''} --------------")
         try:
             summary, ok = run_account(openid, i)
-            summaries.append(summary)
+            acct_results.append((ident, ok, summary))
             ok_count += 1 if ok else 0
         except Exception as e:
             print(f"❌ 账号 {i} 执行异常: {e}")
-            summaries.append(f"【账号 {i}】\n❌ 执行异常: {e}")
+            acct_results.append((ident, False, f"【账号 {i}】\n❌ 执行异常: {e}"))
         time.sleep(1)
 
     print("\n=============== 漓泉啤酒 签到结束 ===============")
     print("──── 漓泉啤酒 执行汇总 ────")
     print(f"账号 {len(entries)}｜成功 {ok_count}｜失败 {len(entries) - ok_count}")
     print("────────────────────────")
-    title = f"漓泉啤酒签到 {ok_count}/{len(entries)} 成功"
+    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
+    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    _content = []
+    for _i, (_ident, _ok, _summary) in enumerate(acct_results, 1):
+        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
+        _content.append(f"{_em} [{_ident}]")
+        if _ok:
+            _content.append("✔️ 签到成功")
+        else:
+            _last = [l for l in _summary.splitlines() if l.strip()][-1] if _summary else ""
+            _content.append("❌ " + (_last[:60] if _last else "执行失败"))
     try:
-        send(title, "\n\n".join(summaries))
+        send("====== 漓泉啤酒 汇总日志 ======", "\n".join(_content))
     except Exception as e:
         print(f"⚠️ 通知发送失败: {e}")
 
