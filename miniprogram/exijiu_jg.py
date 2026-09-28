@@ -31,7 +31,7 @@
 # =========================================================
 
 # ============== 新手配置区 ==============
-YYB_ONLY_REFS = [1,2]  # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+YYB_ONLY_REFS = ["1","2"]  # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
 # ========================================
 
 import os
@@ -210,7 +210,7 @@ class DdddOcr:
 # ============================================================
 #  AES 加密（AesCrypto.js 对应）
 # ============================================================
-class TokenInvalidError(BaseException):
+class TokenInvalidError(Exception):
     """Token or encryption key invalid, needs re-login"""
     pass
 
@@ -664,38 +664,57 @@ class GardenClient:
         self.set_token(token)
 
         # Step 3: 获取加密密钥
+        crypto_source = ""
         env_key = os.environ.get("GARDEN_ENCRYPT_KEY", "")
         env_iv = os.environ.get("GARDEN_ENCRYPT_IV", "")
         if env_key and env_iv:
             self.set_crypto(env_key, env_iv)
-            return {"token": token, "crypto_ready": True}
+            crypto_source = "环境变量(固定)"
 
-        # 方式 b: webapi_getuserencryptkey
-        try:
-            enc_key_res = wx.get_user_encrypt_key(wxid, appid)
-            if enc_key_res.get("success"):
-                self.set_crypto(enc_key_res["encrypt_key"], enc_key_res["iv"], version=enc_key_res.get("version", 3))
-                return {"token": token, "crypto_ready": True}
-        except Exception as e:
-            log.warning(f"webapi_getuserencryptkey 异常: {e}")
+        # 方式 b（优先）：花园自身的 /garden/wechat/auth 返回的请求加密密钥，
+        # 这才是 /garden/* 请求签名该用的 key；webapi_getuserencryptkey 的 key 通常只用于解密用户数据。
+        if not self.crypto:
+            encrypted_data, iv = self._try_encrypted_data_via_userinfo(wx, wxid, appid)
+            if not encrypted_data or not iv:
+                encrypted_data, iv = self._try_encrypted_data_via_mobile(wx, wxid, appid)
+            log.info("🔎 getAuth 输入: encryptedData=%s iv=%s" % ("有" if encrypted_data else "无", "有" if iv else "无"))
+            if encrypted_data and iv:
+                self._try_get_auth(encrypted_data, iv)
+                if self.crypto:
+                    crypto_source = "garden/wechat/auth"
+                else:
+                    log.warning("⚠️ getAuth 已带 encryptedData/iv 调用，但未拿到可用密钥(服务端拒绝或字段不符)")
 
-        # 方式 c: session_id 备选
-        try:
-            sess_res = wx.get_session_id(wxid, appid)
-            if sess_res.get("success"):
-                sk_hex = sess_res.get("session_key", "")
-                if sk_hex and len(sk_hex) >= 32:
-                    self.set_crypto(sk_hex[:16], sk_hex[16:32], version=1)
-        except Exception:
-            pass
+        # 方式 c（回退）：webapi_getuserencryptkey
+        if not self.crypto:
+            try:
+                enc_key_res = wx.get_user_encrypt_key(wxid, appid)
+                if enc_key_res.get("success"):
+                    ver = enc_key_res.get("version", 3)
+                    # getuserencryptkey 返回的 version 常是 app/构建版本(如 613/273)，并非 AES 协议版本；
+                    # 若明显过大，按默认协议版本处理，避免服务端按错误版本解密。
+                    if not isinstance(ver, int) or ver > 10:
+                        ver = 3
+                    self.set_crypto(enc_key_res["encrypt_key"], enc_key_res["iv"], version=ver)
+                    crypto_source = "webapi_getuserencryptkey"
+            except Exception as e:
+                log.warning(f"webapi_getuserencryptkey 异常: {e}")
 
-        # 方式 d/d2: userinfo → mobile → getAuth
-        encrypted_data, iv = self._try_encrypted_data_via_userinfo(wx, wxid, appid)
-        if not encrypted_data or not iv:
-            encrypted_data, iv = self._try_encrypted_data_via_mobile(wx, wxid, appid)
-        if encrypted_data and iv:
-            self._try_get_auth(encrypted_data, iv)
+        # 方式 d（回退）：session_id 备选
+        if not self.crypto:
+            try:
+                sess_res = wx.get_session_id(wxid, appid)
+                if sess_res.get("success"):
+                    sk_hex = sess_res.get("session_key", "")
+                    if sk_hex and len(sk_hex) >= 32:
+                        self.set_crypto(sk_hex[:16], sk_hex[16:32], version=1)
+                        crypto_source = "session_id"
+            except Exception:
+                pass
 
+        if self.crypto:
+            log.info("🔐 加密就绪 key字节=%d version=%s 来源=%s" % (
+                len(self._crypto_key.encode("utf-8")), self._encrypt_version, crypto_source))
         return {"token": token, "crypto_ready": self.crypto is not None}
 
     def _try_encrypted_data_via_userinfo(self, wx, wxid, appid):
@@ -726,8 +745,11 @@ class GardenClient:
             version = auth_result.get("version")
             if key and auth_iv:
                 self.set_crypto(key, auth_iv, version=version or 2)
-        except Exception:
-            pass
+            else:
+                fields = list(auth_result.keys()) if isinstance(auth_result, dict) else type(auth_result)
+                log.warning("⚠️ /garden/wechat/auth 未返回 encryptKey/iv，返回字段: %s" % fields)
+        except Exception as e:
+            log.warning("⚠️ /garden/wechat/auth 调用异常: %s" % e)
 
     def _refresh_crypto_if_needed(self):
         if not self.crypto or not self._wx or not self.wxid:
@@ -980,6 +1002,7 @@ def run(client, do_daily=True):
     wine_summary_lines = []
     min_harvest_secs = None
     session_brewed_l = 0.0  # 本次运行收获的酒量(升)
+    run_had_encrypt = False  # 任一任务命中加密校验失败(5001)时置位，run 末尾统一抛出，避免单任务异常冲垮整轮
 
     # ── 会员信息 ──
     log.info("👤 获取会员信息...")
@@ -995,7 +1018,9 @@ def run(client, do_daily=True):
         try:
             r = client.daily_sign()
             log.info("   ✅ 签到成功  💧+%s  🌿+%s  %s" % (r.get("water", 0), r.get("manure", 0), r.get("tips", "")))
-        except RuntimeError as e:
+        except Exception as e:
+            if isinstance(e, TokenInvalidError) or "加密校验失败" in str(e):
+                run_had_encrypt = True
             _sign_msg = str(e)
             # 今日已签会被服务端当错误抛出；do_daily 恒为 True 后每次运行都会走到这里，
             # 不能一律打成「签到失败」，否则推送里天天显示失败，实际只是已签。
@@ -1013,7 +1038,7 @@ def run(client, do_daily=True):
                     log.info("   ℹ️  分享已达上限"); break
                 log.info("   ✅ 第%d次分享  💧+%s  🌿+%s" % (i + 1, w, m))
                 time.sleep(1)
-            except RuntimeError as e:
+            except Exception as e:
                 log.warning("   ⚠️  分享失败: %s" % e); break
     else:
         log.info("ℹ️  签到/分享今日已完成，跳过")
@@ -1030,7 +1055,7 @@ def run(client, do_daily=True):
         log.info("   🔨 尝试开垦第 %d 块田地..." % ss)
         client.extend({"serial_number": ss})
         log.info("   ✅ 开垦新地块成功！")
-    except RuntimeError as e:
+    except Exception as e:
         if "4041" in str(e): log.warning("   ⚠️  开垦失败：收酒数量不足")
         else: log.warning("   ⚠️  开垦失败：%s" % e)
     except Exception as e:
@@ -1063,7 +1088,7 @@ def run(client, do_daily=True):
                     r = client.harvest({"id": pid}); got = int(r.get("volumn") or r.get("sorghum") or r.get("wheat") or 0)
                     log.info("      ✅ 收获成功：+%s 斤" % got if got > 0 else "      ✅ 收获成功（0斤）")
                     harvested = True; break
-                except RuntimeError as e:
+                except Exception as e:
                     err_str = str(e)
                     if attempt < 26 and ("未成熟" in err_str or "not mature" in err_str.lower() or "时间" in err_str):
                         log.info("      ⏳ 未成熟，5秒后重试（%d/26）..." % (attempt + 1)); time.sleep(5)
@@ -1077,14 +1102,14 @@ def run(client, do_daily=True):
                     allow_water = water > 0  # 重新播种后为新苗,距成熟远,必浇
                     if allow_water and water > 0:
                         try: client.watering({"id": pid}); log.info("      💧 浇水成功"); water -= 1
-                        except RuntimeError as e: log.warning("      ⚠️  浇水失败：%s" % e)
+                        except Exception as e: log.warning("      ⚠️  浇水失败：%s" % e)
                         time.sleep(1)
                     elif not allow_water: log.info("      💧 临近成熟,跳过浇水以节水")
                     else: log.info("      💧 水滴不足，跳过浇水")
                     if manure > 0:
                         try: client.manuring({"id": pid}); log.info("      🌿 施肥成功"); manure -= 1
-                        except RuntimeError as e: log.warning("      ⚠️  施肥失败：%s" % e)
-                except RuntimeError as e: log.warning("      ❌ 播种失败：%s" % e)
+                        except Exception as e: log.warning("      ⚠️  施肥失败：%s" % e)
+                except Exception as e: log.warning("      ❌ 播种失败：%s" % e)
                 time.sleep(1)
         elif status in (10, 11, 2) and not is_ready(ct):
             try: remaining_secs = max(0, int((datetime.strptime(ct, "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds())) if ct else 999
@@ -1101,24 +1126,24 @@ def run(client, do_daily=True):
                     allow_water = water > 0  # 重新播种后为新苗,距成熟远,必浇
                     if allow_water and water > 0:
                         try: client.watering({"id": pid}); log.info("      💧 浇水成功"); water -= 1
-                        except RuntimeError as e: log.warning("      ⚠️  浇水失败：%s" % e)
+                        except Exception as e: log.warning("      ⚠️  浇水失败：%s" % e)
                     elif not allow_water: log.info("      💧 临近成熟,跳过浇水以节水")
                     if manure > 0:
                         try: client.manuring({"id": pid}); log.info("      🌿 施肥成功"); manure -= 1
-                        except RuntimeError as e: log.warning("      ⚠️  施肥失败：%s" % e)
-                except RuntimeError as e: log.warning("      ❌ 等待后收获失败：%s" % e)
+                        except Exception as e: log.warning("      ⚠️  施肥失败：%s" % e)
+                except Exception as e: log.warning("      ❌ 等待后收获失败：%s" % e)
                 time.sleep(1); continue
             log.info("   🌱 地块 %s（%s）[生长中]  剩余: %s  💧已浇 %s次  🌿已施 %s次" % (sn, crop, fmt_remaining(ct), wn, mn))
             plot_summary_lines.append("🌱 地块%s(%s): 还需 %s" % (sn, crop, fmt_remaining(ct)))
             if allow_water and water > 0:
                 try: client.watering({"id": pid}); log.info("      💧 浇水成功"); water -= 1
-                except RuntimeError as e: log.warning("      ⚠️  浇水失败：%s" % e)
+                except Exception as e: log.warning("      ⚠️  浇水失败：%s" % e)
             elif not allow_water: log.info("      💧 临近成熟,跳过浇水以节水")
             else: log.info("      💧 水滴不足，跳过浇水")
             time.sleep(1)
             if manure > 0:
                 try: client.manuring({"id": pid}); log.info("      🌿 施肥成功"); manure -= 1
-                except RuntimeError as e: log.warning("      ⚠️  施肥失败：%s" % e)
+                except Exception as e: log.warning("      ⚠️  施肥失败：%s" % e)
             else: log.info("      🌿 肥料不足，跳过施肥")
             time.sleep(1)
         elif status == 0:
@@ -1128,15 +1153,15 @@ def run(client, do_daily=True):
                 client.seeds({"id": pid, "type": seed_type}); log.info("      ✅ 播种成功"); time.sleep(1)
                 if allow_water and water > 0:
                     try: client.watering({"id": pid}); log.info("      💧 浇水成功"); water -= 1
-                    except RuntimeError as e: log.warning("      ⚠️  浇水失败：%s" % e)
+                    except Exception as e: log.warning("      ⚠️  浇水失败：%s" % e)
                 elif not allow_water: log.info("      💧 临近成熟,跳过浇水以节水")
                 else: log.info("      💧 水滴不足，跳过浇水")
                 time.sleep(1)
                 if manure > 0:
                     try: client.manuring({"id": pid}); log.info("      🌿 施肥成功"); manure -= 1
-                    except RuntimeError as e: log.warning("      ⚠️  施肥失败：%s" % e)
+                    except Exception as e: log.warning("      ⚠️  施肥失败：%s" % e)
                 else: log.info("      🌿 肥料不足，跳过施肥")
-            except RuntimeError as e: log.warning("      ❌ 播种失败：%s" % e)
+            except Exception as e: log.warning("      ❌ 播种失败：%s" % e)
             time.sleep(1)
         else:
             log.info("   ❓ 地块 %s（%s）[%s]" % (sn, crop, PLOT_STATUS.get(status, "状态%s" % status)))
@@ -1172,7 +1197,7 @@ def run(client, do_daily=True):
             if can_put >= 200:
                 log.info("   📭 无酒坛 → 制酒 %s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
                 try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 制酒成功"); sorghum -= can_put; wine_yeast -= can_put // 200
-                except RuntimeError as e: log.warning("      ❌ 制酒失败：%s" % e)
+                except Exception as e: log.warning("      ❌ 制酒失败：%s" % e)
                 time.sleep(1)
             elif sorghum < 200: log.info("   📭 无酒坛，高粱不足（有 %s 斤）" % sorghum)
             else: log.info("   📭 无酒坛，酒曲不足（有 %s 块）" % wine_yeast)
@@ -1188,12 +1213,12 @@ def run(client, do_daily=True):
                     log.info("      ✅ 收获成功%s" % ("：+%sL" % got if got else ""))
                     info = client.member_info() or info; sorghum = int(info.get("sorghum") or 0)
                     wine_vol = int(info.get("wine") or 0); wine_yeast = int(info.get("wine_yeast") or 0)
-                except RuntimeError as e: log.warning("      ❌ 收获失败：%s" % e); time.sleep(1); continue
+                except Exception as e: log.warning("      ❌ 收获失败：%s" % e); time.sleep(1); continue
                 time.sleep(1); can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
                 if can_put >= 200:
                     log.info("      🌾 立即投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
                     try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
-                    except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
+                    except Exception as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
                 else:
                     if sorghum < 200: log.info("      ⚠️  高粱不足（有 %s 斤），跳过投粮" % sorghum)
@@ -1208,12 +1233,12 @@ def run(client, do_daily=True):
                         log.info("      ✅ 收获成功%s" % ("：+%sL" % got if got else ""))
                         info = client.member_info() or info; sorghum = int(info.get("sorghum") or 0)
                         wine_vol = int(info.get("wine") or 0); wine_yeast = int(info.get("wine_yeast") or 0)
-                    except RuntimeError as e: log.warning("      ❌ 收获失败：%s" % e); time.sleep(1); continue
+                    except Exception as e: log.warning("      ❌ 收获失败：%s" % e); time.sleep(1); continue
                     time.sleep(1); can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
                     if can_put >= 200:
                         log.info("      🌾 立即投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
                         try: r = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
-                        except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
+                        except Exception as e: log.warning("      ❌ 投粮失败：%s" % e)
                         time.sleep(1)
                     else:
                         if sorghum < 200: log.info("      ⚠️  高粱不足（有 %s 斤），跳过投粮" % sorghum)
@@ -1231,7 +1256,7 @@ def run(client, do_daily=True):
                 if can_put >= 200:
                     log.info("   🍶 酒坛 %s [空坛] → 投粮 %s 斤高粱（消耗酒曲 %s 块）" % (wid, can_put, can_put // 200))
                     try: r = client.discharge_grain({"id": wid, "volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200)); sorghum -= can_put; wine_yeast -= can_put // 200
-                    except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
+                    except Exception as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
                 else:
                     if sorghum < 200: log.info("   🍶 酒坛 %s [空坛]  ⚠️  高粱不足（有 %s 斤）" % (wid, sorghum))
@@ -1250,9 +1275,9 @@ def run(client, do_daily=True):
                 if can_put >= 200:
                     log.info("   🌾 制曲后投粮：%s 斤高粱（消耗酒曲 %s 块）" % (can_put, can_put // 200))
                     try: r2 = client.discharge_grain({"volumn": can_put}); log.info("      ✅ 投粮成功：-%s斤高粱 -%s块酒曲" % (can_put, can_put // 200))
-                    except RuntimeError as e: log.warning("      ❌ 投粮失败：%s" % e)
+                    except Exception as e: log.warning("      ❌ 投粮失败：%s" % e)
                     time.sleep(1)
-            except RuntimeError as e: log.warning("   ❌ 制曲失败：%s" % e)
+            except Exception as e: log.warning("   ❌ 制曲失败：%s" % e)
             time.sleep(1)
         elif wheat > 0: log.info("🍺 小麦 %s 斤不足 100 斤，跳过制曲" % wheat)
 
@@ -1262,7 +1287,7 @@ def run(client, do_daily=True):
         if _AUTO_EXCHANGE:
             log.info("💰 酒兑换积分：%sL → +%s 积分" % (wine_vol, wine_vol))
             try: r = client.exchange_wine(wine_vol); log.info("   ✅ 兑换成功: %s" % r)
-            except RuntimeError as e: log.warning("   ❌ 兑换失败：%s" % e)
+            except Exception as e: log.warning("   ❌ 兑换失败：%s" % e)
             time.sleep(1)
         else: log.info("💰 酒 %sL 未兑换（自动兑换已关闭，设置 GARDEN_AUTO_EXCHANGE=1 开启）" % wine_vol)
 
@@ -1275,9 +1300,9 @@ def run(client, do_daily=True):
             for q in todo:
                 qid, answer = q.get("id"), q.get("answer", ""); log.info("   ❓ [%s] %s  →  %s" % (qid, q.get("title", "")[:25], answer))
                 try: time.sleep(3); r = client.answer_results(qid, answer); log.info("      ✅ 答题成功：💧+%s 🌿+%s" % ((r or {}).get("water", 0), (r or {}).get("manure", 0)))
-                except RuntimeError as e: log.warning("      ❌ 答题失败：%s" % e)
+                except Exception as e: log.warning("      ❌ 答题失败：%s" % e)
                 time.sleep(1)
-        except RuntimeError as e: log.warning("   ❌ 获取题目失败：%s" % e)
+        except Exception as e: log.warning("   ❌ 获取题目失败：%s" % e)
 
     # ── 抽奖 ──
     if do_daily:
@@ -1287,9 +1312,9 @@ def run(client, do_daily=True):
             log.info("   剩余免费次数: %d" % free_count)
             for i in range(free_count):
                 try: r = client.draw(); prize = r.get("prize_name") or r.get("name") or r.get("prize") or str(r); log.info("   🎁 第 %d 次：%s" % (i + 1, prize))
-                except RuntimeError as e: log.warning("   ❌ 抽奖失败：%s" % e); break
+                except Exception as e: log.warning("   ❌ 抽奖失败：%s" % e); break
                 time.sleep(2)
-        except RuntimeError as e: log.warning("   ❌ 抽奖异常：%s" % e)
+        except Exception as e: log.warning("   ❌ 抽奖异常：%s" % e)
 
     # ── 刷新统计 ──
     try:
@@ -1338,13 +1363,17 @@ def run(client, do_daily=True):
         else:
             summary += "\n\n📅 %s酿酒共计 %.2f L（本次 +%.2f L）" % (mlabel, month_total, sess_add)
             log.info("📅 %s酿酒共计 %.2f L（本次 +%.2f L）" % (mlabel, month_total, sess_add))
-        return summary, min_harvest_secs, session_brewed_l
     except Exception:
         log.info("✅ 今日任务完成")
         if plot_summary_lines: result = "今日任务完成\n\n📋 地块状态:\n" + "\n".join(plot_summary_lines)
         else: result = "今日任务完成"
         if wine_summary_lines: result += "\n\n🍶 酒坛状态:\n" + "\n".join(wine_summary_lines)
         return result, min_harvest_secs, session_brewed_l
+    if run_had_encrypt:
+        # 加密校验失败属于密钥/方案不匹配，重登拿的是同一套密钥，重试必再失败；
+        # 在此统一抛出，让主循环走「加密失败」分支(不重登、记失败、提示检查密钥)。
+        raise TokenInvalidError("请求加密被服务端拒绝(加密校验失败)：请检查加密密钥来源/GARDEN_ENCRYPT_KEY/IV")
+    return summary, min_harvest_secs, session_brewed_l
 
 
 # ============================================================
@@ -1559,7 +1588,11 @@ if __name__ == "__main__":
                              or "4012" in msg or "非法的用户 token" in msg
                              or "token" in msg.lower() and ("失效" in msg or "非法" in msg or "无效" in msg or "过期" in msg)
                              or isinstance(e, TokenInvalidError))
-            if TOKEN_INVALID:
+            # 加密校验失败（5001）属于「密钥/加密方案不匹配」，重登拿的是同一套密钥，重试必然再失败，
+            # 直接判失败、跳过该账号，不再浪费一次登录。
+            ENCRYPT_FAIL = ("5001" in msg or "加密校验失败" in msg
+                            or ("加密" in msg and "失败" in msg))
+            if TOKEN_INVALID and not ENCRYPT_FAIL:
                 log.warning("   ⚠️  检测到 token 失效(%s)，立即重新登录重试..." % msg.split("]")[0].strip("["))
                 try:
                     result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
@@ -1575,7 +1608,10 @@ if __name__ == "__main__":
                     log.error("   ❌ 重试异常: %s" % e2, exc_info=True)
                     notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, _err(e)))
             else:
-                log.error("   ❌ 执行异常: %s" % e, exc_info=True)
+                if ENCRYPT_FAIL:
+                    log.error("   ❌ 请求加密被服务端拒绝(加密校验失败)：重登无法修复，请检查加密密钥来源/GARDEN_ENCRYPT_KEY/IV")
+                else:
+                    log.error("   ❌ 执行异常: %s" % e, exc_info=True)
                 notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, _err(e)))
         time.sleep(random.randint(2, 5))
 
