@@ -14,6 +14,22 @@
 // 可控参数：
 //   wnflb2023_cookie   必填。论坛登录 Cookie，需含 S5r8_2132_auth
 //   WNFLB_NOTIFY        通知开关，默认开启；填 0/false/off/no 关闭
+//   WNFLB_EXPIRE        可选，Cookie 预期过期日，如 2026-10-15。设了会提前3天提醒
+//
+// 🚀 Cookie 一键获取（登录 www.wnflb2023.com 后 F12 → Console 执行）：
+//
+//   // 方法 A: 复制全部 Cookie（包含所有 Discuz 字段）
+//   copy(document.cookie)
+//
+//   // 方法 B: 只复制关键登录字段（更干净，推荐）
+//   copy(['S5r8_2132_auth','S5r8_2132_saltkey'].map(k=>k+'='+document.cookie.match(new RegExp(k+'=([^;]+)'))?.[1]).join('; '))
+//
+//   // 方法 C: Application 面板 → Cookies → www.wnflb2023.com → 全选 Value 列合并
+//
+// Discuz 论坛 Cookie 说明：
+//   - S5r8_2132_auth    登录凭证（必须）
+//   - S5r8_2132_saltkey 盐值（必须）
+//   - 前缀 S5r8_2132 是站点唯一标识，不同 Discuz 站点前缀不同
 // ────────────────────────────────────────────
 
 const https = require('https');
@@ -62,6 +78,30 @@ async function sendQingLongNotify(title, content) {
 
 function log(msg) { console.log(`[WN签到] ${msg}`); }
 
+// 手动过期日检测（Discuz Cookie 无内置 exp，需用户手动配 WNFLB_EXPIRE）
+function checkCookieExpire(expireStr) {
+  if (!expireStr) {
+    log('📅 未配置 WNFLB_EXPIRE，仅在线检测生效（设 YYYY-MM-DD 开启日期提醒）');
+    return;
+  }
+  const exp = new Date(expireStr + 'T23:59:59');
+  if (isNaN(exp.getTime())) {
+    log('⚠️ WNFLB_EXPIRE 格式错误，应为 YYYY-MM-DD');
+    return;
+  }
+  const remainDays = Math.ceil((exp - new Date()) / 86400000);
+  const status = remainDays >= 0 ? `剩余${remainDays}天` : `已过期${-remainDays}天`;
+  log(`📅 Cookie ${status} | 过期: ${expireStr}`);
+  if (remainDays < 0) {
+    log('❌ Cookie 已过期，请重新登录抓取！');
+    return false;
+  }
+  if (remainDays <= 3) {
+    log(`🔔 Cookie 即将过期（${remainDays}天），建议尽快更新！`);
+  }
+  return true;
+}
+
 function request(url, options = {}) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
@@ -103,6 +143,7 @@ async function main() {
 
     if (!COOKIE) { slog('未配置 Cookie'); return; }
     if (!getCookieVal('S5r8_2132_auth', COOKIE)) { slog('Cookie 缺少 S5r8_2132_auth'); return; }
+  checkCookieExpire(WNFLB_EXPIRE); // 手动过期日检测（不阻断，只提醒）
 
     // 1. 访问首页，拿 formhash
     log('访问首页...');

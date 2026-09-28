@@ -19,6 +19,7 @@
 
 const SCRIPT_NAME = '学姐吧签到';
 const SCRIPT_VERSION = '1.1.0';
+const XJB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.XJB_NOTIFY || '1').trim().toLowerCase());
 const BASE_URL = 'https://xuejieba2026.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
