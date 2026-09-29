@@ -10,7 +10,15 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const HSHJ = path.join(__dirname, 'hshj.js');
+const hshjCandidates = [path.join(__dirname, 'hshj.js')];
+try {
+  const { execSync } = require('child_process');
+  const found = execSync('find /ql -name hshj.js 2>/dev/null', { encoding: 'utf8' }).trim();
+  if (found) found.split('\n').forEach(p => { p = p.trim(); if (p) hshjCandidates.push(p); });
+} catch (e) { /* Windows/非容器环境忽略 */ }
+let HSHJ = hshjCandidates.find(p => { try { return fs.existsSync(p); } catch (e) { return false; } });
+if (!HSHJ) HSHJ = hshjCandidates[0];
+console.log('📂 加载 hshj.js: ' + HSHJ);
 let src = fs.readFileSync(HSHJ, 'utf8');
 
 // 剥离末尾 main() 自执行副作用，改为导出我们需要的函数
@@ -103,17 +111,19 @@ const entries = mod.YYB_ENTRIES || [];
 console.log('YYB_SERVER 已设置           :', !!process.env.YYB_SERVER);
 console.log('YYB_ENTRIES 数量           :', entries.length);
 console.log('  账号 ref 列表            :', entries.map(e => e.ref).join(', ') || '(空)');
-console.log('AUTO_CLAIM_H5_RED_PACKET   :', process.env.HSJJ_AUTO_CLAIM_H5 !== '0', '(默认开，控制是否走桥接)');
+console.log('AUTO_CLAIM_H5_RED_PACKET   :', process.env.AUTO_CLAIM_H5_RED_PACKET !== '0', '(默认开，控制是否走桥接)');
 console.log('HSJJ_MKTZB_OPENID 已设置   :', !!process.env.HSJJ_MKTZB_OPENID, '(写死会全局串号，不建议)');
 
 const prereqOk = entries.length > 0;
 console.log('----------------------------------------');
 console.log('硬前提是否满足（可进入桥接）:', prereqOk ? '✅ 满足（另需：该微信已授权mktzb公众号 + YYB在线）' : '❌ 不满足——YYB_SERVER 未配/为空');
 
-if (!process.argv.includes('--live')) {
-  console.log('\n提示：配置满足后，在能联网的环境运行 `node probe_resolve_h5.js --live` 才能真正调 resolveH5Openid 验证能否拿到 openid。');
+const diagOnly = process.env.PROBE_DIAG_ONLY === '1';
+if (diagOnly) {
+  console.log('\n（PROBE_DIAG_ONLY=1：仅做配置诊断，未跑联网实测）');
   process.exit(0);
 }
+console.log('\n▶ 默认联网实测 resolveH5Openid（仅看诊断请设 PROBE_DIAG_ONLY=1）...');
 
 // ---- 联网实测（--live） ----
 (async () => {
@@ -127,7 +137,7 @@ if (!process.argv.includes('--live')) {
       // 真实签名: resolveH5Openid(wxid, ticketCode, cache, cacheKey)
       const o = await mod.resolveH5Openid(ref, testCode, null, null);
       if (o) console.log(`  ✅ 成功拿到 openid: ${o.substring(0, 8)}*** (完整: ${o})`);
-      else console.log('  ⚠️ 未拿到 openid（返回空）——检查 YYB-Go-Enhanced 是否在线 / 该微信是否登录并授权 mktzb 公众号 / HSJJ_H5_TICKETCODE 是否正确');
+      else console.log('  ⚠️ 未拿到 openid（返回空）——检查 YYB-Go-Enhanced 是否在线 / 该微信是否登录并授权 mktzb 公众号 / WX_ID 对应微信是否已在 YYB 登录');
     } catch (err) {
       console.log('  ❌ 调用异常:', err.message);
     }
