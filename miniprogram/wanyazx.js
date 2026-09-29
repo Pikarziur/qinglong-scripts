@@ -1,25 +1,24 @@
 /*
 # name: 丸丫甄选
-# cron: 44 7,16 * * *
+# cron: 45 5,15 * * *
 */
 
 // ────────────────────────────────────────────
 // 任务流程：
-//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 //   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 //   3. 用 code 走有赞 authorize 静默登录，换取 session
 //   4. 查询签到活动(check-in-info)，执行签到(checkinV2)，并查询积分
 //   5. 输出汇总（含今日领取 / 总积分）并由 $.done 发送通知
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
-//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+//   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 // ────────────────────────────────────────────
 
-const YYB_ONLY_REFS = [];  // 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 
 // ===== YYB-Go-Enhanced + QingLong standalone adapter =====
 function _yybRoutes() {
-    const onlyRefs = (YYB_ONLY_REFS || []).map(r => _yybCleanRef(String(r)));
     const routes = String(process.env.YYB_SERVER || '')
         .split(/[\s&]+/).map(v => v.trim()).filter(Boolean)
         .map((line, index) => {
@@ -32,8 +31,10 @@ function _yybRoutes() {
             return { server, ref: line.slice(at + 1).trim() };
         });
     if (!routes.length) throw new Error('未配置 YYB_SERVER（地址@账号标识，支持换行/空格/& 分隔）');
-    if (onlyRefs.length) {
-        const filtered = routes.filter(x => onlyRefs.includes(_yybCleanRef(x.ref)));
+    // 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+    if (YYB_ONLY_REFS && YYB_ONLY_REFS.length) {
+        const wanted = new Set(YYB_ONLY_REFS.map(x => parseInt(x, 10)).filter(n => Number.isInteger(n) && n > 0));
+        const filtered = routes.filter((_, i) => wanted.has(i + 1));
         console.log(`[账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${routes.length} 个账号`);
         return filtered;
     }

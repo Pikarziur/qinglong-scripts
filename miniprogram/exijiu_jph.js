@@ -1,23 +1,23 @@
 /*
 # name: 君品荟 - 签到
-# cron: 18 7,16 * * *
+# cron: 20 5,15 * * *
 */
 
 // ────────────────────────────────────────────
 // 任务流程：
-//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 //   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 //   3. 完成签到（打卡 / 新人礼等）任务
 //   4. 输出账号结果并发送精简摘要通知
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，换行分隔
-//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+//   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 //   JPH_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
 //   OCR_SERVER       可选。滑块识别服务，默认 http://ocr.fj.us.ci
 // ────────────────────────────────────────────
 
-// 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
-const YYB_ONLY_REFS = [];
+// 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
+const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 const $ = new Env('君品荟签到');
 const axios = require('axios');
@@ -457,9 +457,15 @@ async function Envs() {
         if (!i) return false;
         const parsed = parseYybGoEntry(i);
         if (!parsed.server || !parsed.ref) { log(`跳过无效 YYB_SERVER 配置：${i}`); return false; }
-        if (YYB_ONLY_REFS.length && !YYB_ONLY_REFS.includes(String(parsed.ref))) return false;
         return true;
     });
+    // 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+    if (YYB_ONLY_REFS && YYB_ONLY_REFS.length) {
+        const wanted = new Set(YYB_ONLY_REFS.map(x => parseInt(x, 10)).filter(n => Number.isInteger(n) && n > 0));
+        const before = xjhdArr.length;
+        xjhdArr = xjhdArr.filter((_, i) => wanted.has(i + 1));
+        log(`按 YYB_ONLY_REFS 筛选：请求序号 [${[...wanted].sort((a,b)=>a-b)}]，命中 ${xjhdArr.length}/${before} 个账号`);
+    }
     if (!xjhdArr.length) {
         log(`YYB_SERVER 中没有有效账号（或全被 YYB_ONLY_REFS 过滤，留空 [] 可跑全部）`);
         return false;

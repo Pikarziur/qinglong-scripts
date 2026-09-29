@@ -1,22 +1,22 @@
 # =========================================================
 # name: 微信笔笔省 - 提现额度
-# cron: 50 7,16 * * *
+# cron: 50 5,15 * * *
 # =========================================================
 #
 # 任务流程：
-#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 用 code 完成登录（jscode → session_token）
 #   4. 查询余额 / 领券 / 提现额度等任务，输出汇总并发送通知
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
-#   YYB_ONLY_REFS   白名单常量。默认 ["1"]（只跑 ref=1）；留空 [] 跑全部
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。默认 ["1"]（只跑第 1 个账号）；留空 [] 跑全部
 #   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
 #
 # =========================================================
 
-YYB_ONLY_REFS = ["1"] # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
+YYB_ONLY_REFS = ["1"] # 账号序号白名单（1 起），默认 ["1"] = 只跑第 1 个账号；留空 [] = 跑全部
 
 import json
 import random
@@ -194,9 +194,6 @@ class AutoTask:
                     continue
                 try:
                     _server, _ref = self.wechat_code_adapter.parse_entry(entry)
-                    # 只保留 YYB_ONLY_REFS 里列出的 ref；空列表 = 全保留
-                    if YYB_ONLY_REFS and _ref not in YYB_ONLY_REFS:
-                        continue
                     yield entry
                 except ValueError as exc:
                     self.log(f"[检查环境变量] 跳过无效配置 {entry!r}: {exc}", level="error")
@@ -347,6 +344,12 @@ class AutoTask:
         try:
             self.log(f"【{self.script_name}】开始执行任务")
             entries = list(self.check_env())
+            # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+            if YYB_ONLY_REFS:
+                wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
+                if wanted:
+                    entries = [e for i, e in enumerate(entries, 1) if i in wanted]
+                    self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(entries)} 个账号")
             total_accounts = len(entries)
             self.log(f"共 {len(entries)} 个账号待执行")
             if not entries:

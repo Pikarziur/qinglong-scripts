@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # =========================================================
 # name: 漓泉啤酒生态营地
-# cron: 38 7,16 * * *
+# cron: 35 5,15 * * *
 # =========================================================
 #
 # 任务流程：
-#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 登录并进入小程序，完成每日签到 / 领券等任务
 #   4. 输出汇总并发送通知（本脚本无独立开关，始终发送）
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，空格/换行/& 分隔
-#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #   QL_DIR          可选。token 缓存目录，默认 /ql/data/config/yyb_token_caches
 #
 # =========================================================
 
-YYB_ONLY_REFS = []  # 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 
 import json
@@ -32,7 +32,6 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ===== YYB-Go-Enhanced + QingLong standalone adapter =====
 def _yyb_routes():
-    only_refs = [_yyb_clean_ref(r) for r in YYB_ONLY_REFS]
     routes = []
     for number, line in enumerate(os.getenv("YYB_SERVER", "").replace("&", " ").split(), 1):
         line = line.strip()
@@ -49,10 +48,13 @@ def _yyb_routes():
         routes.append({"server": server, "ref": ref.strip()})
     if not routes:
         raise RuntimeError("未配置 YYB_SERVER（地址@账号标识，支持换行/空格/& 分隔）")
-    if only_refs:
-        filtered = [r for r in routes if _yyb_clean_ref(r["ref"]) in only_refs]
-        print(f"[账号过滤] YYB_ONLY_REFS={YYB_ONLY_REFS} 命中 {len(filtered)}/{len(routes)} 个账号")
-        return filtered
+    # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+    if YYB_ONLY_REFS:
+        wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
+        if wanted:
+            filtered = [r for i, r in enumerate(routes, 1) if i in wanted]
+            print(f"[账号过滤] YYB_ONLY_REFS={YYB_ONLY_REFS} 命中 {len(filtered)}/{len(routes)} 个账号")
+            return filtered
     return routes
 
 

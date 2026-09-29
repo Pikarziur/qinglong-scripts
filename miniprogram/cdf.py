@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # =========================================================
 # name:  中免会员 - 签到
-# cron: 0 7,16 * * *
+# cron: 0 5,15 * * *
 # =========================================================
 #
 # 任务流程：
-#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取每个账号的 wx.login code
 #   3. 用 code 请求登录接口换取会员 token（每次运行强制重新登录，不落盘）
 #   4. 调用签到接口完成每日签到，并查询今日是否已签 / 连续签到天数
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行 / 空格 / & 分隔
-#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #   CDF_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
 #
 # =========================================================
 
-YYB_ONLY_REFS = []   # 填上前两个账号的 ref 值
+YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 import os, re, sys, time, random, traceback, json
 import requests
@@ -182,8 +182,6 @@ class YYBClient:
                 continue
             try:
                 server, ref = self.parse_entry(line)
-                if YYB_ONLY_REFS and ref not in YYB_ONLY_REFS:
-                    continue
                 yield server, ref, line
             except ValueError:
                 pass
@@ -320,6 +318,12 @@ def run_account(server, ref):
 
 def main():
     entries = list(YYBClient(APP_ID).entries())
+    # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+    if YYB_ONLY_REFS:
+        wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
+        if wanted:
+            entries = [e for i, e in enumerate(entries, 1) if i in wanted]
+            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
     total = len(entries)
     tday, _, _ = today_str()
 

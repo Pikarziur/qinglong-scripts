@@ -1,6 +1,6 @@
 # =========================================================
 # name: 交个朋友积分签到
-# cron: 24 7,16 * * *
+# cron: 25 5,15 * * *
 # =========================================================
 #
 # 任务流程：
@@ -13,7 +13,7 @@
 # 可控参数：
 #   IYOUKE_TOKEN    可选。手动 bearer token，空格分隔多账号，优先级最高（免 YYB）
 #   YYB_SERVER      必填（无 IYOUKE_TOKEN 时）。格式「地址@ref」，空格/换行分隔
-#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号（环境变量同名可覆盖）
 #   IYOUKE_NOTIFY   通知开关，默认开启；填 0/false/off/no 关闭
 #   IYOUKE_APP_ID   可选。小程序 AppID，默认 wx3b294e7a0ba29bc3
 #   IYOUKE_VERSION  可选。接口版本号，默认 3.5.4
@@ -67,7 +67,7 @@ IYOUKE_TOKEN = os.getenv("IYOUKE_TOKEN", "").strip()
 # ② 配合 YYBGO 的账号基座（必填其一）：每项 "地址@ref"，空格/换行分隔，多账号
 YYB_SERVER_RAW = os.getenv("YYB_SERVER", "").strip()
 # ③ YYB 只跑这些 ref 的白名单过滤器：留空 = 跑 YYB_SERVER 全部账号；填 ["1","2"] = 只跑这些
-YYB_ONLY_REFS = []   # 顶部常量兜底；环境变量 YYB_ONLY_REFS 可覆盖
+YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 # 通知开关：默认开；填 0/false/off/no 关闭
 IYOUKE_NOTIFY = os.getenv("IYOUKE_NOTIFY", "1").strip().lower() not in ("0", "false", "off", "no")
 # 接口参数（可选环境变量覆盖；缺省用抓包所得默认值）
@@ -180,11 +180,18 @@ def _yyb_entries() -> List[Tuple[str, str, str]]:
         parsed = _parse_yyb_line(item)
         if parsed:
             base.append(parsed)
+    # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
     raw_filter = os.getenv("YYB_ONLY_REFS")
-    filters = _split_accounts(raw_filter) if raw_filter else list(YYB_ONLY_REFS)
-    if filters:
-        want = {f.strip() for f in filters if f.strip()}
-        base = [e for e in base if e[1] in want]
+    seqs = list(YYB_ONLY_REFS)
+    if raw_filter:
+        seqs = []
+        for tok in str(raw_filter).replace(",", " ").replace("[", " ").replace("]", " ").split():
+            seqs.append(tok)
+    if seqs:
+        wanted = set(int(x) for x in seqs if str(x).strip().isdigit() and int(x) > 0)
+        if wanted:
+            base = [e for i, e in enumerate(base, 1) if i in wanted]
+            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(base)))
     return base
 
 

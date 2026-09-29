@@ -1,22 +1,22 @@
 # =========================================================
 # name: 中通快递
-# cron: 56 7,16 * * *
+# cron: 55 5,15 * * *
 # =========================================================
 #
 # 任务流程：
-#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
+#   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 完成微信登录（wxlogin）
 #   4. 执行快递签到任务并查询前后积分变化，输出汇总并发送通知
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
-#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
 #
 # =========================================================
 
-YYB_ONLY_REFS = []  # 账号白名单：留空 [] = 跑 YYB_SERVER 里的全部账号；填入 ref（如 "1"）只跑对应账号
+YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 
 def _yyb_clean_ref(value):
@@ -128,7 +128,6 @@ class AutoTask:
                 self.log("[检查环境变量]没有找到 YYB_SERVER，请按 地址@微信账号标识 配置", level="error")
                 return
 
-            only_refs = [_yyb_clean_ref(r) for r in YYB_ONLY_REFS]
             for line_no, raw in enumerate(yyb_server.replace("&", " ").split(), 1):
                 raw = raw.strip()
                 if not raw:
@@ -138,8 +137,6 @@ class AutoTask:
                     continue
                 server, ref = raw.rsplit("@", 1)
                 ref = ref.strip()
-                if only_refs and _yyb_clean_ref(ref) not in only_refs:
-                    continue
                 if not server.strip() or not ref:
                     self.log(f"[检查环境变量]YYB_SERVER 第{line_no}行地址或账号标识为空，已跳过", level="error")
                     continue
@@ -280,7 +277,14 @@ class AutoTask:
             self.log(f"【{self.site_name}】开始执行任务")
 
             # 检查环境变量
-            for index, (server, ref) in enumerate(self.check_env(), 1):
+            all_entries = list(self.check_env())
+            # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+            if YYB_ONLY_REFS:
+                wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
+                if wanted:
+                    all_entries = [e for i, e in enumerate(all_entries, 1) if i in wanted]
+                    self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(all_entries)} 个账号")
+            for index, (server, ref) in enumerate(all_entries, 1):
                 self.log("")
                 self.log(f"------ 【账号{index}】开始执行任务 ------")
 

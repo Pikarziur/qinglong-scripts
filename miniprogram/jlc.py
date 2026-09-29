@@ -1,6 +1,6 @@
 # =========================================================
 # name: 嘉立创
-# cron: 32 7,16 * * *
+# cron: 30 5,15 * * *
 # =========================================================
 #
 # 任务流程：
@@ -12,7 +12,7 @@
 # 可控参数：
 #   JLC_AUTH        可选。格式 token#secret，多账号用 & / 换行分隔，免 YYB
 #   YYB_SERVER      必填（无 JLC_AUTH 时）。格式「地址@ref#备注」，空格/换行/& 分隔
-#   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
+#   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号（环境变量同名可覆盖）
 #   JLC_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
 #   JLC_CAS_APP_ID  可选。CAS 应用 ID，默认 JLC_MOBILE_APP
 #   JLC_PLATFORM_TYPE 可选。平台类型，默认 MP-WEIXIN
@@ -32,7 +32,7 @@
 # 账号配置：YYB_SERVER 走青龙环境变量（无脚本内常量兜底）；YYB_ONLY_REFS 为顶部常量，可被同名环境变量覆盖
 #   YYB_SERVER     账号基座（青龙环境变量），每项 "地址@ref#备注"，多账号用空格 / 换行 / & 分隔
 #                  例：yyb-go:8000@1 yyb-go:8000@2
-YYB_ONLY_REFS = []  # 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑 YYB_SERVER 里的全部账号；填 ["1","2"] = 只跑这些 ref
+YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 import os
 import sys
@@ -149,11 +149,18 @@ def _yyb_entries() -> List[Tuple[str, str, str]]:
         if parsed:
             entries.append(parsed)
 
+    # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
     raw_filter = _env("YYB_ONLY_REFS")
-    filters = _split_accounts(raw_filter) if raw_filter else list(YYB_ONLY_REFS)
-    if filters:
-        want = {f.strip() for f in filters if f.strip()}
-        entries = [e for e in entries if e[1] in want]
+    seqs = list(YYB_ONLY_REFS)
+    if raw_filter:
+        seqs = []
+        for tok in str(raw_filter).replace(",", " ").replace("[", " ").replace("]", " ").split():
+            seqs.append(tok)
+    if seqs:
+        wanted = set(int(x) for x in seqs if str(x).strip().isdigit() and int(x) > 0)
+        if wanted:
+            entries = [e for i, e in enumerate(entries, 1) if i in wanted]
+            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
     return entries
 
 

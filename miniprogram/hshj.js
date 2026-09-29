@@ -1,28 +1,15 @@
 ﻿// name:红色火箭
-// cron: 0 10,13,16 * * *
+// cron: 26 10,13,16 * * *
 //  红色火箭（华泰基金指慧家）
-//
-// 任务流程：
-//   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 白名单过滤 ref
-//   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
-//   3. 换取 openId/unionId，手机号授权登录拿 token
-//   4. 签到(doSign) → ROE 口令红包 → 查询红包列表 → 领取未领红包
-//   5. 输出账号汇总（积分 / 红包 / 提现）并发送通知
-// 可控参数：
-//   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
-//   YYB_ONLY_REFS   白名单常量。留空 [] 跑全部；填 ["1","2"] 只跑对应 ref
-//   WX_ID           可选。旧协议单账号变量（多账号建议用 YYB_SERVER）
-//   WECHAT_SERVER    可选。旧协议回退服务地址
-//   HSJJ_ACTIVITY_PAGE_ID  可选。活动页 ID，默认 7541
-//   HSJJ_AUTO_CLAIM_H5     历史红包自动领取，默认开；填 0 关闭
-//   HSJJ_MKTZB_OPENID      可选。mktzb openid 兜底
-//   debug           调试开关，默认 0；填 1 打印详细请求
-//
+
+//  环境变量：
+//    YYB_SERVER         必填，格式：地址@账号ref，多账号换行
+//    WX_ID              可选，仅运行指定ref，格式：ref#备注，多账号换行或 & 分隔
+//    WECHAT_SERVER      可选，旧微信协议服务回退地址
+//    HSJJ_AUTO_CLAIM_H5 设为 '0' 或 'false' 关闭自动提现（默认开启）
+
 
 'use strict';
-
-// 只跑 YYB 里 ref 等于这些的账号，留空 [] = 跑全局 YYB_SERVER 里的全部账号
-const YYB_ONLY_REFS = [];
 
 const axios = require('axios');
 const fs = require('fs');
@@ -40,7 +27,6 @@ function getYybEntries() {
             let server = line.slice(0, at).trim().replace(/\/+$/, '');
             const ref = line.slice(at + 1).trim();
             if (!server || !ref) return null;
-            if (YYB_ONLY_REFS.length && !YYB_ONLY_REFS.includes(ref)) return null;
             if (!/^https?:\/\//i.test(server)) server = `http://${server}`;
             return { server, ref };
         })
@@ -125,32 +111,13 @@ try { notify = require('./sendNotify'); } catch (e) { notify = null; }
 
 // 消息收集
 let _logMessages = [];
-let _summaryMessages = [];
 function log(str) {
     console.log(str);
     _logMessages.push(str);
 }
-// 只进「结尾汇总」的日志，用于推送（避免把全量运行日志刷给通知渠道）
-function slog(str) {
-    console.log(str);
-    _summaryMessages.push(str);
-}
-
-// 响应体打印统一收口：默认只输出前 limit 个字符，避免整段响应体刷屏。
-// 需要看完整响应时开 debug=1 —— 各 debug 分支已单独打印原始数据。
-function shortJson(value, limit = 300) {
-    let text;
-    try {
-        text = typeof value === 'string' ? value : JSON.stringify(value);
-    } catch {
-        text = String(value);
-    }
-    if (typeof text !== 'string') text = String(text);
-    return text.length > limit ? text.slice(0, limit) + '...' : text;
-}
-async function push_notification(successCount, total, summaryContent) {
-    const title = '====== 红色火箭 汇总日志 ======';
-    const content = summaryContent || _summaryMessages.join('\n') || _logMessages.join('\n');
+async function push_notification() {
+    const title = "红色火箭（华泰基金）";
+    const content = _logMessages.join('\n');
     if (notify && typeof notify.sendNotify === 'function') {
         try {
             await notify.sendNotify(title, content);
@@ -490,7 +457,7 @@ async function getPhoneCodeInfo(wxid) {
         const phoneCode = walk(respData);
         if (phoneCode) return { phoneCode, mobile };
     }
-    log('  ⚠️ 获取手机号code失败: ' + (respData ? shortJson(respData, 300) : 'null'));
+    log('  ⚠️ 获取手机号code失败: ' + (respData ? JSON.stringify(respData).substring(0, 300) : 'null'));
     return { phoneCode: '', mobile: '' };
 }
 
@@ -563,7 +530,8 @@ async function login(phoneCode, openId, unionId) {
             isRegister: resp.data.isRegister
         };
     }
-    log('  登录失败: ' + (resp?.message ? resp.message + ' - ' : '') + shortJson(resp));
+    const respStr = typeof resp === 'string' ? resp : JSON.stringify(resp);
+    log('  登录失败: ' + (resp?.message ? resp.message + ' - ' : '') + respStr);
     return null;
 }
 
@@ -573,7 +541,7 @@ async function getOpenIdAndUnionId(code) {
     if (resp.data?.code === '200' && resp.data?.data?.openId) {
         return { openId: resp.data.data.openId, unionId: resp.data.data.unionId };
     }
-    throw new Error('获取openId失败: ' + shortJson(resp.data));
+    throw new Error('获取openId失败: ' + JSON.stringify(resp.data));
 }
 
 // 校验缓存登录态：能正常访问轻量接口就认为 token/openId/userId 可用。
@@ -717,12 +685,10 @@ async function getEncryptKey(wxid) {
             opt: 1
         });
         respData = resp.data;
-        // 与 YYB 分支对称：仅 debug 时输出原始响应，便于排查两种返回格式差异
-        if (debug) log('  [牛子][debug] getuserencryptkey 原始响应: ' + shortJson(respData, 1200));
     }
 
-    // 成功路径不再打印响应体（结果已由调用方以 version 形式输出）；
-    // 失败时下方打印 300 字符预览，需要完整体请开 debug=1。
+    // 原始响应始终打印（便于排查 YYB/牛子 不同返回格式），不再依赖 debug 开关
+    log('  [encryptKey][raw] ' + JSON.stringify(respData).substring(0, 1500));
 
     if (respData && (respData.Code === 0 || respData.code === 0 || respData.Success === true || respData.Data || respData.data || respData.result || respData.openid)) {
         try {
@@ -767,7 +733,7 @@ async function getEncryptKey(wxid) {
             return fb;
         }
     } catch {}
-    throw new Error('获取加密密钥失败, 响应预览: ' + shortJson(respData, 300));
+    throw new Error('获取加密密钥失败, 响应预览: ' + JSON.stringify(respData).substring(0, 600));
 }
 
 // 签到
@@ -836,7 +802,7 @@ async function doSign(session, wxid, cache, cacheKey) {
         log('  ✅ 签到成功: +' + point + '积分，连续' + days + '天');
         return true;
     }
-    log('  ⚠️ 签到失败: ' + (resp?.message || shortJson(resp)));
+    log('  ⚠️ 签到失败: ' + (resp?.message || JSON.stringify(resp)));
     return false;
 }
 
@@ -846,7 +812,7 @@ async function getTotalPoint(token, openId, userId) {
     if (resp?.code === '200' && resp?.data) {
         return Number(resp.data.totalPoint || 0);
     }
-    log('  ⚠️ 查询当前积分失败: ' + (resp?.message || resp?.msg || shortJson(resp)));
+    log('  ⚠️ 查询当前积分失败: ' + (resp?.message || resp?.msg || JSON.stringify(resp)));
     return 0;
 }
 
@@ -1028,10 +994,10 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
             log('  🎉 兑换成功! 标题: ' + (data.title || roeAnswer) + ' 积分: ' + data.rewardAmount);
             return { success: true, type: 'point', amount: Number(data.rewardAmount) || 0, data, existingClaim: existingClaimResult, activity };
         }
-        log('  ⚠️ ' + (data?.content || shortJson(data)));
+        log('  ⚠️ ' + (data?.content || JSON.stringify(data)));
         return { success: false, existingClaim: existingClaimResult };
     }
-    log('  ⚠️ 提交失败: ' + (resp?.message || shortJson(resp)));
+    log('  ⚠️ 提交失败: ' + (resp?.message || JSON.stringify(resp)));
     return { success: false, existingClaim: existingClaimResult };
 }
 
@@ -1098,7 +1064,7 @@ async function resolveH5Openid(wxid, ticketCode, cache, cacheKey) {
             return cached.h5Openid;
         }
     }
-    if (!wxid || !WECHAT_SERVER || !ticketCode) return '';
+    if (!wxid || YYB_ENTRIES.length === 0 || !ticketCode) return '';
 
     try {
         // 1. 通过内置 YYB-Go-Enhanced 接口获取 H5 公众号 code
@@ -1158,7 +1124,7 @@ async function resolveH5Openid(wxid, ticketCode, cache, cacheKey) {
 }
 
 // 领取红包：真正领取流程在外部 mktzb 红包页，不是 fundex 的 exchangeRedPacket。
-// 抓包流程：baseWxAuth 页面 -> getCodeBaseInfo 查看 -> checkCodeBatchRepeat 领取。
+// 抓包流程：baseWxAuth 页面 -> getCodeBaseInfo 查看 -> checkCodeBatchRepeatNew 领取。
 // wxid/cache/cacheKey 用于在 HTML 提取不到 openid 时通过 resolveH5Openid 兜底。
 async function claimRedPacket(token, openId, userId, requestId, ticketCode, activityId, activityType, mktzbOpenId = '', wxid = '', cache = null, cacheKey = '') {
     const prjCode = ticketCode || requestId;
@@ -1202,12 +1168,12 @@ async function claimRedPacket(token, openId, userId, requestId, ticketCode, acti
     if (String(codeInfo.if_used) === '2') return { success: true, data: infoResp.data, amount, message: '红包发放中' };
     if (String(codeInfo.if_used) === '3') return { success: true, data: infoResp.data, amount, message: '红包已领取' };
 
-    const claimResp = await axios.post('https://www.mktzb.com/mktadmin/wcode/checkCodeBatchRepeat', form, { headers: formHeaders, timeout: 30000 });
-    if (debug) log('  [checkCodeBatchRepeat] ' + JSON.stringify(claimResp.data).substring(0, 300));
+    const claimResp = await axios.post('https://www.mktzb.com/mktadmin/wcode/checkCodeBatchRepeatNew', form, { headers: formHeaders, timeout: 30000 });
+    if (debug) log('  [checkCodeBatchRepeatNew] ' + JSON.stringify(claimResp.data).substring(0, 300));
     if (claimResp.data?.success) return { success: true, data: claimResp.data, amount };
     // c0004 = 红包发放中，说明领取请求已经进入发放队列。
     if (claimResp.data?.message === 'c0004') return { success: true, data: claimResp.data, amount, message: '红包发放中' };
-    return { success: false, message: shortJson(claimResp.data, 200) };
+    return { success: false, message: JSON.stringify(claimResp.data) };
 }
 
 /**
@@ -1471,8 +1437,7 @@ async function main() {
 
     if (!taskVar.trim()) {
         log('环境变量未设置: ' + ckName);
-        if (YYB_ONLY_REFS.length) log('提示: 顶部 YYB_ONLY_REFS=' + JSON.stringify(YYB_ONLY_REFS) + ' 过滤后无账号，留空 [] 可跑全部');
-        await push_notification(successCount, accounts.length);
+        await push_notification();
         process.exit(0);
     }
 
@@ -1513,12 +1478,11 @@ async function main() {
     }
 
     // 汇总输出
-    slog('\n' + '='.repeat(50));
-    slog('──── 红色火箭 执行汇总 ────');
-    slog('账号 ' + accounts.length + '｜成功 ' + successCount + '/' + accounts.length);
+    log('\n' + '='.repeat(50));
+    log('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
 
     // 输出每个账号的汇总信息
-    slog('\n📋 账号汇总:');
+    log('\n📋 账号汇总:');
     let totalClaimed = 0;
     for (const account of accounts) {
         const display = account.note || account.wxid;
@@ -1527,32 +1491,14 @@ async function main() {
         const pendingRedPacketAmount = account.pendingRedPacketAmount || 0;
         const claimedAmount = account.claimedAmount || 0;
         totalClaimed += claimedAmount;
-        slog('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
+        log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
     }
     if (totalClaimed > 0) {
-        slog('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
+        log('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
     }
 
-    // 构建分账号汇总（面向 notify，简洁精要；账号行含总积分(+今日变化)，任务行 ✔️/❌）
-    const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-    const summaryContent = [];
-    for (let i = 0; i < accounts.length; i++) {
-        const account = accounts[i];
-        const display = account.note || account.wxid;
-        const em = seqEmoji[i] || `${i + 1}.`;
-        let acctLine = `${em} [${display}]`;
-        if (account.currentPoint) acctLine += ` 总积分${account.currentPoint}(+${account.roeReward || 0})`;
-        summaryContent.push(acctLine);
-        if (account.currentPoint) {
-            summaryContent.push('✔️ 积分领取成功');
-            const rp = Math.max(account.historyRedPacketAmount || 0, account.redPacketAmount || 0);
-            summaryContent.push(`✔️ 红包 ${formatMoney(rp)}元（本次提现 ${formatMoney(account.claimedAmount || 0)}元）`);
-        } else {
-            summaryContent.push('❌ 执行失败');
-        }
-    }
-    // 推送通知（只发分账号汇总，不再推全量日志）
-    await push_notification(successCount, accounts.length, summaryContent.join('\n'));
+    // 推送通知
+    await push_notification();
 }
 
 main().catch(e => { log('❌ 脚本异常: ' + e.message); log(e.stack); });

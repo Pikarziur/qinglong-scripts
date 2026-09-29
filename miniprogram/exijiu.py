@@ -35,7 +35,7 @@ name:习酒君品荟 - 签到/果园
   GARDEN_APPID    默认 wx8d41cdc44c8aeaab；旧习酒可指定 wx489f950decfeb93e
   GARDEN_NOTIFY   0 = 关闭通知，1 = 开启（默认）
 
-cron: 31 8,16 * * *
+# cron: 15 */4 * * *
 """
 # name: 习酒
 
