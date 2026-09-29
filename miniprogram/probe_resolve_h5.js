@@ -98,17 +98,17 @@ const mod = sandbox.module.exports;
 
 // ---- 诊断（不联网） ----
 console.log('========== 桥接兜底配置诊断 ==========');
+console.log('注意: ticketCode 来自红包数据包(packet.ticketCode)，脚本并不读取 HSJJ_H5_TICKETCODE 环境变量，无需手动配置');
 const entries = mod.YYB_ENTRIES || [];
 console.log('YYB_SERVER 已设置           :', !!process.env.YYB_SERVER);
 console.log('YYB_ENTRIES 数量           :', entries.length);
 console.log('  账号 ref 列表            :', entries.map(e => e.ref).join(', ') || '(空)');
-console.log('HSJJ_H5_TICKETCODE 已设置  :', !!process.env.HSJJ_H5_TICKETCODE, process.env.HSJJ_H5_TICKETCODE ? '(非空)' : '(未设→桥接必失败)');
-console.log('AUTO_CLAIM_H5_RED_PACKET   :', process.env.HSJJ_AUTO_CLAIM_H5 !== '0', '(默认开)');
+console.log('AUTO_CLAIM_H5_RED_PACKET   :', process.env.HSJJ_AUTO_CLAIM_H5 !== '0', '(默认开，控制是否走桥接)');
 console.log('HSJJ_MKTZB_OPENID 已设置   :', !!process.env.HSJJ_MKTZB_OPENID, '(写死会全局串号，不建议)');
 
-const prereqOk = entries.length > 0 && !!process.env.HSJJ_H5_TICKETCODE;
+const prereqOk = entries.length > 0;
 console.log('----------------------------------------');
-console.log('硬前提是否满足（可进入桥接）:', prereqOk ? '✅ 满足' : '❌ 不满足——' + (entries.length === 0 ? 'YYB_SERVER 未配/为空;' : '') + (!process.env.HSJJ_H5_TICKETCODE ? ' HSJJ_H5_TICKETCODE 未设' : ''));
+console.log('硬前提是否满足（可进入桥接）:', prereqOk ? '✅ 满足（另需：该微信已授权mktzb公众号 + YYB在线）' : '❌ 不满足——YYB_SERVER 未配/为空');
 
 if (!process.argv.includes('--live')) {
   console.log('\n提示：配置满足后，在能联网的环境运行 `node probe_resolve_h5.js --live` 才能真正调 resolveH5Openid 验证能否拿到 openid。');
@@ -118,12 +118,14 @@ if (!process.argv.includes('--live')) {
 // ---- 联网实测（--live） ----
 (async () => {
   console.log('\n========== 联网实测 resolveH5Openid ==========');
-  const prjCode = process.env.HSJJ_H5_PRJCODE || 'WV4OZBUWGP202609';
+  // ticketCode 在这里仅用作 OAuth state/prjCode 以触发桥接链路；用任一有效的 mktzb 活动码即可（默认取之前抓包里的 WV4OZBUWGP202609）
+  const testCode = process.env.HSJJ_H5_PRJCODE || 'WV4OZBUWGP202609';
   for (const e of entries) {
     const ref = String(e.ref).split('#')[0].trim();
-    console.log(`\n[账号 ${ref}] 调用 resolveH5Openid ...`);
+    console.log(`\n[账号 ${ref}] 调用 resolveH5Openid(testCode=${testCode}) ...`);
     try {
-      const o = await mod.resolveH5Openid(ref, prjCode, 'cfyh');
+      // 真实签名: resolveH5Openid(wxid, ticketCode, cache, cacheKey)
+      const o = await mod.resolveH5Openid(ref, testCode, null, null);
       if (o) console.log(`  ✅ 成功拿到 openid: ${o.substring(0, 8)}*** (完整: ${o})`);
       else console.log('  ⚠️ 未拿到 openid（返回空）——检查 YYB-Go-Enhanced 是否在线 / 该微信是否登录并授权 mktzb 公众号 / HSJJ_H5_TICKETCODE 是否正确');
     } catch (err) {
