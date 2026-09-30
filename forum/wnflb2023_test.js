@@ -28,6 +28,7 @@
 //   WNFLB_COOKIE_CACHE  可选。缓存文件路径，默认 /ql/data/wnflb2023.cookie（该目录不可写则回退到脚本同目录）
 //   WNFLB_FORCE_LOGIN   可选。=1 忽略缓存，强制走账号密码登录并覆盖缓存（调试用）
 //   WNFLB_PROBE         可选。=1 仅预检：网络诊断（DNS + 4 种地址族/URL 组合）+ 登录页 formhash，不登录、不签到
+//   WNFLB_DUMP_SIGN     可选。=1 签到成功/已签到时也把服务器响应原文打出来（默认关，排查用）
 //   WNFLB_EXPIRE        可选。Cookie 预期过期日 YYYY-MM-DD，设了会提前 3 天提醒
 //   WNFLB_TIMEOUT       可选。单次请求超时毫秒，默认 20000
 //   WNFLB_IPV6          可选。=1 不强制 IPv4，完全按系统默认地址族走（默认优先 IPv4）
@@ -53,7 +54,7 @@ const { URL } = require('url');
 // ========== 配置 ==========
 // 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 // （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-const SCRIPT_VER = '2026-09-30b';
+const SCRIPT_VER = '2026-09-30c';
 // 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
 const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -624,22 +625,64 @@ async function resolveCookie(user, pass) {
 // 顺序很重要：先看最强的成功信号（creditrule Set-Cookie / 明确的「签到成功」），
 // 再判「已签」，最后才用宽泛的「成功」兜底，避免把已签误判成成功。
 // ⚠️ 注意 `已签` 并不是 `已经签到` 的子串（已/经/签/到），所以两种写法都要列。
+// Discuz 弹出框模板里的固定文案，本身不含业务信息（"提示信息 / 关闭 / 确定"）。
+// 摘要里出现这些词说明真正的那句话在别处（通常在 <script> 里），需要走下面的抢救逻辑。
+const UI_NOISE = ['提示信息', '关闭', '确定', '返回上一页', '返回', '点击这里', '点击此处', '继续访问'];
+
 // 把响应正文压成一行便于阅读的摘要（去 script/style / 去标签 / 压空白 / 截断）。
 // 只用于结果那一行日志，避免 dump 整个响应造成日志臃肿。
+//
+// ⚠️ 踩过两个坑，都在这里收口：
+//   1) 写成 `<[^>]+>` 会把 Discuz 的 `<![CDATA[...]]>` 整段正文当标签吞掉 → 摘要恒为空。
+//      所以标签正则必须以字母或 / 开头，并且先把 CDATA 的括号剥掉。
+//   2) Discuz 的 showmessage/showDialog/errorhandle_ 是把提示语**写在 <script> 的字符串里**，
+//      HTML 骨架只剩"提示信息 / 关闭 / 确定"这类模板词。直接删掉 script 就只剩噪声，
+//      所以删之前先把 script 里的中文字符串抢救出来当候选。
 function brief(text, n) {
-    const s = String(text || '')
-        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    let s = String(text || '');
+    if (!s.trim()) return '';
+
+    // 1) XML 声明 / DOCTYPE（`<?...?>` 不以字母开头，标签正则吃不到，得单独处理）
+    s = s.replace(/<\?[\s\S]*?\?>/g, ' ').replace(/<!DOCTYPE[^>]*>/gi, ' ');
+
+    // 2) 从 <script> 里抢救中文字符串提示语（抢救完再丢弃整个 script 块）
+    const salvaged = [];
+    s = s.replace(/<script[\s\S]*?<\/script>/gi, (blk) => {
+        const re = /['"]([^'"]{1,120})['"]/g;
+        let m;
+        while ((m = re.exec(blk)) !== null) salvaged.push(m[1]);
+        return ' ';
+    });
+
+    // 3) 去 style / 剥 CDATA 括号 / 去真标签 / 解实体 / 压空白
+    s = s.replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<!\[CDATA\[/g, ' ')
         .replace(/\]\]>/g, ' ')
-        // ⚠️ 只吃「真标签」（< 后面跟字母或 /）。写成 <[^>]+> 会把 Discuz 的
-        //    <![CDATA[...]]> 整段正文当成标签吞掉，摘要直接变空 —— 实测踩过。
         .replace(/<[a-zA-Z/][^>]*>/g, ' ')
-        .replace(/&nbsp;/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
         .replace(/\s+/g, ' ')
         .trim();
+
+    // 4) 可见正文若只剩模板词，等于没信息 → 改用 script 里抢救出来的那句话
+    const strip = (t) => {
+        let x = String(t || '');
+        for (const w of UI_NOISE) x = x.split(w).join(' ');
+        return x.replace(/\s+/g, ' ').trim();
+    };
+    let out = strip(s);
+    if (!out) {
+        const cand = [];
+        for (let t of salvaged) {
+            t = strip(t);
+            if (!t || !/[\u4e00-\u9fa5]/.test(t) || cand.includes(t)) continue;
+            cand.push(t);
+        }
+        out = cand.join(' / ');
+    }
+
     const lim = n || 80;
-    return s.length > lim ? s.slice(0, lim) + '…' : s;
+    return out.length > lim ? out.slice(0, lim) + '…' : out;
 }
 
 function classifySign(signResp) {
@@ -873,6 +916,8 @@ async function main() {
         if (kind === 'success' || kind === 'already') {
             signResult = kind;
             signEcho = brief(textOf(signResp), 80);
+            // 想核对"服务器到底回了什么"时打开（默认关，避免日志臃肿）
+            if (truthy(process.env.WNFLB_DUMP_SIGN)) dumpResp('签到响应', signResp);
             break;
         }
         if (kind === 'expired') {
