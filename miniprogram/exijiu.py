@@ -1,6 +1,7 @@
-﻿"""
-name:习酒君品荟 - 签到/果园
+﻿# name:习酒果园
+# cron: 15 */4 * * *
 
+"""
 入口: 微信小程序 君品荟 (wx8d41cdc44c8aeaab)
 后端: fm.exijiu.com / apimallwm.exijiu.com
 2026-09: 主登录 token + AppID 请求头 + 花园 session key 同步。
@@ -33,8 +34,6 @@ name:习酒君品荟 - 签到/果园
                   0 = 关闭酿酒（不投粮、不制酒、不处理酒坛）
                   1 = 开启酿酒（默认）
   GARDEN_APPID    默认 wx8d41cdc44c8aeaab；旧习酒可指定 wx489f950decfeb93e
-
-# cron: 15 */4 * * *
 """
 # name: 习酒
 

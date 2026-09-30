@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: WorkBuddy 签到
+# name: WorkBuddy
 # cron: 31 7,12,23 * * *
 """
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
-# name: 创维小程序
+# name: 创维
 # cron: 10 5,15 * * *
 */
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-name: 华润通 - 签到
+name: 华润通
 cron: 0 6,16 * * *
 
 青龙环境变量：
