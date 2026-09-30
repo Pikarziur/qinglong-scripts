@@ -95,7 +95,7 @@ const BASE_URL = 'https://index.amcfortune.com';
 let ckName = "WX_ID";
 let taskVar = process.env.WX_ID || '';
 const WECHAT_SERVER = (process.env.WECHAT_SERVER || '').replace(/\/$/, '');
-const debug = process.env.debug || 0;
+const debug = !['', '0', 'false', 'off', 'no'].includes(String(process.env.debug || '').trim().toLowerCase());
 const APPID = 'wx1b44c3ad181bde16';
 const ACTIVITY_PAGE_ID = process.env.HSJJ_ACTIVITY_PAGE_ID || '7541';
 const H5_OAUTH_APPID = 'wx80226ec03be5ab6c';
@@ -674,7 +674,6 @@ async function getEncryptKey(wxid) {
             validateStatus: () => true
         });
         respData = resp.data;
-        if (debug) log('  [YYB][debug] getuserencryptkey 原始响应: ' + JSON.stringify(respData).substring(0, 1200));
     } else {
         const resp = await axios.post(WECHAT_SERVER + '/api/v1/wx/app/call/function', {
             wxid: cleanWxid,
@@ -684,9 +683,6 @@ async function getEncryptKey(wxid) {
         });
         respData = resp.data;
     }
-
-    // 原始响应始终打印（便于排查 YYB/牛子 不同返回格式），不再依赖 debug 开关
-    log('  [encryptKey][raw] ' + JSON.stringify(respData).substring(0, 1500));
 
     if (respData && (respData.Code === 0 || respData.code === 0 || respData.Success === true || respData.Data || respData.data || respData.result || respData.openid)) {
         try {
@@ -720,7 +716,8 @@ async function getEncryptKey(wxid) {
                 };
             }
         } catch (e) {
-            log('  [encryptKey] 解析异常: ' + e.message);
+            warn('  [encryptKey] 解析异常: ' + e.message);
+            warn('  [encryptKey][raw] ' + JSON.stringify(respData).substring(0, 1500));
         }
     }
     // 兜底：用通用递归提取器在 YYB/牛子 多样结构中找 encryptKey（处理 base64 / 嵌套 JSON / 直出字段）
@@ -731,7 +728,9 @@ async function getEncryptKey(wxid) {
             return fb;
         }
     } catch {}
-    throw new Error('获取加密密钥失败, 响应预览: ' + JSON.stringify(respData).substring(0, 600));
+    // 仅提取失败时输出原始响应（含 encrypt_key/iv），便于排查 YYB/牛子 返回格式差异；成功路径不打
+    warn('  [encryptKey] 获取失败，原始响应: ' + String(JSON.stringify(respData)).substring(0, 1500));
+    throw new Error('获取加密密钥失败');
 }
 
 // 签到
@@ -1390,17 +1389,15 @@ async function runTask(accountInfo) {
             log('  ℹ️ 没有未领取的红包');
         }
 
-        // 获取红包领取历史：这里是账号累计已领取红包，用于最终汇总的"当前总获得红包"。
+        // 获取红包领取历史（仅用于内部统计，不输出日志）
         let historyRedPacketAmount = 0;
         const requestPage = await getRequestPage(session.token, session.openId, session.userId);
         if (requestPage && requestPage.length > 0) {
-            log('  📊 历史已领取红包: ' + requestPage.length + '条（非本次收益）');
             for (const item of requestPage) {
                 if (item.amount) {
                     historyRedPacketAmount += Number(item.amount) || 0;
                 }
             }
-            log('  💰 历史已领取红包累计: ' + formatMoney(historyRedPacketAmount) + '元（非本次收益）');
         }
 
         // 汇总里展示账号当前积分余额，避免把"本次积分奖励"误当成总积分。
@@ -1481,11 +1478,10 @@ async function main() {
     for (const account of accounts) {
         const display = account.note || account.wxid;
         const currentPoint = account.currentPoint || 0;
-        const redPacketAmount = Math.max(account.historyRedPacketAmount || 0, account.redPacketAmount || 0);
         const pendingRedPacketAmount = account.pendingRedPacketAmount || 0;
         const claimedAmount = account.claimedAmount || 0;
         totalClaimed += claimedAmount;
-        log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
+        log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
     }
     if (totalClaimed > 0) {
         log('💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
