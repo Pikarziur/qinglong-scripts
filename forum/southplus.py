@@ -136,20 +136,52 @@ def call_task_api(session, action, verify):
     return r.text
 
 
+def extract_cdata(txt):
+    """从 <ajax><![CDATA[...]]></ajax> 抽出可读内容（不展示原始 XML 标签）"""
+    i = txt.find("<![CDATA[")
+    if i < 0:
+        return txt.strip()
+    j = txt.find("]]>", i)
+    if j < 0:
+        return txt[i + 9:].strip()
+    return txt[i + 9:j].strip()
+
+
+def short_resp(txt):
+    """响应简要信息（去标签/去制表符/截断），避免完整打印原始 XML"""
+    msg = extract_cdata(txt).replace("\t", " ").replace("\n", " ").strip()
+    if len(msg) > 60:
+        msg = msg[:60] + "..."
+    return msg
+
+
 def do_job(session, verify):
     log("🔧 申请日常任务...")
     txt = call_task_api(session, "job", verify)
-    ok = "success" in txt
-    log("   响应: " + txt[:160].replace("\n", " "))
-    return ok
+    if "success" in txt:
+        log("   ✅ 申请成功")
+        return "ok"
+    # 冷却/已申请：如"上次申请[日常]还没超过 18 小时"= 今日已在冷却期内，
+    # 即日常任务今日已完成，无需重复申请（视为成功）
+    if "还没超过" in txt:
+        log("   ✅ 日常任务今日已完成（冷却期内，无需重复申请）")
+        return "done"
+    log("   ⚠️ 申请未成功: " + short_resp(txt))
+    return "fail"
 
 
-def do_job2(session, verify):
+def do_job2(session, verify, job_status):
     log("🎁 领取日常任务奖励...")
     txt = call_task_api(session, "job2", verify)
-    ok = "success" in txt
-    log("   响应: " + txt[:160].replace("\n", " "))
-    return ok
+    if "success" in txt:
+        log("   ✅ 领奖成功")
+        return "ok"
+    # 若申请已是冷却/已完成态，则领奖返回"未申请任务"属预期（已领过），不算失败
+    if job_status == "done" and "未申请任务" in txt:
+        log("   ✅ 奖励今日已领取（无需重复领取）")
+        return "done"
+    log("   ⚠️ 领奖未成功: " + short_resp(txt))
+    return "fail"
 
 
 # ---------- 主流程 ----------
@@ -192,12 +224,17 @@ def main():
 
     j1 = do_job(session, verify)
     time.sleep(random.uniform(1.0, 2.5))
-    j2 = do_job2(session, verify)
+    j2 = do_job2(session, verify, j1)
 
-    if j1 and j2:
-        log("🏁 日常任务：申请 + 领奖 均成功")
-    elif j1 and not j2:
-        log("⚠️ 任务已申请，但领奖未成功（可能任务尚未完成或已领过）")
+    if j1 == "done":
+        # 申请已是冷却/已完成态 → 今日任务确定已完成，领奖失败也属预期
+        log("🏁 日常任务：今日已完成（无需重复操作）")
+    elif j1 == "ok" and j2 in ("ok", "done"):
+        log("🏁 日常任务：申请 + 领奖 成功")
+    elif j1 == "ok" and j2 == "fail":
+        log("⚠️ 任务已申请，但领奖未成功（可能任务尚未完成）")
+    elif j1 == "fail":
+        slog("日常任务申请失败，请查看上方响应")
     else:
         slog("日常任务执行未完全成功，请查看上方响应")
 

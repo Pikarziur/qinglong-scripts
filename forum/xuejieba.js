@@ -108,9 +108,11 @@ async function doCheckin(token) {
   const d = res.data;
   // 返回可能是 JSON 也可能是纯字符串
   if (typeof d === 'string') {
-    // "10" = 已签到 / 重复
-    if (d === '10') {
-      log(`  ⚠️ 您已经签到过了`);
+    // B2 主题已签到时返回纯数字串（即当日签到记录/积分值，如 "10"、"13"，
+    // 不同站点版本数值不固定，无固定 code）。只要返回非空且含数字即视为今日已签到。
+    const s = d.trim();
+    if (s && /\d/.test(s)) {
+      log(`  ⚠️ 您今天已经签到过了（重复签到）`);
       return true; // 算成功（不报错）
     }
     log(`  ⚠️ 签到返回: ${d}`);
