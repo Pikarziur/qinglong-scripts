@@ -25,7 +25,7 @@ Discuz Cookie 结构说明:
     - {前缀}_saltkey   盐值（必须，HttpOnly）
     - 前缀是 Discuz 随机生成的，每个站点不同
 
-日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [XIJISHE] message   （LEVEL: INFO / WARN / ERROR）
+日志规范：[LEVEL] [XIJISHE] message   （LEVEL: INFO / WARN / ERROR）
 """
 
 import os
@@ -34,11 +34,8 @@ import sys
 from datetime import datetime, timedelta
 
 # ========== 统一日志 ==========
-def _ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 def _emit(level, msg):
-    print(f"[{_ts()}] [{level}] [XIJISHE] {msg}", flush=True)
+    print(f"[{level}] [XIJISHE] {msg}", flush=True)
 
 def log(msg):  _emit("INFO", msg)
 def warn(msg): _emit("WARN", msg)
@@ -104,6 +101,7 @@ def get_formhash(session):
 
 
 def main():
+    log("西集社 签到开始")
     cookie = (os.environ.get("XIJISHE_COOKIE") or "").strip()
     if not cookie:
         err("未配置 Cookie（请设置环境变量 XIJISHE_COOKIE）")

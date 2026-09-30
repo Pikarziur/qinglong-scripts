@@ -22,7 +22,7 @@
  *   把整段串（含 b2_token=...）直接填进 XJB_COOKIE，脚本会自动提取 b2_token。
  *   也可直接复制 b2_token 的 JWT 字符串（eyJ 开头）填进 XJB_COOKIE。
  *
- * 日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [XJB] message   （LEVEL: INFO / WARN / ERROR）
+ * 日志规范：[LEVEL] [XJB] message   （LEVEL: INFO / WARN / ERROR）
  */
 
 const XJB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.XJB_NOTIFY || '1').trim().toLowerCase());
@@ -30,12 +30,8 @@ const BASE_URL = 'https://xuejieba2026.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 // ========== 统一日志 ==========
-function fmtTime(d) {
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
 function emit(level, msg) {
-  console.log(`[${fmtTime(new Date())}] [${level}] [XJB] ${msg}`);
+  console.log(`[${level}] [XJB] ${msg}`);
 }
 function log(msg)  { emit('INFO', msg); }
 function warn(msg) { emit('WARN', msg); }
@@ -188,7 +184,6 @@ async function verifyToken(token) {
 
 // ---------- 单账号入口 ----------
 async function runOne(token) {
-  console.log('─'.repeat(30));
   if (!await verifyToken(token)) return false;
   await sleep(500);
   const ok = await doCheckin(token);
@@ -197,9 +192,7 @@ async function runOne(token) {
 
 // ---------- 主入口 ----------
 async function main() {
-  log('🚀 学姐吧签到');
-  log('📅 ' + new Date().toLocaleString('zh-CN'));
-  console.log('='.repeat(42));
+  log('学姐吧 签到开始');
 
   const token = extractB2Token(process.env.XJB_COOKIE);
   if (!token) {
@@ -209,7 +202,6 @@ async function main() {
 
   const ok = await runOne(token);
 
-  console.log('='.repeat(42));
   log(`完成：学姐吧 ${ok ? '签到成功' : '签到失败'}`);
   if (!ok) process.exit(1);
 }

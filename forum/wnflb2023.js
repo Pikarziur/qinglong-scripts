@@ -20,7 +20,7 @@
 //     或右键该请求 → 复制 → 作为 cURL 复制，再从 -H 'Cookie: ...' 取出整段，填进 WNFLB_COOKIE。
 //   Discuz Cookie 说明：S5r8_2132_auth 登录凭证（必须，HttpOnly）；S5r8_2132_saltkey 盐值（必须，HttpOnly）
 //
-// 日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [WNFLB] message   （LEVEL: INFO / WARN / ERROR）
+// 日志规范：[LEVEL] [WNFLB] message   （LEVEL: INFO / WARN / ERROR）
 // ────────────────────────────────────────────
 
 const https = require('https');
@@ -32,12 +32,8 @@ let COOKIE = ''; // 仅从环境变量读取
 const SITE = 'https://www.wnflb2023.com';
 
 // ========== 统一日志 ==========
-function fmtTime(d) {
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
 function emit(level, msg) {
-  console.log(`[${fmtTime(new Date())}] [${level}] [WNFLB] ${msg}`);
+  console.log(`[${level}] [WNFLB] ${msg}`);
 }
 function log(msg)  { emit('INFO', msg); }
 function warn(msg) { emit('WARN', msg); }
@@ -150,7 +146,7 @@ async function main() {
     const summaryLines = [];
     const slog = (m) => { emit('ERROR', m); summaryLines.push(m); };       // 失败项：入汇总 + ERROR
     const slogOk = (m) => { emit('INFO', m); summaryLines.push(m); };      // 成功项：入汇总 + INFO
-    console.log('========== WN2023 签到 ==========');
+    log('福利吧 签到开始');
 
     // Cookie 仅从环境变量读取
     COOKIE = (process.env.WNFLB_COOKIE || process.env.wnflb2023_cookie || '').trim();
@@ -201,7 +197,6 @@ async function main() {
     if (signResult === 'success') slogOk('签到成功！');
     else if (signResult === 'already') slogOk('今天已签到');
 
-    console.log('========== 签到结束 ==========');
     const wnOk = summaryLines.some(l => l.includes('签到成功') || l.includes('已签到'));
     const summaryContent = [];
     const _lastWn = summaryLines.filter(l => l.trim()).slice(-1)[0] || '';

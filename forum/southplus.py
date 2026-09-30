@@ -35,7 +35,7 @@
             右键 Copy → Copy as cURL，再从其中 -H 'Cookie: ...' 取出整段 Cookie 字符串
     把复制到的字符串填进 SOUTHPLUS_COOKIE 即可。
 ============================================================================
-日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [SOUTHPLUS] message   （LEVEL: INFO / WARN / ERROR）
+日志规范：[LEVEL] [SOUTHPLUS] message   （LEVEL: INFO / WARN / ERROR）
 """
 
 import os
@@ -43,7 +43,6 @@ import sys
 import time
 import random
 import requests
-from datetime import datetime
 
 SITE = "https://bbs.south-plus.org"
 CID = 15  # 日常任务 cid（HAR 实证）
@@ -53,11 +52,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 
 # ========== 统一日志 ==========
-def _ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 def _emit(level, msg):
-    print(f"[{_ts()}] [{level}] [SOUTHPLUS] {msg}", flush=True)
+    print(f"[{level}] [SOUTHPLUS] {msg}", flush=True)
 
 def log(msg):  _emit("INFO", msg)
 def warn(msg): _emit("WARN", msg)
@@ -189,7 +185,7 @@ def do_job2(session, verify, job_status):
 
 # ---------- 主流程 ----------
 def main():
-    log("南+论坛日常任务脚本")
+    log("南+论坛 日常任务开始")
 
     cookie = (os.environ.get("SOUTHPLUS_COOKIE") or "").strip()
     if not cookie:
