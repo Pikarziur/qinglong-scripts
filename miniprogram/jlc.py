@@ -8,18 +8,18 @@
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code，完成 CAS 登录
 #   3. 查询当日签到状态，执行签到 signIn
 #   4. 领券 receiveVoucher（第七天自动领 8 豆豆），并查询豆豆总额
-#   5. 输出汇总并发送通知
+#   5. 输出汇总
 # 可控参数：
 #   JLC_AUTH        可选。格式 token#secret，多账号用 & / 换行分隔，免 YYB
 #   YYB_SERVER      必填（无 JLC_AUTH 时）。格式「地址@ref#备注」，空格/换行/& 分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号（环境变量同名可覆盖）
-#   JLC_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
 #   JLC_CAS_APP_ID  可选。CAS 应用 ID，默认 JLC_MOBILE_APP
 #   JLC_PLATFORM_TYPE 可选。平台类型，默认 MP-WEIXIN
 #   JLC_SOURCE      可选。来源标识，默认 2
 #   JLC_MINI_APPID  可选。小程序 AppID，默认 wx6c7b851c877dba42
 #   JLC_MP_ENV / JLC_MP_VERSION  可选。环境/版本，默认 release / 1.117.4
 #
+# 日志规范：[LEVEL] [JLC] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -39,7 +39,6 @@ import sys
 import json
 import time
 import traceback
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -49,22 +48,18 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# ===================== 通知推送 =====================
-try:
-    from notify import send as notify_send
-except ImportError:
-    def notify_send(title, content):
-        print(f"--- 通知 ---\n{title}\n{content}\n-------------")
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [JLC] {msg}", flush=True)
+
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 
-# 通知开关：默认开；填 0/false/off/no 关闭
-JLC_NOTIFY = os.getenv("JLC_NOTIFY", "1").strip().lower() not in ("0", "false", "off", "no")
-
-
-# 日志收集
-log_lines = []
 SCRIPT_NAME = "JLC 嘉立创签到"
-# ===================================================
 
 # ===================== 手动调试开关 =====================
 DEBUG = False
@@ -74,7 +69,7 @@ DEBUG_ENV = {
 if DEBUG:
     for _k, _v in DEBUG_ENV.items():
         os.environ.setdefault(_k, _v)
-    print("⚠️ 调试模式已开启（DEBUG=True），使用脚本内置 DEBUG_ENV 配置")
+    warn("⚠️ 调试模式已开启（DEBUG=True），使用脚本内置 DEBUG_ENV 配置")
 # =======================================================
 
 BASE_URL = "https://m.jlc.com"
@@ -118,7 +113,7 @@ def _parse_yyb_line(item: str) -> Optional[Tuple[str, str, str]]:
     else:
         entry_part, remark = item.strip(), ""
     if "@" not in entry_part:
-        print(f"⚠️ 跳过无效账号配置（缺 @）：{item!r}")
+        warn(f"⚠️ 跳过无效账号配置（缺 @）：{item!r}")
         return None
     server, ref = entry_part.rsplit("@", 1)
     server, ref = server.strip().rstrip("/"), ref.strip()
@@ -160,7 +155,7 @@ def _yyb_entries() -> List[Tuple[str, str, str]]:
         wanted = set(int(x) for x in seqs if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             entries = [e for i, e in enumerate(entries, 1) if i in wanted]
-            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
+            log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
     return entries
 
 
@@ -189,7 +184,7 @@ def get_wx_code(server, ref):
             raise RuntimeError("YYB未返回有效微信code")
         return str(result["code"])
     except Exception as exc:
-        print(f"[YYB] 获取code失败：{exc}")
+        err(f"❌ [YYB] 获取code失败：{exc}")
         return None
 
 
@@ -240,7 +235,7 @@ def refresh_secret_key(token="NONE", previous_key=""):
     if data.get("code") != 200 or not key_id:
         raise RuntimeError(f"更新secretkey失败: {str(data.get('message') or data)[:200]}")
     _CURRENT_SECRET_KEY = str(key_id)
-    print("[JLC] secretkey 已动态更新")
+    log("🔑 [JLC] secretkey 已动态更新")
     return _CURRENT_SECRET_KEY
 
 
@@ -305,7 +300,7 @@ def get_cas_auth_code(server, ref):
     if login_data.get("code") != 200 or not cas_code:
         message = login_data.get("message") or login_data.get("msg") or login_data
         raise RuntimeError(f"CAS小程序静默登录失败: {str(message)[:200]}")
-    print(f"[{ref}] CAS授权码获取成功")
+    log(f"🔑 [{ref}] CAS授权码获取成功")
     return cas_code
 
 
@@ -332,7 +327,7 @@ def login_with_code(server, ref):
             resp = session.post(url, files={"code": (None, code)}, headers=headers, timeout=30)
             token, response_secret = _extract_login_auth(resp, secret)
             if token:
-                print(f"[{ref}] login-by-code 登录成功")
+                log(f"🔑 [{ref}] login-by-code 登录成功")
                 return {
                     "token": token,
                     "secret": response_secret,
@@ -347,27 +342,23 @@ def login_with_code(server, ref):
                 response_code = None
             if attempt == 0 and (response_code in SECRET_EXPIRED_CODES or resp.status_code == 460):
                 secret = refresh_secret_key(previous_key=secret)
-                print(f"[{ref}] 登录未通过，已刷新secretkey并使用新CAS授权码重试")
+                log(f"🔁 [{ref}] 登录未通过，已刷新secretkey并使用新CAS授权码重试")
                 continue
-            print(f"[{ref}] login-by-code 未通过（{detail}）")
+            err(f"❌ [{ref}] login-by-code 未通过（{detail}）")
             break
         except Exception as e:
             detail = f"第{attempt + 1}次: 请求异常={e}"
             errors.append(detail)
-            print(f"[{ref}] login-by-code {detail}")
+            err(f"💥 [{ref}] login-by-code {detail}")
             break
 
     raise RuntimeError("CAS登录失败；" + "；".join(errors))
 
 
-
-
-
-
 def get_token_for_account(server, ref, remark):
     """每次运行强制重新取码 + 登录，不落盘。"""
     auth_info = login_with_code(server, ref)
-    print(f"[{remark}] 登录成功")
+    log(f"🔑 [{remark}] 登录成功")
     return auth_info["token"], auth_info.get("secret", _CURRENT_SECRET_KEY or LEGACY_SECRET_KEY)
 
 
@@ -483,18 +474,6 @@ def get_doudou_total(s, token, secret) -> Dict[str, Any]:
     return api_get(s, "/api/activity/front/getCustomerIntegral", token=token, secret=secret)
 
 
-def try_send_notify(title: str, content: str) -> None:
-    """青龙通知（兼容）"""
-    try:
-        notify_send(title, content)
-    except Exception as e:
-        print(f"（推送失败：{e}）")
-
-
-def format_line(ok: bool, text: str) -> str:
-    return ("✅ " if ok else "❌ ") + text
-
-
 def _extract_streak_day(st_data: Dict[str, Any]) -> Optional[int]:
     for k in ("day", "continuousDay", "continueDay", "signDay"):
         v = st_data.get(k)
@@ -505,7 +484,7 @@ def _extract_streak_day(st_data: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[bool, str, Dict[str, Any]]:
+def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[bool, Dict[str, Any]]:
     result: Dict[str, Any] = {
         "remark": remark,
         "signed": None,
@@ -516,16 +495,14 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
         "streak_day": None,
     }
 
-    log_lines: List[str] = []
     ok_all = True
 
     with requests.Session() as s:
         # 1) 查状态
         st = get_sign_status(s, token, secret)
         if not st.get("success", False):
-            ok_all = False
-            log_lines.append(format_line(False, f"[{remark}] 查询签到状态失败：{json.dumps(st, ensure_ascii=False)}"))
-            return ok_all, "\n".join(log_lines), result
+            err(f"❌ [{remark}] 查询签到状态失败：{json.dumps(st, ensure_ascii=False)}")
+            return False, result
 
         st_data = st.get("data") or {}
         have_signin = st_data.get("haveSignIn") is True
@@ -534,26 +511,26 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
         result["streak_day"] = streak_day
 
         if streak_day is not None:
-            log_lines.append(format_line(True, f"[{remark}] 当前连续签到天数：{streak_day} 天"))
+            log(f"📊 [{remark}] 当前连续签到天数：{streak_day} 天")
         else:
-            log_lines.append(format_line(True, f"[{remark}] 当前连续签到天数：未知"))
+            log(f"📊 [{remark}] 当前连续签到天数：未知")
 
         # 2) 签到（若未签）
         if have_signin:
             result["signed"] = True
-            log_lines.append(format_line(True, f"[{remark}] 今日已签到"))
+            log(f"🟡 [{remark}] 今日已签到")
         else:
             si = do_signin(s, token, secret)
             if not si.get("success", False):
                 ok_all = False
                 result["signed"] = False
-                log_lines.append(format_line(False, f"[{remark}] 签到失败：{json.dumps(si, ensure_ascii=False)}"))
+                err(f"❌ [{remark}] 签到失败：{json.dumps(si, ensure_ascii=False)}")
             else:
                 si_data = si.get("data") or {}
                 gain = si_data.get("gainNum") or 0
                 result["signed"] = True
                 result["gain_signin"] = gain
-                log_lines.append(format_line(True, f"[{remark}] 签到成功，本次获得：{gain} 豆豆"))
+                log(f"✅ [{remark}] 签到成功，本次获得：{gain} 豆豆")
 
                 # 签到后刷新状态
                 st2 = get_sign_status(s, token, secret)
@@ -566,23 +543,23 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
 
         # 3) 第七天领取 8 豆豆
         if streak_day == 7 and have_signin and (not have_receive):
-            log_lines.append(format_line(True, f"[{remark}] 检测到连续签到第 7 天且未领取，开始领取..."))
+            log(f"🎁 [{remark}] 检测到连续签到第 7 天且未领取，开始领取...")
             rv = receive_voucher(s, token, secret)
             if not rv.get("success", False):
                 ok_all = False
-                log_lines.append(format_line(False, f"[{remark}] 第七天领取失败：{json.dumps(rv, ensure_ascii=False)}"))
+                err(f"❌ [{remark}] 第七天领取失败：{json.dumps(rv, ensure_ascii=False)}")
             else:
                 got = rv.get("data")
                 result["gain_day7"] = got
-                log_lines.append(format_line(True, f"[{remark}] 第七天领取成功：+{got} 豆豆"))
+                log(f"🎁 [{remark}] 第七天领取成功：+{got} 豆豆")
         elif streak_day == 7 and have_signin and have_receive:
-            log_lines.append(format_line(True, f"[{remark}] 连续签到第 7 天奖励已领取"))
+            log(f"🟡 [{remark}] 连续签到第 7 天奖励已领取")
 
         # 4) 查豆豆总数
         ct = get_doudou_total(s, token, secret)
         if not ct.get("success", False):
             ok_all = False
-            log_lines.append(format_line(False, f"[{remark}] 查询豆豆总数失败：{json.dumps(ct, ensure_ascii=False)}"))
+            err(f"❌ [{remark}] 查询豆豆总数失败：{json.dumps(ct, ensure_ascii=False)}")
         else:
             data = ct.get("data") or {}
             total = data.get("integralVoucher")
@@ -590,96 +567,55 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
             result["total"] = total
             result["expireTime"] = expire_time
             extra = f"，有效期至：{expire_time}" if expire_time else ""
-            log_lines.append(format_line(True, f"[{remark}] 当前豆豆总数：{total}{extra}"))
+            log(f"💰 [{remark}] 当前豆豆总数：{total}{extra}")
 
-    return ok_all, "\n".join(log_lines), result
+    return ok_all, result
 
 
 def main() -> int:
-    global log_lines
-
     accounts = parse_accounts()
     results: List[Dict[str, Any]] = []
-    any_fail = False
+    fail_count = 0
 
-    log_lines.append(f"\n{' ' * 5}{SCRIPT_NAME}")
-    log_lines.append("-------- 开 始 执 行 --------")
-    log_lines.append(f"账号数量：{len(accounts)}")
-    print(f"\n{' ' * 5}{SCRIPT_NAME}")
-    print("-------- 开 始 执 行 --------")
-    print(f"账号数量：{len(accounts)}")
+    log(f"🚀 {SCRIPT_NAME} 开始 · 共 {len(accounts)} 个账号")
 
     for idx, acc in enumerate(accounts, start=1):
         remark = acc["remark"]
-
-        log_lines.append(f"\n📋 账号 [{idx}/{len(accounts)}]")
-        log_lines.append(f"📋 当前账号：{remark or f'账号{idx}'}")
-        print(f"\n📋 账号 [{idx}/{len(accounts)}]")
-        print(f"📋 当前账号：{remark or f'账号{idx}'}")
+        log(f"👤 账号 [{idx}/{len(accounts)}] · {remark or f'账号{idx}'}")
 
         # yyb 模式：每次运行强制重新取码 + 登录换取 token（不落盘）
         if acc.get("mode") == "yyb":
             try:
                 token, secret = get_token_for_account(acc["server"], acc["ref"], remark)
-                log_lines.append("✅ 登录成功")
             except Exception as e:
-                any_fail = True
-                log_lines.append(format_line(False, f"❌ 登录失败: {e}"))
-                print(format_line(False, f"❌ 登录失败: {e}"))
+                fail_count += 1
+                err(f"❌ 登录失败: {e}")
                 if idx < len(accounts):
                     time.sleep(2)
                 continue
         else:
             token, secret = acc["token"], acc["secret"]
-            log_lines.append("📌 手动模式，跳过登录")
+            log("📌 手动模式，跳过登录")
 
-        ok, log_text, res = run_one_account(idx, remark, token, secret)
-        log_lines.append(log_text)
+        ok, res = run_one_account(idx, remark, token, secret)
         res["ok"] = ok
         results.append(res)
 
         if not ok:
-            any_fail = True
+            fail_count += 1
 
         # 账号间延迟
         if idx < len(accounts):
             time.sleep(2)
 
-    log_lines.append("\n-------- 执 行 结 束 --------")
-    print("\n-------- 执 行 结 束 --------")
-    print("──── JLC 执行汇总 ────")
-
-    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
-    if JLC_NOTIFY:
-        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        _content = []
-        for _i, r in enumerate(results, start=1):
-            _remark = r.get("remark") or f"账号{_i}"
-            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-            _content.append(f"{_em} [{_remark}]")
-            if r.get("ok"):
-                if r.get("signed") and not r.get("gain_signin"):
-                    _content.append("✔️ 签到成功（今日已签）")
-                else:
-                    _parts = []
-                    if r.get("gain_signin"):
-                        _parts.append(f"签到+{r['gain_signin']}豆豆")
-                    if r.get("gain_day7"):
-                        _parts.append(f"第7天+{r['gain_day7']}豆豆")
-                    _content.append("✔️ 签到成功" + ("，" + "，".join(_parts) if _parts else ""))
-            else:
-                _content.append("❌ 签到失败")
-        try_send_notify("====== JLC 嘉立创 汇总日志 ======", "\n".join(_content))
-
-    return 1 if any_fail else 0
+    log(f"🏁 {SCRIPT_NAME} 执行汇总 · 账号 {len(accounts)}｜成功 {len(accounts) - fail_count}｜失败 {fail_count}")
+    return 1 if fail_count else 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        print("❌ 脚本异常：", str(e))
-        traceback.print_exc()
-        if JLC_NOTIFY:
-            try_send_notify("JLC 签到脚本异常", str(e))
+        err("💥 脚本异常：" + str(e))
+        err(traceback.format_exc())
         sys.exit(1)

@@ -12,9 +12,10 @@ cron: 0 6,16 * * *
                  例如 [1,3] 只跑第 1、3 个账号
 
 依赖：requests、pycryptodome（仓库 requirements.txt 已声明）
-通知：使用青龙内置 notify.py；通知失败不影响签到任务结果。
 缓存：/ql/data/config/hrt_tokens.json，失效后会自动通过 YYB-Go-Enhanced 重新登录。
-功能：自动登录、查询签到状态、签到领积分，并通知签到前积分、本次增加积分、签到后积分。
+功能：自动登录、查询签到状态、签到领积分，并输出签到前积分、本次增加积分、签到后积分。
+
+日志规范：[LEVEL] [HRT] message   （LEVEL: INFO / WARN / ERROR）
 
 作者：lcmovie https://github.com/lcmovie
 """
@@ -23,7 +24,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import importlib.util
 import json
 import os
 import random
@@ -74,6 +74,17 @@ UA = (
     "MicroMessenger/8.0.75(0x18004b21) NetType/WIFI Language/zh_CN"
 )
 CACHE_FILE = Path(os.getenv("HRT_CACHE_FILE", "/ql/data/config/hrt_tokens.json"))
+
+
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [HRT] {msg}", flush=True)
+
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 
 def compact(value: Any) -> str:
@@ -322,12 +333,12 @@ class HRT:
     def login(self, cached: str, imported: str) -> str:
         for source, token in (("缓存", cached), ("HRT_TOKEN", imported)):
             if token and self.valid_token(token):
-                print(f"  登录：{source}有效")
+                log(f"🔑 登录：{source}有效")
                 return token
         token = self.yyb_login()
         if not self.valid_token(token):
             raise RuntimeError("业务登录校验失败")
-        print("  登录：YYB-Go-Enhanced 成功")
+        log("🔑 登录：YYB-Go-Enhanced 成功")
         return token
 
     def points(self) -> int:
@@ -387,62 +398,27 @@ class HRT:
         return {"before": before, "added": added, "after": after, "already": already}
 
 
-def load_notify():
-    candidates = [
-        Path("/ql/data/scripts/notify.py"),
-        Path("/ql/data/notify.py"),
-        Path(__file__).with_name("notify.py"),
-    ]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location("hrt_qinglong_notify", path)
-            module = importlib.util.module_from_spec(spec)
-            assert spec and spec.loader
-            spec.loader.exec_module(module)
-            for name in ("send", "sendNotify"):
-                func = getattr(module, name, None)
-                if callable(func):
-                    return func
-        except Exception as exc:
-            print(f"通知模块加载失败：{safe_message(exc)}")
-    return None
-
-
-def notify(text: str) -> None:
-    func = load_notify()
-    if not func:
-        print("未找到青龙 notify.py，跳过通知")
-        return
-    try:
-        func("华润通签到", text)
-        print("青龙通知模块调用完成")
-    except Exception as exc:
-        print(f"青龙通知发送失败（不影响签到结果）：{safe_message(exc)}")
-
-
 def main() -> int:
     try:
         accounts = parse_accounts()
     except Exception as exc:
-        print(f"配置错误：{safe_message(exc)}")
+        err(f"🚫 配置错误：{safe_message(exc)}")
         return 1
     # 序号白名单筛选（1 起）
     if YYB_ONLY_REFS:
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             accounts = [a for a in accounts if a.index in wanted]
-            print(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(accounts)} 个账号")
+            log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(accounts)} 个账号")
             if not accounts:
-                print("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
+                err("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
                 return 1
+    log(f"🚀 华润通 签到开始 · 共 {len(accounts)} 个账号")
     cache = load_cache()
     imported = [x.strip() for x in os.getenv("HRT_TOKEN", "").splitlines() if x.strip()]
-    messages: List[str] = []
     failures = 0
     for account in accounts:
-        print(f"\n===== {account.label} =====")
+        log(f"👤 ===== {account.label} =====")
         client = HRT(account)
         try:
             cached_entry = cache.get(account.ref) or cache.get(f"__account_{account.index}__") or {}
@@ -452,22 +428,15 @@ def main() -> int:
             save_cache(cache)
             result = client.run()
             status = "今日已签到" if result["already"] else "签到成功"
-            line = (
-                f"{account.label}：{status}\n"
-                f"签到前积分：{result['before']}\n"
-                f"本次增加积分：{result['added']}\n"
-                f"签到后积分：{result['after']}"
-            )
-            print(line)
-            messages.append(line)
+            icon = "🟡" if result["already"] else "✅"
+            log(f"{icon} {account.label}：{status}")
+            log(f"📊 签到前积分：{result['before']}")
+            log(f"🎁 本次增加积分：{result['added']}")
+            log(f"📈 签到后积分：{result['after']}")
         except Exception as exc:
             failures += 1
-            line = f"{account.label}：失败\n原因：{safe_message(exc)}"
-            print(line)
-            messages.append(line)
-    content = "\n\n".join(messages)
-    notify(content)
-    print("\n===== 汇总 =====\n" + content)
+            err(f"❌ {account.label}：失败 · 原因：{safe_message(exc)}")
+    log(f"🏁 华润通 执行汇总 · 账号 {len(accounts)}｜成功 {len(accounts) - failures}｜失败 {failures}")
     return 1 if failures else 0
 
 

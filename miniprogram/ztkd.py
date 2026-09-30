@@ -7,13 +7,13 @@
 #   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 完成微信登录（wxlogin）
-#   4. 执行快递签到任务并查询前后积分变化，输出汇总并发送通知
+#   4. 执行快递签到任务并查询前后积分变化，输出汇总
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
-#   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
 #
+# 日志规范：[LEVEL] [ZTKD] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
@@ -32,13 +32,10 @@ import random
 import time
 import requests
 import os
-import sys
-import logging
 import traceback
 from datetime import datetime
 
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
-NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")  # 通知开关，默认开启；填 0/false/off/no 关闭
 
 class AutoTask:
     def __init__(self, site_name):
@@ -49,15 +46,13 @@ class AutoTask:
         self.site_name = site_name
         self.proxy_url = os.getenv("PROXY_API_URL") # 代理api，返回一条txt文本，内容为代理ip:端口
         self.wx_appid = "wx7ddec43d9d27276a" # 微信小程序id
-        self.log_msgs = []
         self.account_results = []
         self.host = "hdgateway.zto.com"
         self.user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.75(0x18004b21) NetType/WIFI Language/zh_CN"
 
     def log(self, msg, level="info"):
-        formatted = f"[{level.upper()}] {msg}"
-        print(formatted)
-        self.log_msgs.append(formatted)
+        prefix = {"error": "ERROR", "warning": "WARN"}.get(level, "INFO")
+        print(f"[{prefix}] [ZTKD] {msg}", flush=True)
 
     def get_wx_code(self, server, ref):
         try:
@@ -73,12 +68,12 @@ class AutoTask:
             body = response.json()
             code = ((body.get("data") or {}).get("result") or {}).get("code")
             if body.get("code") != 0 or not code:
-                self.log(f"[获取 code]失败，YYB-Go 响应码: {body.get('code')}", level="error")
+                self.log(f"❌ [获取 code] 失败，YYB-Go 响应码: {body.get('code')}", level="error")
                 return None
-            self.log("[获取 code]成功")
+            self.log("🔑 [获取 code] 成功")
             return code
         except Exception as e:
-            self.log(f"获取 code 失败: {e}", level="error")
+            self.log(f"❌ 获取 code 失败: {e}", level="error")
             return None
 
     def get_proxy(self):
@@ -87,12 +82,12 @@ class AutoTask:
         :return: 代理
         """
         if not self.proxy_url:
-            self.log("[获取代理]没有找到环境变量PROXY_API_URL，不使用代理", level="warning")
+            self.log("ℹ️ [获取代理] 没有找到环境变量PROXY_API_URL，不使用代理", level="warning")
             return None
         url = self.proxy_url
         response = requests.get(url)
         proxy = response.text
-        self.log(f"[获取代理]: {proxy}")
+        self.log(f"🛡️ [获取代理]: {proxy}")
         return proxy
 
     def check_proxy(self, proxy, session):
@@ -108,10 +103,10 @@ class AutoTask:
             payload = {"keys":["serverTime"]}
             response = session.post(url, json=payload, timeout=5)
             if response.status_code == 200:
-                self.log(f"[检查代理]: {proxy} 应该可用")
+                self.log(f"🛡️ [检查代理]: {proxy} 应该可用")
                 return True
             else:
-                self.log(f"[检查代理]: {response.text}")
+                self.log(f"⚠️ [检查代理]: {response.text}")
                 return False
         except Exception as e:
             return False
@@ -125,7 +120,7 @@ class AutoTask:
         try:
             yyb_server = os.getenv("YYB_SERVER", "")
             if not yyb_server.strip():
-                self.log("[检查环境变量]没有找到 YYB_SERVER，请按 地址@微信账号标识 配置", level="error")
+                self.log("🚫 [检查环境变量] 没有找到 YYB_SERVER，请按 地址@微信账号标识 配置", level="error")
                 return
 
             for line_no, raw in enumerate(yyb_server.replace("&", " ").split(), 1):
@@ -133,16 +128,16 @@ class AutoTask:
                 if not raw:
                     continue
                 if "@" not in raw:
-                    self.log(f"[检查环境变量]YYB_SERVER 第{line_no}行格式错误，已跳过", level="error")
+                    self.log(f"⚠️ [检查环境变量] YYB_SERVER 第{line_no}行格式错误，已跳过", level="error")
                     continue
                 server, ref = raw.rsplit("@", 1)
                 ref = ref.strip()
                 if not server.strip() or not ref:
-                    self.log(f"[检查环境变量]YYB_SERVER 第{line_no}行地址或账号标识为空，已跳过", level="error")
+                    self.log(f"⚠️ [检查环境变量] YYB_SERVER 第{line_no}行地址或账号标识为空，已跳过", level="error")
                     continue
                 yield server.strip(), ref
         except Exception as e:
-            self.log(f"[检查环境变量]发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [检查环境变量] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             raise
 
     def wxlogin(self, session, code):
@@ -161,21 +156,21 @@ class AutoTask:
             response.raise_for_status()
             response_json = response.json()
             if response_json['status'] == True:
-                self.log(f"[登录]: {response_json['message']}")
+                self.log(f"🔑 [登录]: {response_json['message']}")
                 token = (response_json.get('result') or {}).get('token')
                 if not token:
-                    self.log("[登录]响应缺少 token", level="error")
+                    self.log("❌ [登录] 响应缺少 token", level="error")
                     return False
                 session.headers["X-Token"] = token
                 return True
             else:
-                self.log(f"[登录]发生错误: {response_json['message']}", level="error")
+                self.log(f"❌ [登录] 发生错误: {response_json['message']}", level="error")
                 return False
         except requests.RequestException as e:
-            self.log(f"[登录]发生网络错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [登录] 发生网络错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
         except Exception as e:
-            self.log(f"[登录]发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [登录] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
 
 
@@ -196,14 +191,14 @@ class AutoTask:
             response.raise_for_status()
             response_json = response.json()
             if response_json['status'] == True:
-                self.log("[签到]: 成功")
+                self.log("✅ [签到]: 成功")
                 return True, "签到成功"
             else:
                 message = response_json.get("message") or "签到失败"
-                self.log(f"[签到]: {message}", level="warning")
+                self.log(f"🟡 [签到]: {message}", level="warning")
                 return False, message
         except Exception as e:
-            self.log(f"[签到]发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [签到] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False, "请求异常"
 
     def get_points(self, session):
@@ -219,9 +214,9 @@ class AutoTask:
             points = (response_json.get("data") or {}).get("totalPoint")
             if response_json.get("success") is True and isinstance(points, (int, float)):
                 return int(points)
-            self.log("[积分]查询失败：响应中没有有效积分", level="warning")
+            self.log("⚠️ [积分] 查询失败：响应中没有有效积分", level="warning")
         except Exception as e:
-            self.log(f"[积分]查询失败: {e}", level="warning")
+            self.log(f"⚠️ [积分] 查询失败: {e}", level="warning")
         return None
 
     def log_points_change(self, before, after):
@@ -229,52 +224,16 @@ class AutoTask:
         if before is None or after is None:
             before_text = "查询失败" if before is None else str(before)
             after_text = "查询失败" if after is None else str(after)
-            self.log(f"[积分]: 初始积分 {before_text} → 完成后积分 {after_text}", level="warning")
+            self.log(f"📊 [积分]: 初始积分 {before_text} → 完成后积分 {after_text}", level="warning")
             return
-        self.log(f"[积分]: 初始积分 {before} → 完成后积分 {after}（变化 {after - before:+d}）")
-
-    def build_notification(self, elapsed_seconds):
-        """生成面向 notify 的分账号简洁汇总（账号行含总积分(+变化)，签到状态 ✔️/❌）。"""
-        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        lines = []
-        for _i, item in enumerate(self.account_results, 1):
-            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-            _acct = f"{_em} [账号{item['index']}]"
-            _init = item.get("initial_points")
-            _final = item.get("final_points")
-            if _final is not None:
-                _acct += f" 总积分{_final}"
-                if _init is not None:
-                    _delta = _final - _init
-                    if _delta != 0:
-                        _acct += f"(+{_delta})"
-            lines.append(_acct)
-            if item["normal"]:
-                lines.append("✔️ 签到成功")
-            else:
-                _reason = item.get("sign") or item.get("login") or "失败"
-                lines.append("❌ 签到失败：" + str(_reason))
-        title = f"====== {self.site_name} 汇总日志 ======"
-        return title, "\n".join(lines)
+        self.log(f"📊 [积分]: 初始积分 {before} → 完成后积分 {after}（变化 {after - before:+d}）")
 
     def run(self):
         """
         运行任务
         """
-        started_at = time.monotonic()
-        notify = None
         try:
-            # 如果notify模块不存在，从远程下载至本地
-            if not os.path.exists("notify.py"):
-                url = "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"
-                response = requests.get(url)
-                with open("notify.py", "w", encoding="utf-8") as f:
-                    f.write(response.text)
-                import notify
-            else:
-                import notify
-
-            self.log(f"【{self.site_name}】开始执行任务")
+            self.log(f"🚀 【{self.site_name}】开始执行任务")
 
             # 检查环境变量
             all_entries = list(self.check_env())
@@ -285,8 +244,7 @@ class AutoTask:
                     all_entries = [e for i, e in enumerate(all_entries, 1) if i in wanted]
                     self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(all_entries)} 个账号")
             for index, (server, ref) in enumerate(all_entries, 1):
-                self.log("")
-                self.log(f"------ 【账号{index}】开始执行任务 ------")
+                self.log(f"👤 ----- 【账号{index}】开始执行任务 -----")
 
                 if MULTI_ACCOUNT_PROXY:
                     proxy = self.get_proxy()
@@ -322,7 +280,7 @@ class AutoTask:
                         "final_points": None,
                         "normal": False,
                     })
-                    self.log(f"------ 【账号{index}】执行任务完成 ------")
+                    self.log(f"🏁 ----- 【账号{index}】执行任务完成 -----")
                     continue
 
                 login_result = self.wxlogin(session, code)
@@ -336,7 +294,7 @@ class AutoTask:
                         "final_points": None,
                         "normal": False,
                     })
-                    self.log(f"------ 【账号{index}】执行任务完成 ------")
+                    self.log(f"🏁 ----- 【账号{index}】执行任务完成 -----")
                     continue
 
                 initial_points = self.get_points(session)
@@ -353,22 +311,13 @@ class AutoTask:
                     "normal": sign_success or sign_message == "今日已签到",
                 })
 
-                self.log(f"------ 【账号{index}】执行任务完成 ------")
+                self.log(f"🏁 ----- 【账号{index}】执行任务完成 -----")
         except Exception as e:
-            self.log(f"【{self.site_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 【{self.site_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
         finally:
-            elapsed_seconds = round(time.monotonic() - started_at)
-            title, content = self.build_notification(elapsed_seconds)
-            print(f"\n{content}")
-            if not NOTIFY:
-                self.log("[通知]LY_NOTIFY=0，已关闭通知", level="info")
-            elif notify is None:
-                self.log("[通知]通知模块加载失败，未发送通知", level="warning")
-            else:
-                try:
-                    notify.send(title, content)
-                except Exception as e:
-                    self.log(f"[通知]发送失败: {e}", level="warning")
+            _n = len(self.account_results)
+            _ok = sum(1 for it in self.account_results if it.get("normal"))
+            self.log(f"🏁 【{self.site_name}】执行汇总 · 账号 {_n}｜成功 {_ok}｜失败 {_n - _ok}")
 
 if __name__ == "__main__":
     auto_task = AutoTask("中通快递")

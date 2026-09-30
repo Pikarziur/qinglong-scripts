@@ -8,11 +8,10 @@
 //   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 //   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 //   3. 完成签到（打卡 / 新人礼等）任务
-//   4. 输出账号结果并发送精简摘要通知
+//   4. 输出账号结果与执行汇总日志
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，换行分隔
 //   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
-//   JPH_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
 //   OCR_SERVER       可选。滑块识别服务，默认 http://ocr.fj.us.ci
 // ────────────────────────────────────────────
 
@@ -33,8 +32,28 @@ let request = require("request");
 request = request.defaults({
     jar: true
 });
-const { log } = console;
-const Notify = !['0', 'false', 'off', 'no'].includes(String(($.isNode() ? process.env.JPH_NOTIFY : $.getdata("JPH_NOTIFY")) || '1').toLowerCase());
+// 统一日志格式：[LEVEL] [EXIJIU_JPH] emoji message
+// 级别 INFO/WARN/ERROR；行首自带 emoji 时沿用，否则按级别补默认 emoji
+const SRC = 'EXIJIU_JPH';
+const _LEVEL_EMOJI = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌' };
+const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
+function _levelOfLine(line) {
+    if (/^(?:\u274C|\uD83D\uDCA5)/.test(line)) return 'ERROR'; // ❌ 💥
+    if (/^\u26A0/.test(line)) return 'WARN';                   // ⚠️
+    return 'INFO';
+}
+function emit(level, text) {
+    const s = String(text === undefined || text === null ? '' : text);
+    for (const raw of s.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const lv = level || _levelOfLine(line);
+        console.log(`[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`);
+    }
+}
+function log(text) { emit(null, text); }
+function warn(text) { emit('WARN', text); }
+function err(text) { emit('ERROR', text); }
 const debug = 0; //0为关闭调试，1为打开调试,默认为0
 const WX_APPID = "wx8d41cdc44c8aeaab";
 const OCR_SERVER = (($.isNode() ? process.env.OCR_SERVER : $.getdata("OCR_SERVER")) || "http://ocr.fj.us.ci").replace(/\/$/, "");
@@ -71,20 +90,19 @@ function parseYybGoEntry(rawValue) {
             return;
 
 
-        log(`\n\n=============================================    \n脚本执行 - 北京时间(UTC+8)：${new Date(
+        log(`🚀 君品荟签到｜北京时间(UTC+8)：${new Date(
             new Date().getTime() + new Date().getTimezoneOffset() * 60 * 1000 + 8 * 60 * 60 * 1000
-        ).toLocaleString()} \n=============================================\n`);
+        ).toLocaleString()}`);
 
-        log(`\n============ 君品荟签到  ============`)
-        log(`\n=================== 共找到 ${xjhdArr.length} 个账号 ===================`)
-        addNotifyStr(`共 ${xjhdArr.length} 个账号`, false)
+        log(`📋 共找到 ${xjhdArr.length} 个账号`)
+        addLog(`共 ${xjhdArr.length} 个账号`, false)
         if (debug) {
             log(`【debug】 这是你的全部账号数组:\n ${xjhdArr}`);
         }
 
         for (let index = 0; index < xjhdArr.length; index++) {
             let num = index + 1
-            addNotifyStr(`\n==== 开始【第 ${num} 个账号】====\n`, true)
+            addLog(`📌 开始【第 ${num} 个账号】`, true)
             xjhd = xjhdArr[index];
             xj_code = '';
             xj_token = '';
@@ -94,11 +112,11 @@ function parseYybGoEntry(rawValue) {
             user_phone = '';
 
             if (!(await get_code(xjhd))) {
-                addNotifyStr(`❌ 第 ${num} 个账号获取微信 code 失败，跳过`, true);
+                addLog(`❌ 第 ${num} 个账号获取微信 code 失败，跳过`, true);
                 continue;
             }
             if (!(await wxMiniSilentLogin(xj_code))) {
-                addNotifyStr(`❌ 第 ${num} 个账号业务登录失败，跳过`, true);
+                addLog(`❌ 第 ${num} 个账号业务登录失败，跳过`, true);
                 continue;
             }
             await get_setcookie(xj_token);
@@ -135,17 +153,17 @@ function parseYybGoEntry(rawValue) {
                         }
                     }
                     if (captchaPassed) {
-                        addNotifyStr(`✅ 滑块验证通过`, true);
+                        addLog(`✅ 滑块验证通过`, true);
                     }
                 } catch (e) {
-                    addNotifyStr(`⚠️ 滑块验证异常：${e.message || e}`, true);
+                    addLog(`⚠️ 滑块验证异常：${e.message || e}`, true);
                 }
             } else {
-                addNotifyStr(`⚠️ 未获取到验证码，跳过滑块`, true);
+                addLog(`⚠️ 未获取到验证码，跳过滑块`, true);
             }
 
             if (!captchaPassed) {
-                addNotifyStr(`⚠️ 验证码未通过，继续尝试签到`, true);
+                addLog(`⚠️ 验证码未通过，继续尝试签到`, true);
             }
 
             await fillSignIn(xj_cookie, xj_token, xj_code);
@@ -158,10 +176,9 @@ function parseYybGoEntry(rawValue) {
             await getpoints(xj_token);
             await $await(10000)
         }
-        log('──── 习酒君品荟 执行汇总 ────');
         const okCount = (msg.match(/签到成功/g) || []).length;
-        log(`账号 ${xjhdArr.length}｜成功 ${okCount}｜失败 ${xjhdArr.length - okCount}`);
-        // 渲染分账号汇总（面向 notify，简洁精要；账号行含总积分，签到状态 ✔️/❌）
+        log(`📊 执行汇总｜账号 ${xjhdArr.length}｜成功 ${okCount}｜失败 ${xjhdArr.length - okCount}`);
+        // 渲染分账号汇总（简洁精要；账号行含总积分，签到状态 ✔️/❌）
         const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
         const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);
         const summaryOut = [];
@@ -183,10 +200,10 @@ function parseYybGoEntry(rawValue) {
             const totalMatch = blk.match(/总积分：(\d+)/);
             if (totalMatch) summaryOut.push(`总积分${totalMatch[1]}`);
         }
-        await SendMsg(summaryOut.join('\n'));
+        for (const line of summaryOut) log(line);
     }
 })()
-    .catch((e) => log(e))
+    .catch((e) => err(e && e.stack ? e.stack : e))
     .finally(() => $.done())
 
 // 获取code
@@ -250,7 +267,7 @@ async function wxMiniSilentLogin(codestr) {
                 user_phone = loginData.phone || '';
                 let hidePhone = user_phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2');
                 //log(`✅ 用户手机号获取成功:  ${hidePhone}`);
-                addNotifyStr(`✅ 用户手机号获取成功:  ${hidePhone}`);
+                addLog(`✅ 用户手机号获取成功:  ${hidePhone}`);
                 resolve(true);
             } catch (e) {
                 log(`❌ 登录解析异常：${e.message || e}`)
@@ -350,16 +367,16 @@ async function fillSignIn(cookie_, token__, signCode) {
                 if (d.success) {
                     pointValue = d.data?.pointValue || 0;
                     //log(`✅ 签到成功，积分：${pointValue}`);
-                    addNotifyStr(`签到成功，获得积分：${pointValue}`);
+                    addLog(`签到成功，获得积分：${pointValue}`);
                 } else {
-                    addNotifyStr(`签到失败：${d.message || '未知'}`);
+                    addLog(`签到失败：${d.message || '未知'}`);
                 }
             } catch (e) {
-                addNotifyStr(`签到异常`);
+                addLog(`签到异常`);
             }
             resolve();
         }).catch(() => {
-            addNotifyStr(`签到请求失败`);
+            addLog(`签到请求失败`);
             resolve();
         })
     })
@@ -389,16 +406,16 @@ async function getpoints(token__) {
                 if (d.success) {
                     const pointss = d.data.points;
                     //log(`✅ 总积分：${pointss}`);
-                    addNotifyStr(`总积分：${pointss}`);
+                    addLog(`总积分：${pointss}`);
                 } else {
-                    addNotifyStr(`获取总积分失败：${d.message || '未知'}`);
+                    addLog(`获取总积分失败：${d.message || '未知'}`);
                 }
             } catch (e) {
-                addNotifyStr(`获取总积分`);
+                addLog(`获取总积分`);
             }
             resolve();
         }).catch(() => {
-            addNotifyStr(`获取总积分失败`);
+            addLog(`获取总积分失败`);
             resolve();
         })
     })
@@ -450,13 +467,13 @@ function $await(ms) {
 // 环境处理
 async function Envs() {
     if (!YYB_SERVER.trim()) {
-        log(`未填写变量 YYB_SERVER，格式：地址@账号标识，多账号一行一个`);
+        err(`未填写变量 YYB_SERVER，格式：地址@账号标识，多账号一行一个`);
         return false;
     }
     xjhdArr = YYB_SERVER.split(/\r?\n/).map(i => i.trim()).filter(i => {
         if (!i) return false;
         const parsed = parseYybGoEntry(i);
-        if (!parsed.server || !parsed.ref) { log(`跳过无效 YYB_SERVER 配置：${i}`); return false; }
+        if (!parsed.server || !parsed.ref) { warn(`跳过无效 YYB_SERVER 配置：${i}`); return false; }
         return true;
     });
     // 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
@@ -467,67 +484,16 @@ async function Envs() {
         log(`按 YYB_ONLY_REFS 筛选：请求序号 [${[...wanted].sort((a,b)=>a-b)}]，命中 ${xjhdArr.length}/${before} 个账号`);
     }
     if (!xjhdArr.length) {
-        log(`YYB_SERVER 中没有有效账号（或全被 YYB_ONLY_REFS 过滤，留空 [] 可跑全部）`);
+        err(`YYB_SERVER 中没有有效账号（或全被 YYB_ONLY_REFS 过滤，留空 [] 可跑全部）`);
         return false;
     }
     return true;
 }
 
-// 消息拼接
-function addNotifyStr(str, is_log = true) {
+// 消息拼接（同时按统一日志格式输出；msg 保留用于汇总解析）
+function addLog(str, is_log = true) {
     if (is_log) log(str);
     msg += str + '\n';
-}
-
-// 通知模块：共享 notify.js 放在仓库根（脚本上一级），5 个脚本共用一份；缺失时从 CDN 自愈下载
-async function loadNotifyModule() {
-    const fs = require('fs');
-    const path = require('path');
-    // 优先仓库根共享副本，兼容旧布局的脚本同目录副本
-    const cands = [path.join(__dirname, '..', 'notify.js'), path.join(__dirname, 'notify.js')];
-    const p = cands.find(f => fs.existsSync(f)) || cands[0];
-    if (!fs.existsSync(p)) {
-        const urls = [
-            'https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.js',
-            'https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js',
-            'https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.js'
-        ];
-        for (const u of urls) {
-            try {
-                const r = await axios.get(u, { timeout: 15000, responseType: 'text' });
-                const body = typeof r.data === 'string' ? r.data : String(r.data);
-                if (r.status === 200 && body.includes('sendNotify')) {
-                    fs.writeFileSync(p, body);
-                    log('已自愈下载 notify.js（' + u.split('/')[2] + '）');
-                    break;
-                }
-            } catch (e) {
-                log('notify.js 下载失败（' + u.split('/')[2] + '）: ' + (e.message || e));
-            }
-        }
-    }
-    if (!fs.existsSync(p)) return null;
-    return require(p);
-}
-
-// 发送通知（只推精简摘要，不推运行日志全文）
-async function SendMsg(message) {
-    if (!message || !Notify) return;
-    if ($.isNode()) {
-        try {
-            const notify = await loadNotifyModule();
-            if (!notify) {
-                log('未安装 notify.js，跳过推送');
-                return;
-            }
-            const okCount = (message.match(/签到成功/g) || []).length;
-            await notify.sendNotify('====== 习酒君品荟 汇总日志 ======', message);
-        } catch (e) {
-            log('❌ 通知推送失败: ' + (e.message || e));
-        }
-    } else {
-        $.msg(message);
-    }
 }
 
 
@@ -580,7 +546,7 @@ function Env(t, e) {
 
     return new class {
         constructor(t, e) {
-            this.name = t, this.http = new s(this), this.data = null, this.dataFile = "box.dat", this.logs = [], this.isMute = !1, this.isNeedRewrite = !1, this.logSeparator = "\n", this.startTime = (new Date).getTime(), Object.assign(this, e), this.log("", `🔔${this.name}, 开始!`)
+            this.name = t, this.http = new s(this), this.data = null, this.dataFile = "box.dat", this.logs = [], this.isMute = !1, this.isNeedRewrite = !1, this.logSeparator = "\n", this.startTime = (new Date).getTime(), Object.assign(this, e), console.log(`[INFO] [${SRC}] 🚀 ${this.name} 开始`)
         }
 
         isNode() {
@@ -865,42 +831,9 @@ function Env(t, e) {
         }
 
         msg(e = t, s = "", i = "", r) {
-            const o = t => {
-                if (!t) return t;
-                if ("string" == typeof t) return this.isLoon() ? t : this.isQuanX() ? {
-                    "open-url": t
-                } : this.isSurge() ? {
-                    url: t
-                } : void 0;
-                if ("object" == typeof t) {
-                    if (this.isLoon()) {
-                        let e = t.openUrl || t.url || t["open-url"],
-                            s = t.mediaUrl || t["media-url"];
-                        return {
-                            openUrl: e,
-                            mediaUrl: s
-                        }
-                    }
-                    if (this.isQuanX()) {
-                        let e = t["open-url"] || t.url || t.openUrl,
-                            s = t["media-url"] || t.mediaUrl;
-                        return {
-                            "open-url": e,
-                            "media-url": s
-                        }
-                    }
-                    if (this.isSurge()) {
-                        let e = t.url || t.openUrl || t["open-url"];
-                        return {
-                            url: e
-                        }
-                    }
-                }
-            };
-            if (this.isMute || (this.isSurge() || this.isLoon() ? $notification.post(e, s, i, o(r)) : this.isQuanX() && $notify(e, s, i, o(r))), !this.isMuteLog) {
-                let t = ["", "==============📣系统通知📣=============="];
-                t.push(e), s && t.push(s), i && t.push(i), console.log(t.join("\n")), this.logs = this.logs.concat(t)
-            }
+            // 通知推送能力已移除，此处仅本地打印
+            const parts = [e, s, i].filter(x => x !== undefined && x !== null && x !== '');
+            console.log(`[INFO] [${SRC}] 📣 ${parts.join('｜')}`), this.logs = this.logs.concat(parts)
         }
 
         log(...t) {
@@ -909,7 +842,7 @@ function Env(t, e) {
 
         logErr(t, e) {
             const s = !this.isSurge() && !this.isQuanX() && !this.isLoon();
-            s ? this.log("", `❗️${this.name}, 错误!`, t.stack) : this.log("", `❗️${this.name}, 错误!`, t)
+            console.log(`[ERROR] [${SRC}] 💥 ${this.name} 错误｜${s && t && t.stack ? t.stack : t}`)
         }
 
         wait(t) {
@@ -919,7 +852,7 @@ function Env(t, e) {
         done(t = {}) {
             const e = (new Date).getTime(),
                 s = (e - this.startTime) / 1e3;
-            this.log("", `🔔${this.name}, 结束! 🕛 ${s} 秒`), this.log(), (this.isSurge() || this.isQuanX() || this.isLoon()) && $done(t)
+            console.log(`[INFO] [${SRC}] 🏁 ${this.name} 结束｜耗时 ${s} 秒`), (this.isSurge() || this.isQuanX() || this.isLoon()) && $done(t)
         }
     }(t, e)
 }

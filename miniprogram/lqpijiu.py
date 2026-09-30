@@ -8,12 +8,13 @@
 #   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 登录并进入小程序，完成每日签到 / 领券等任务
-#   4. 输出汇总并发送通知（本脚本无独立开关，始终发送）
+#   4. 输出汇总
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，空格/换行/& 分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #   QL_DIR          可选。token 缓存目录，默认 /ql/data/config/yyb_token_caches
 #
+# 日志规范：[LEVEL] [LQPIJIU] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
@@ -27,6 +28,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [LQPIJIU] {msg}", flush=True)
+
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 # 将脚本所在目录加入搜索路径（确保能找到 yyb.py 等同目录模块）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +64,7 @@ def _yyb_routes():
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             filtered = [r for i, r in enumerate(routes, 1) if i in wanted]
-            print(f"[账号过滤] YYB_ONLY_REFS={YYB_ONLY_REFS} 命中 {len(filtered)}/{len(routes)} 个账号")
+            log(f"ℹ️ [账号过滤] YYB_ONLY_REFS={YYB_ONLY_REFS} 命中 {len(filtered)}/{len(routes)} 个账号")
             return filtered
     return routes
 
@@ -186,20 +197,6 @@ class _YybCompat:
 
 
 yyb = _YybCompat()
-
-
-def _send_qinglong_notify(title, content):
-    import sys as _sys
-    for path in (os.path.dirname(os.path.abspath(__file__)), "/ql/data/scripts", "/ql/scripts"):
-        if path not in _sys.path:
-            _sys.path.insert(0, path)
-    try:
-        from notify import send as _ql_send
-        _ql_send(title, content)
-        return True
-    except Exception as exc:
-        print(f"青龙通知失败（不影响任务结果）：{exc}")
-        return False
 # ===== adapter end =====
 
 
@@ -207,12 +204,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-try:
-    send = _send_qinglong_notify
-except Exception:
-    def send(title, content):
-        print(f"\n===== {title} =====\n{content}")
 
 # ---------------------------------------------------------------------------
 # 常量 (均来自小程序反编译源码, 非机密)
@@ -267,7 +258,7 @@ def write_token_cache(cache):
         TOKEN_CACHE_PATH.write_text(
             json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"⚠️ 写入token缓存失败: {e}")
+        warn(f"⚠️ 写入token缓存失败: {e}")
 
 
 def get_cached_session(openid):
@@ -296,12 +287,12 @@ def get_wx_code(openid):
     try:
         code = yyb.get_single_code(MINI_APP_ID, str(openid).split("#")[0].strip())
         if code:
-            print("✅ [授权] code 获取成功")
+            log("✅ [授权] code 获取成功")
             return str(code)
-        print("❌ [授权] code 获取失败")
+        err("❌ [授权] code 获取失败")
         return None
     except Exception as exc:
-        print(f"❌ [授权] code 获取异常: {exc}")
+        err(f"❌ [授权] code 获取异常: {exc}")
         return None
 
 
@@ -383,11 +374,11 @@ def obtain_session(openid, index, force=False):
     else:
         cached = get_cached_session(openid)
         if cached.get("token"):
-            print(f"账号 {index} 使用缓存 token: {mask(cached['token'])}")
+            log(f"🔑 账号 {index} 使用缓存 token: {mask(cached['token'])}")
             return cached["token"], cached.get("unionId")
     token, union_id = login(openid)
     save_cached_session(openid, token, union_id)
-    print(f"账号 {index} 静默登录成功: {mask(token)}")
+    log(f"🔑 账号 {index} 静默登录成功: {mask(token)}")
     return token, union_id
 
 
@@ -445,115 +436,85 @@ def fmt_num(value):
 
 
 def run_account(openid, index):
-    lines = [f"【账号 {index}】"]
+    log(f"👤 【账号 {index}】")
 
     token, union_id = obtain_session(openid, index)
 
     # 读取签到状态 (首个鉴权调用); 会话失效则强制重登重试一次
     state = sign_state(token)
     if resp_code(state) == SESSION_INVALID_CODE:
-        print(f"账号 {index} 会话失效, 重新登录...")
+        log(f"🔁 账号 {index} 会话失效, 重新登录...")
         token, union_id = obtain_session(openid, index, force=True)
         state = sign_state(token)
 
     scode = resp_code(state)
     if scode != SUCCESS_CODE:
         msg = resp_msg(state) or f"获取签到状态失败 code={scode}"
-        print(f"❌ 账号 {index} {msg}")
-        lines.append(f"❌ {msg}")
-        return "\n".join(lines), False
+        err(f"❌ 账号 {index} {msg}")
+        return False
 
     res = sign_res(state)
 
     # 幂等预检: 今日已签则不再提交
     if signed_today(res):
         msg = f"今日已签到, 无需重复 (本周已签 {fmt_num(res.get('signNum'))} 天)"
-        print(f"✅ 账号 {index} {msg}")
-        lines.append(f"✅ {msg}")
+        log(f"🟡 账号 {index} {msg}")
         pts = points_balance(token, union_id)
         if pts is not None:
-            lines.append(f"当前积分: {pts}")
-            print(f"账号 {index} 当前积分: {pts}")
-        return "\n".join(lines), True
+            log(f"💰 账号 {index} 当前积分: {pts}")
+        return True
 
     # 执行一次签到
     result = do_sign(token)
     rcode = resp_code(result)
     if rcode == SESSION_INVALID_CODE:
-        print(f"账号 {index} 会话失效, 重新登录后重试签到...")
+        log(f"🔁 账号 {index} 会话失效, 重新登录后重试签到...")
         token, union_id = obtain_session(openid, index, force=True)
         result = do_sign(token)
         rcode = resp_code(result)
 
     if rcode != SUCCESS_CODE:
         msg = resp_msg(result) or f"签到失败 code={rcode}"
-        print(f"❌ 账号 {index} {msg}")
-        lines.append(f"❌ {msg}")
-        return "\n".join(lines), False
+        err(f"❌ 账号 {index} {msg}")
+        return False
 
     res = sign_res(result)
     if not signed_today(res) and res.get("sign") is not True:
         msg = resp_msg(result) or "签到接口返回成功但未标记已签, 请稍后重试"
-        print(f"⚠️ 账号 {index} {msg}")
-        lines.append(f"⚠️ {msg}")
-        return "\n".join(lines), False
+        warn(f"⚠️ 账号 {index} {msg}")
+        return False
 
     msg = f"签到成功, 本周已签 {fmt_num(res.get('signNum'))} 天"
-    print(f"🎉 账号 {index} {msg}")
-    lines.append(f"🎉 {msg}")
+    log(f"🎉 账号 {index} {msg}")
 
     pts = points_balance(token, union_id)
     if pts is not None:
-        lines.append(f"当前积分: {pts}")
-        print(f"账号 {index} 当前积分: {pts}")
-    return "\n".join(lines), True
+        log(f"💰 账号 {index} 当前积分: {pts}")
+    return True
 
 
 def main():
     entries = ACCOUNT_REFS
 
     if not entries:
-        print("❌ 未从 yyb_go 获取到存活账号(可配置环境变量 lqpj 指定白名单), 退出。")
+        err("🚫 未从 yyb_go 获取到存活账号(可配置环境变量 lqpj 指定白名单), 退出。")
         return
 
-    print("=============== 漓泉啤酒 签到开始 ===============")
-    summaries = []
+    log("🚀 漓泉啤酒 签到开始")
     ok_count = 0
-    acct_results = []
     for i, entry in enumerate(entries, 1):
         parts = entry.split("#", 1)
         openid = parts[0].strip()
         remark = parts[1].strip() if len(parts) > 1 else ""
-        ident = remark or openid
-        print(f"\n-------------- 账号 {i}{('/' + remark) if remark else ''} --------------")
+        log(f"👤 -------------- 账号 {i}{('/' + remark) if remark else ''} --------------")
         try:
-            summary, ok = run_account(openid, i)
-            acct_results.append((ident, ok, summary))
+            ok = run_account(openid, i)
             ok_count += 1 if ok else 0
         except Exception as e:
-            print(f"❌ 账号 {i} 执行异常: {e}")
-            acct_results.append((ident, False, f"【账号 {i}】\n❌ 执行异常: {e}"))
+            err(f"❌ 账号 {i} 执行异常: {e}")
         time.sleep(1)
 
-    print("\n=============== 漓泉啤酒 签到结束 ===============")
-    print("──── 漓泉啤酒 执行汇总 ────")
-    print(f"账号 {len(entries)}｜成功 {ok_count}｜失败 {len(entries) - ok_count}")
-    print("────────────────────────")
-    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
-    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    _content = []
-    for _i, (_ident, _ok, _summary) in enumerate(acct_results, 1):
-        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-        _content.append(f"{_em} [{_ident}]")
-        if _ok:
-            _content.append("✔️ 签到成功")
-        else:
-            _last = [l for l in _summary.splitlines() if l.strip()][-1] if _summary else ""
-            _content.append("❌ " + (_last[:60] if _last else "执行失败"))
-    try:
-        send("====== 漓泉啤酒 汇总日志 ======", "\n".join(_content))
-    except Exception as e:
-        print(f"⚠️ 通知发送失败: {e}")
+    log(f"🏁 漓泉啤酒 执行汇总 · 账号 {len(entries)}｜成功 {ok_count}｜失败 {len(entries) - ok_count}")
 
 
 if __name__ == "__main__":

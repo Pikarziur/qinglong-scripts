@@ -9,20 +9,19 @@
 #   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取每个账号的 wx.login code
 #   3. 用 code 完成微信登录，进入长虹小程序会话
-#   4. 执行签到任务并查询积分，输出汇总后发送通知
+#   4. 执行签到任务并查询积分，输出汇总
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #   CH_AGGR_ID      可选。手动指定签到活动 ID；留空则从首页自动发现
-#   CH_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #   CH_IPV4_ONLY     网络模式，默认 1（仅 IPv4）；填 0 恢复双栈解析
 #
+# 日志规范：[LEVEL] [CHANGHONG] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 import base64
-import importlib
 import json
 import os
 import re
@@ -30,7 +29,6 @@ import sys
 import socket
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
@@ -39,6 +37,17 @@ import urllib3.util.connection
 APP_ID = "wx36c3413e8fe39263"
 BASE = "https://hongke.changhong.com/gw/applet"
 TITLE = "长虹智慧家居签到"
+
+
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [CHANGHONG] {msg}", flush=True)
+
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 
 def configure_network():
@@ -144,7 +153,7 @@ class Changhong:
             if not isinstance(profile, dict):
                 profile = {}
         except (TaskError, ValueError, TypeError):
-            print("  微信资料不可用，将由长虹服务端通过新code识别账号")
+            log("ℹ️ 微信资料不可用，将由长虹服务端通过新code识别账号")
         code = self.yyb_call("getCode").get("code")
         if not isinstance(code, str) or not code.strip():
             raise TaskError("YYB未返回有效的wx.login code")
@@ -259,22 +268,6 @@ class Changhong:
         return status
 
 
-def notify(message, title=None):
-    # 通知开关默认开：CH_NOTIFY 填 0/false/off/no 才关
-    if os.getenv("CH_NOTIFY", "1").strip().lower() in ("0", "false", "off", "no"):
-        return
-    # notify.py 定位：脚本同目录 → 仓库根（全仓共享一份）→ 青龙默认脚本目录
-    here = Path(__file__).resolve().parent
-    for folder in (here, here.parent, Path("/ql/data/scripts"), Path("/ql/scripts")):
-        if str(folder) not in sys.path:
-            sys.path.append(str(folder))
-    try:
-        importlib.import_module("notify").send(title or TITLE, message)
-        print("青龙通知模块调用完成（送达情况以通知渠道为准）")
-    except Exception as exc:
-        print(f"青龙通知不可用或调用失败（{type(exc).__name__}），不影响签到结果")
-
-
 def main():
     configure_network()
     lines = [x.strip() for x in os.getenv("YYB_SERVER", "").splitlines() if x.strip()]
@@ -283,46 +276,38 @@ def main():
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             lines = [x for i, x in enumerate(lines, 1) if i in wanted]
-            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(lines)))
+            log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(lines)))
     results, fail_count = [], 0
     if not lines:
         results.append("未配置 YYB_SERVER")
         fail_count = 1
+    log(f"🚀 {TITLE} 开始 · 共 {len(lines)} 个账号")
     for index, line in enumerate(lines, 1):
         client = None
+        failed = False
         try:
             client = Changhong(*parse_entry(line))
             result = client.run()
         except TaskError as exc:
-            result = str(exc); fail_count += 1
+            result = str(exc); fail_count += 1; failed = True
         except Exception as exc:
-            result = f"处理异常（{type(exc).__name__}）"; fail_count += 1
+            result = f"处理异常（{type(exc).__name__}）"; fail_count += 1; failed = True
         finally:
             if client:
                 client.close()
-        results.append(f"账号{index}：{result}")
-        print(results[-1])
+        msg = f"账号{index}：{result}"
+        if failed:
+            err("❌ " + msg)
+        elif "已签到" in result:
+            log("🟡 " + msg)
+        else:
+            log("✅ " + msg)
+        results.append(msg)
     if not lines:
-        print(results[0])
+        err("🚫 " + results[0])
     # 控制台执行汇总
     _n = len(lines)
-    print("──── 长虹 执行汇总 ────")
-    print(f"账号 {_n}｜成功 {_n - fail_count}｜失败 {fail_count}")
-    print("────────────────────")
-    # 渲染分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
-    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    _content = []
-    for _i, _r in enumerate(results, 1):
-        _acct, _sep, _rest = _r.partition("：")
-        _acct = _acct if _sep else f"账号{_i}"
-        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-        _content.append(f"{_em} [{_acct}]")
-        _rest = _rest.strip()
-        if "异常" in _rest or "失败" in _rest or _rest.startswith("❌"):
-            _content.append("❌ " + (_rest[1:].lstrip() if _rest.startswith("❌") else _rest))
-        else:
-            _content.append("✔️ " + _rest)
-    notify("\n".join(_content), "====== 长虹 汇总日志 ======")
+    log(f"🏁 {TITLE} 执行汇总 · 账号 {_n}｜成功 {_n - fail_count}｜失败 {fail_count}")
     return 1 if fail_count else 0
 
 

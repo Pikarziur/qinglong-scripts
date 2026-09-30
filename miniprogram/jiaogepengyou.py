@@ -9,14 +9,15 @@
 #   3. 用 code 请求 appLogin 换取 access_token（每次运行重新登录，不落盘）
 #   4. 签到：先 GET /dtapi/pointsSign/user/pointsInfo/query 看 signTodayResult 是否今日已签；
 #      未签才 GET /dtapi/pointsSign/user/sign?date=YYYY/MM/DD 签到，再查 pointsInfo 取总积分与连续天数
-#   5. 输出汇总并发送通知（已签/签到成功/失败一目了然）
+#   5. 输出汇总（已签/签到成功/失败一目了然）
 # 可控参数：
 #   IYOUKE_TOKEN    可选。手动 bearer token，空格分隔多账号，优先级最高（免 YYB）
 #   YYB_SERVER      必填（无 IYOUKE_TOKEN 时）。格式「地址@ref」，空格/换行分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号（环境变量同名可覆盖）
-#   IYOUKE_NOTIFY   通知开关，默认开启；填 0/false/off/no 关闭
 #   IYOUKE_APP_ID   可选。小程序 AppID，默认 wx3b294e7a0ba29bc3
 #   IYOUKE_VERSION  可选。接口版本号，默认 3.5.4
+#
+# 日志规范：[LEVEL] [IYOUKE] message   （LEVEL: INFO / WARN / ERROR）
 #
 # =========================================================
 #!/usr/bin/env python3
@@ -26,7 +27,6 @@
 import os
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -36,19 +36,15 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# notify.py 可能位于仓库根（脚本父目录），确保可导入
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
-for _p in (str(_HERE), str(_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [IYOUKE] {msg}", flush=True)
 
-# ===================== 通知推送 =====================
-try:
-    from notify import send as notify_send
-except ImportError:
-    def notify_send(title, content):
-        print(f"--- 通知 ---\n{title}\n{content}\n-------------")
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 # ===================== 调试开关 =====================
 DEBUG = False
@@ -58,7 +54,7 @@ DEBUG_ENV = {
 if DEBUG:
     for _k, _v in DEBUG_ENV.items():
         os.environ.setdefault(_k, _v)
-    print("⚠️ 调试模式已开启（DEBUG=True），使用脚本内置 DEBUG_ENV 配置")
+    warn("⚠️ 调试模式已开启（DEBUG=True），使用脚本内置 DEBUG_ENV 配置")
 # ===================================================
 
 # ===================== 环境变量控制（置顶） =====================
@@ -68,8 +64,6 @@ IYOUKE_TOKEN = os.getenv("IYOUKE_TOKEN", "").strip()
 YYB_SERVER_RAW = os.getenv("YYB_SERVER", "").strip()
 # ③ YYB 只跑这些 ref 的白名单过滤器：留空 = 跑 YYB_SERVER 全部账号；填 ["1","2"] = 只跑这些
 YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
-# 通知开关：默认开；填 0/false/off/no 关闭
-IYOUKE_NOTIFY = os.getenv("IYOUKE_NOTIFY", "1").strip().lower() not in ("0", "false", "off", "no")
 # 接口参数（可选环境变量覆盖；缺省用抓包所得默认值）
 APP_ID = os.getenv("IYOUKE_APP_ID", "wx3b294e7a0ba29bc3").strip()
 APP_VERSION = os.getenv("IYOUKE_VERSION", "3.5.4").strip()
@@ -191,7 +185,7 @@ def _yyb_entries() -> List[Tuple[str, str, str]]:
         wanted = set(int(x) for x in seqs if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             base = [e for i, e in enumerate(base, 1) if i in wanted]
-            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(base)))
+            log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(base)))
     return base
 
 
@@ -214,7 +208,7 @@ def _req_get(token: str, path: str, params: Optional[Dict] = None) -> Optional[D
         r = requests.get(API_BASE + path, params=params, headers=_headers(token), timeout=15)
         return r.json()
     except Exception as e:
-        print(f"⚠️ 请求失败 {path}: {e}")
+        warn(f"⚠️ 请求失败 {path}: {e}")
         return None
 
 
@@ -292,29 +286,35 @@ def parse_accounts() -> List[Dict[str, Any]]:
 def main() -> int:
     results: List[Dict] = []
     accounts = parse_accounts()
+    log(f"🚀 {SCRIPT_NAME} 开始 · 共 {len(accounts)} 个账号")
     any_fail = False
     for idx, acc in enumerate(accounts, 1):
-        print(f"--- 账号 {idx} ({acc['remark']}) ---")
+        log(f"👤 --- 账号 {idx} ({acc['remark']}) ---")
         # 取 token
         if acc["mode"] == "manual":
             token = acc["token"]
-            print("  使用手动 token")
+            log("🔑 使用手动 token")
         else:
             try:
                 code = YYBClient(APP_ID).get_code(acc["server"], acc["ref"])
                 token = app_login(code)
-                print(f"  YYBGO 取码+登录成功（token 前6位 {token[:6]}…）")
+                log(f"🔑 YYBGO 取码+登录成功（token 前6位 {token[:6]}…）")
             except Exception as e:
-                print(f"  ❌ 登录失败: {e}")
+                err(f"❌ 登录失败: {e}")
                 results.append({"ok": False, "signed": False, "reward": 0,
                                 "total": None, "msg": f"登录失败: {e}",
                                 "idx": idx, "remark": acc["remark"]})
                 any_fail = True
                 continue
         res = sign_one(token)
-        print(f"  {res['msg']}"
-              + (f"，总积分 {res['total']}" if res["total"] is not None else "")
-              + (f"，连续 {res['series']} 天" if res.get("series") is not None else ""))
+        tail = (f"，总积分 {res['total']}" if res["total"] is not None else "") \
+            + (f"，连续 {res['series']} 天" if res.get("series") is not None else "")
+        if res["ok"]:
+            log(f"✅ {res['msg']}{tail}")
+        elif res["signed"]:
+            log(f"🟡 {res['msg']}{tail}")
+        else:
+            err(f"❌ {res['msg']}{tail}")
         results.append({"ok": res["ok"], "signed": res["signed"],
                         "reward": res["reward"], "total": res["total"],
                         "msg": res["msg"], "idx": idx, "remark": acc["remark"]})
@@ -323,37 +323,21 @@ def main() -> int:
 
     success = sum(1 for r in results if r["ok"])
     signed = sum(1 for r in results if r["signed"])
-    # 渲染分账号汇总（面向 notify，简洁精要；账号行含总积分(+今日变化)，已签也用✔️）
-    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    _content = []
     for _i, r in enumerate(results, 1):
-        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-        _total = r["total"]
-        _reward = r.get("reward") or 0
-        _acct = f"{_em} [{r['remark']}]"
-        if _total is not None:
-            _acct += f" 总积分{_total}"
-            if _reward > 0:
-                _acct += f"(+{_reward})"
-        _content.append(_acct)
+        _acct = f"[{r['remark']}]"
+        detail = ""
+        if r["total"] is not None:
+            detail = f"总积分{r['total']}"
+            if (r.get("reward") or 0) > 0:
+                detail += f"(+{r['reward']})"
         if r["ok"]:
-            _sign = "✔️ 签到成功"
-            if r.get("series") is not None:
-                _sign += f"（连续{r['series']}天）"
-            _content.append(_sign)
+            extra = f"（连续{r['series']}天）" if r.get("series") is not None else ""
+            log(f"✅ {_acct} 签到成功{extra} {detail}".rstrip())
         elif r["signed"]:
-            _content.append("✔️ 今日已签")
+            log(f"🟡 {_acct} 今日已签 {detail}".rstrip())
         else:
-            _content.append("❌ 签到失败：" + str(r.get("msg") or ""))
-    if IYOUKE_NOTIFY:
-        try:
-            notify_send("====== 交个朋友 汇总日志 ======", "\n".join(_content))
-        except Exception as e:
-            print(f"⚠️ 推送失败: {e}")
-    else:
-        print("（通知已关闭 IYOUKE_NOTIFY=0，跳过推送）")
-    print("──── 交个朋友 执行汇总 ────")
-    print("\n".join(_content))
+            err(f"❌ {_acct} 签到失败：{r.get('msg') or ''}")
+    log(f"🏁 {SCRIPT_NAME} 执行汇总 · 账号 {len(results)}｜成功 {success}｜已签 {signed}｜失败 {len(results) - success - signed}")
     return 1 if any_fail else 0
 
 
@@ -361,12 +345,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        print(f"❌ 脚本异常: {e}")
+        err(f"💥 脚本异常: {e}")
         import traceback
-        traceback.print_exc()
-        if IYOUKE_NOTIFY:
-            try:
-                notify_send(f"{SCRIPT_NAME} 异常", str(e))
-            except Exception:
-                pass
+        err(traceback.format_exc())
         sys.exit(1)

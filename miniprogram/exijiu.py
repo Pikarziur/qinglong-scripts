@@ -33,7 +33,6 @@ name:习酒君品荟 - 签到/果园
                   0 = 关闭酿酒（不投粮、不制酒、不处理酒坛）
                   1 = 开启酿酒（默认）
   GARDEN_APPID    默认 wx8d41cdc44c8aeaab；旧习酒可指定 wx489f950decfeb93e
-  GARDEN_NOTIFY   0 = 关闭通知，1 = 开启（默认）
 
 # cron: 15 */4 * * *
 """
@@ -70,23 +69,22 @@ except ImportError:
     get_single_operate_wx_data = None
     _HAS_GETCODE = False
 
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s │ %(levelname)-7s │ %(message)s", datefmt="%H:%M:%S")
-log = logging.getLogger(__name__)
+class _ExijiuFormatter(logging.Formatter):
+    """统一日志：[LEVEL] [EXIJIU] emoji message（emoji 按级别自动注入）。"""
+    _EMOJI = {
+        logging.DEBUG: "🔍", logging.INFO: "ℹ️", logging.WARNING: "⚠️",
+        logging.ERROR: "❌", logging.CRITICAL: "💥",
+    }
 
-def send_notify(title, content):
-    if os.getenv("GARDEN_NOTIFY", "1").lower() in ("0", "false", "no"):
-        return
-    try:
-        for directory in (Path(__file__).resolve().parent, Path('/ql/data/scripts'), Path('/ql/scripts')):
-            if (directory / 'notify.py').is_file() and str(directory) not in sys.path:
-                sys.path.insert(0, str(directory))
-        from notify import send as _notify_send
-        _notify_send(title, content)
-    except ImportError:
-        log.warning("未找到notify.py，跳过推送")
-    except Exception as e:
-        log.warning(f"推送失败: {e}")
+    def format(self, record):
+        record.emoji = self._EMOJI.get(record.levelno, "•")
+        return super().format(record)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(emoji)s %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
+log = logging.getLogger(__name__)
 
 
 # 月度酿酒累计（跨 cron 调用累加本月总升数），存于脚本同目录的 xijiu_monthly.json
@@ -1591,9 +1589,9 @@ if __name__ == "__main__":
     if not accounts:
         accounts = parse_yyb_server_accounts(os.getenv("YYB_SERVER", ""))
         if accounts:
-            print("ℹ️ 未配置 WX_ID/WXIDXJ，已从 YYB_SERVER 读取 %d 个账号" % len(accounts))
+            log.info("ℹ️ 未配置 WX_ID/WXIDXJ，已从 YYB_SERVER 读取 %d 个账号" % len(accounts))
     if not accounts:
-        print("❌ 未找到账号，请设置 WX_ID、WXIDXJ 或 YYB_SERVER")
+        log.error("❌ 未找到账号，请设置 WX_ID、WXIDXJ 或 YYB_SERVER")
         sys.exit(1)
 
     # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
@@ -1601,9 +1599,9 @@ if __name__ == "__main__":
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             accounts = [acc for i, acc in enumerate(accounts) if (i + 1) in wanted]
-            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(accounts)))
+            log.info("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(accounts)))
             if not accounts:
-                print("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
+                log.error("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
                 sys.exit(1)
 
     CACHE_FILE = Path(__file__).parent / "xijiutoken.json"
@@ -1631,7 +1629,6 @@ if __name__ == "__main__":
         except Exception: return bool(token) and APPID == CURRENT_APPID
 
     cache = load_cache()
-    notify_lines = []
     all_min_harvests = []
     completed_count = 0
 
@@ -1640,7 +1637,7 @@ if __name__ == "__main__":
     for i, acc in enumerate(accounts):
         wxid = acc["id"]; remark = acc.get("note") or acc.get('ref') or wxid
         mask = (remark[:3] + "*****" + remark[-3:]) if len(remark) >= 7 else remark
-        log.info("─" * 50); log.info("👤 [%d/%d] 账号: %s" % (i+1, len(accounts), mask))
+        log.info("👤 [%d/%d] 账号: %s" % (i+1, len(accounts), mask))
 
         client = GardenClient(ocr_server=OCR_SERVER or None)
         cache_id = APPID + ':' + wxid
@@ -1672,7 +1669,7 @@ if __name__ == "__main__":
             try:
                 result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
             except (Exception, TokenInvalidError) as e:
-                log.error("   ❌ 登录异常: %s，跳过" % e); notify_lines.append("👤 %s\n❌ 登录失败: %s" % (mask, e)); continue
+                log.error("   ❌ 登录异常: %s，跳过" % e); continue
 
             log.info("   🔑 登录结果: token=%s  加密=%s" % (
                 "✅ 已获取" if result.get("token") else "❌ 失败",
@@ -1683,13 +1680,12 @@ if __name__ == "__main__":
 
         if not client.crypto:
             log.error("   ❌ 加密未就绪，跳过")
-            notify_lines.append("👤 %s\n❌ 未取得有效加密密钥" % mask)
             continue
 
         try:
             today = datetime.now().strftime("%Y-%m-%d"); do_daily = cache.get(cache_id + "_daily") != today
             summary, min_harvest, _brewed = run(client, do_daily=do_daily)
-            notify_lines.append("👤 %s\n%s" % (mask, summary))
+            log.info("   📋 %s: %s" % (mask, summary))
             completed_count += 1
             if do_daily and client.daily_completed: cache[cache_id + "_daily"] = today; save_cache(cache)
             if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
@@ -1710,41 +1706,34 @@ if __name__ == "__main__":
                         cache[cache_id] = client.token; save_cache(cache)
                         today = datetime.now().strftime("%Y-%m-%d"); do_daily = cache.get(cache_id + "_daily") != today
                         summary, min_harvest, _brewed = run(client, do_daily=do_daily)
-                        notify_lines.append("👤 %s\n%s" % (mask, summary))
+                        log.info("   📋 %s: %s" % (mask, summary))
                         completed_count += 1
                         if do_daily and client.daily_completed: cache[cache_id + "_daily"] = today; save_cache(cache)
                         if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
                         log.info("   ✅ 重新登录重试成功")
                     else:
                         log.error("   ❌ 重试登录仍未返回 token")
-                        notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e))
                 except (Exception, TokenInvalidError) as e2:
                     log.error("   ❌ 重试异常: %s" % e2, exc_info=True)
-                    notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e2))
             else:
                 log.error("   ❌ 执行异常: %s" % e, exc_info=True)
-                notify_lines.append("👤 %s\n❌ 执行异常: %s" % (mask, e))
         time.sleep(random.randint(2, 5))
 
     log.info('本次账号结果：完成 %d / %d；其余账号的原因见上方记录', completed_count, len(accounts))
-    if notify_lines:
-        content = "作者：\n\n" + "\n\n".join(notify_lines)
-        # 全账号本月酿酒合计(一行汇总)
-        try:
-            _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
-            if _mkey in _mdata or MONTH_BASE_L > 0:
-                brewed = _mdata.get(_mkey, 0)
-                if MONTH_BASE_L > 0:
-                    content += "\n\n📅 %d月全账号酿酒共计 %.2f L（起点 %.2f + 累计收获 %.2f）" % (
-                        datetime.now().month, MONTH_BASE_L + brewed, MONTH_BASE_L, brewed)
-                else:
-                    content += "\n\n📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed)
-        except Exception:
-            pass
-        send_notify("习酒花园", content)
+    # 全账号本月酿酒合计(一行汇总)
+    try:
+        _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
+        if _mkey in _mdata or MONTH_BASE_L > 0:
+            brewed = _mdata.get(_mkey, 0)
+            if MONTH_BASE_L > 0:
+                log.info("📅 %d月全账号酿酒共计 %.2f L（起点 %.2f + 累计收获 %.2f）" % (
+                    datetime.now().month, MONTH_BASE_L + brewed, MONTH_BASE_L, brewed))
+            else:
+                log.info("📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed))
+    except Exception:
+        pass
 
     # ── 计算下次执行时间 ──
-    log.info("═" * 50)
     if all_min_harvests:
         overall_min_secs = min(harvest for _, harvest in all_min_harvests)
         log.info("📊 各账号最短剩余成熟时间:")

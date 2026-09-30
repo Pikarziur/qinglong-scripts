@@ -7,12 +7,12 @@
 环境变量：
   YYB_SERVER：每行一个 server@微信账号标识，例如 yyb-go:8000@1
   MI_COMMUNITY_APPID：可选，默认使用小米社区小程序 AppID
-  MI_COMMUNITY_NOTIFY：可选，默认 1；设为 0 可关闭青龙通知
   MI_COMMUNITY_REF：可选，仅运行指定微信账号标识，便于单账号测试
   YYB_ONLY_REFS：可选，账号序号白名单（1 起），仅运行指定序号；留空 [] 运行全部，
                   例如 [1,3] 只跑第 1、3 个账号
 
-依赖：requests、青龙自带 notify.py
+日志规范：[LEVEL] [MI] message   （LEVEL: INFO / WARN / ERROR）
+依赖：requests
 """
 
 # 内部配置：直接改这里，省去去面板设环境变量
@@ -36,19 +36,21 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-try:
-    from notify import send as notify_send
-    NOTIFY_IMPORT_ERROR = ""
-except Exception as exc:
-    notify_send = None
-    NOTIFY_IMPORT_ERROR = str(exc)
+# ────────────────────────────────────────────
+# 统一日志
+# ────────────────────────────────────────────
+def _emit(level, msg):
+    print(f"[{level}] [MI] {msg}", flush=True)
+
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 
 APPID = os.getenv("MI_COMMUNITY_APPID", "wx240a4a764023c444")
 BASE = "https://api.vip.miui.com"
 ACCOUNT = "https://account.xiaomi.com"
 SCRIPT_NAME = "小米社区签到"
-NOTIFY_ENABLED = os.getenv("MI_COMMUNITY_NOTIFY", "1").strip().lower() not in {"0", "false", "off", "no"}
 UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.73(0x18004939) NetType/WIFI Language/zh_CN"
 FLOW_STEPS = 8
 CACHE_PATH = Path(os.getenv("MI_COMMUNITY_CACHE", "/ql/data/config/mi_community_sessions.json"))
@@ -57,25 +59,11 @@ if not CACHE_PATH.parent.exists():
 
 
 def flow_start(step, message):
-    print(f"  [{step}/{FLOW_STEPS}] ⏳ {message}", flush=True)
+    log(f"⏳ [{step}/{FLOW_STEPS}] {message}")
 
 
 def flow_ok(message):
-    print(f"        ✅ {message}", flush=True)
-
-
-def send_notification(lines):
-    if not NOTIFY_ENABLED:
-        print("🔕 已通过 MI_COMMUNITY_NOTIFY 关闭通知")
-        return
-    if notify_send is None:
-        print(f"⚠️ 青龙通知模块 notify.py 导入失败，已跳过通知：{NOTIFY_IMPORT_ERROR}")
-        return
-    try:
-        notify_send(SCRIPT_NAME, "\n".join(lines))
-        print("📨 通知调用完成")
-    except Exception as exc:
-        print(f"⚠️ 通知发送失败（不影响签到结果）：{exc}")
+    log(f"✅ {message}")
 
 
 def load_cached_session(ref):
@@ -127,7 +115,7 @@ def entries():
         if not raw:
             continue
         if "@" not in raw:
-            print("❌ YYB_SERVER 格式应为 地址@微信账号标识，已跳过一行")
+            err("❌ YYB_SERVER 格式应为 地址@微信账号标识，已跳过一行")
             continue
         server, ref = raw.rsplit("@", 1)
         if server and ref and (not selected_ref or ref == selected_ref):
@@ -160,7 +148,7 @@ def get_code(server, ref):
     if user_body.get("code") != 0 or not isinstance(user_result, dict):
         raise RuntimeError(f"YYB 获取微信用户信息失败（响应码：{user_body.get('code')}）")
     if os.getenv("MI_COMMUNITY_DEBUG") == "1":
-        print("调试：YYB用户信息字段=" + ",".join(
+        warn("调试：YYB用户信息字段=" + ",".join(
             f"{key}:{type(value).__name__}:{len(value) if isinstance(value, (str, list, dict)) else '-'}"
             for key, value in sorted(user_result.items())
         ))
@@ -354,9 +342,7 @@ def login_and_sign(code, wx_user_info, ref):
 def main():
     accounts = entries()
     if not accounts:
-        message = "❌ 未配置 YYB_SERVER"
-        print(message)
-        send_notification([message])
+        err("🚫 未配置 YYB_SERVER")
         return 1
 
     # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
@@ -364,35 +350,23 @@ def main():
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             accounts = [a for i, a in enumerate(accounts, 1) if i in wanted]
-            print(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(accounts)} 个账号")
+            log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(accounts)} 个账号")
             if not accounts:
-                print("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
+                err("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
                 return 1
 
     failed = 0
-    results = []
-    print(f"\n{'=' * 54}")
-    print(f"{SCRIPT_NAME}开始，共读取到 {len(accounts)} 个 YYB 账号")
-    print(f"{'=' * 54}")
+    log(f"🚀 {SCRIPT_NAME} 开始 · 共读取到 {len(accounts)} 个 YYB 账号")
     for index, (server, ref) in enumerate(accounts, 1):
-        print(f"\n{'─' * 54}")
-        print(f"账号 {index}/{len(accounts)}｜YYB 标识：{ref}")
-        print(f"{'─' * 54}")
+        log(f"👤 账号 {index}/{len(accounts)}｜YYB 标识：{ref}")
         try:
             code, wx_user_info = get_code(server, ref)
             result = login_and_sign(code, wx_user_info, ref)
-            line = f"账号 {ref}：✅ {result}"
-            print(f"  🏁 账号 {ref} 流程完成：{result}")
-            results.append(line)
+            log(f"🏁 账号 {ref} 流程完成：{result}")
         except Exception as exc:  # 单账号失败不影响其他账号
             failed += 1
-            print(f"  🛑 账号 {ref} 流程终止：{exc}")
-            results.append(f"账号 {ref}：❌ {exc}")
-    print(f"\n{'=' * 54}")
-    print(f"执行汇总：成功 {len(accounts) - failed}，失败 {failed}，共 {len(accounts)} 个账号")
-    print(f"{'=' * 54}")
-    results.extend(["", f"汇总：成功 {len(accounts) - failed}，失败 {failed}，共 {len(accounts)} 个账号"])
-    send_notification(results)
+            err(f"🛑 账号 {ref} 流程终止：{exc}")
+    log(f"🏁 执行汇总：成功 {len(accounts) - failed}，失败 {failed}，共 {len(accounts)} 个账号")
     return 1 if failed == len(accounts) else 0
 
 

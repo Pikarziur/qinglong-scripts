@@ -27,7 +27,6 @@
    🎮 8 项互动玩法   抽奖、盲盒、Buddy、派猫猫旅行、连签兑换、补签卡、礼包补偿、徽章
    💰 三类查询       积分套餐（剩余/总量/已用）、用量统计、成长数据（等级/连签/能量）
    🎁 自动领奖       扫描全部已完成任务自动领取；completed 未领的自动补领
-   📢 青龙通知       优先 notify.py，回落到 PushPlus / Server酱 / 企业微信 / Bark
    🧩 幂等安全       重复运行只补缺口，不会重复领取或重复操作
    🔄 API 重试       网络/5xx 自动指数退避重试，写动作间隔可调（--gap）
    🔗 稳定指纹       每账号 md5 派生固定 machineId，桌面/web/小程序三域对齐官方埋点
@@ -44,7 +43,6 @@
    --query           仅查询积分/用量/签到状态，不执行任务
    --no-school       跳过开学季活动
    --no-desktop      跳过桌面任务（非 Windows 默认走指纹上报）
-   --no-notify       不发送青龙通知
    --gap 2.0         写动作间隔秒数（默认 1.5，最低 1.0）
 
 🔑 环境变量
@@ -53,9 +51,6 @@
    WB_ACCOUNT_FILTER    【可选】等价 --only，逗号分隔账号编号
    YYB_ONLY_REFS        【可选】脚本内账号序号白名单（1 起），列表形式如 [1,3]；留空 [] 跑全部，非空时优先于 WB_ACCOUNT_FILTER / --only
    WB_CACHE_DIR         【可选】缓存目录，默认 /ql/data/config/workbuddy_yyb
-   WB_NO_NOTIFY         【可选】=1 关闭通知
-   PUSH_PLUS_TOKEN / PLUSPLUS_TOKEN / PUSH_KEY / QYWX_KEY / BARK_PUSH
-                        【可选】脚本自带通知通道（青龙 notify.py 未配置时回落）
 
 📦 任务清单（同原版 WorkBuddy-Daily，共 40 项，38 项全自动）
    ☁️ 成长中心任务（18 项）：每日签到 · 设计创意模式 · 探索优秀灵感 · 桌面端对话 ·
@@ -85,11 +80,8 @@
 
 import argparse
 import base64
-import contextlib
 import datetime
 import hashlib
-import importlib.util
-import io
 import json
 import os
 import re
@@ -116,6 +108,53 @@ try:
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 except Exception:
     pass
+
+# ============================================================================ #
+# 统一日志：[LEVEL] [WORKBUDDY] [账号N] emoji message
+#   级别 INFO/WARN/ERROR；行首自带 emoji 时沿用，否则按级别补默认 emoji
+# ============================================================================ #
+SRC = "WORKBUDDY"
+_LEVEL_EMOJI = {"INFO": "ℹ️", "WARN": "⚠️", "ERROR": "❌"}
+_EMOJI_HEAD = re.compile(
+    "^(?:[\u2600-\u27bf\u2b00-\u2bff\u2139\ufe0f\U0001F300-\U0001FAFF]|[0-9]\ufe0f?\u20e3)"
+)
+
+
+def _level_of_line(line):
+    if line[:1] in ("\u274c", "\U0001F4A5"):      # ❌ 💥
+        return "ERROR"
+    if line[:1] == "\u26a0":                       # ⚠️
+        return "WARN"
+    return "INFO"
+
+
+def _emit(level, msg, tag=""):
+    """按统一格式逐行输出，返回格式化后的行列表（供汇总收集）。"""
+    text = "" if msg is None else str(msg)
+    out = []
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        lv = level or _level_of_line(line)
+        head = "[%s] [%s]%s" % (lv, SRC, (" [%s]" % tag) if tag else "")
+        emoji = "" if _EMOJI_HEAD.match(line) else _LEVEL_EMOJI[lv] + " "
+        out.append("%s %s%s" % (head, emoji, line))
+    for item in out:
+        print(item, flush=True)
+    return out
+
+
+def log(msg):
+    return _emit(None, msg)
+
+
+def warn(msg):
+    return _emit("WARN", msg)
+
+
+def err(msg):
+    return _emit("ERROR", msg)
 
 VERSION = "1.2.0"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
@@ -2672,10 +2711,7 @@ def run_account(idx, client, account, do_desktop, no_school):
     tag = "账号%d" % idx
 
     def log(m):
-        ts = time.strftime("%H:%M:%S")
-        line = "[%s][%s] %s" % (ts, tag, m)
-        print(line, flush=True)
-        msgs.append(line)
+        msgs.extend(_emit(None, m, tag))
 
     note = account.ref
     summary = {"idx": idx, "note": note, "credits": "", "usage": "", "growth": "",
@@ -2685,14 +2721,12 @@ def run_account(idx, client, account, do_desktop, no_school):
     try:
         client.authenticate()
     except SafeError as e:
-        log("")
-        log("╭─ 👤 账号%d  %s" % (idx, note))
+        log("👤 开始处理 %s" % (note or ("账号%d" % idx)))
         log("  ❌ 登录/凭据失败：%s" % e)
         summary["error"] = str(e)
         return msgs, summary
     except Exception as e:
-        log("")
-        log("╭─ 👤 账号%d  %s" % (idx, note))
+        log("👤 开始处理 %s" % (note or ("账号%d" % idx)))
         log("  ❌ 登录异常（%s）" % type(e).__name__)
         summary["error"] = "登录异常（%s）" % type(e).__name__
         return msgs, summary
@@ -2702,8 +2736,7 @@ def run_account(idx, client, account, do_desktop, no_school):
     tok = client.access
     s = client.api_session()
 
-    log("")
-    log("╭─ 👤 账号%d  %s" % (idx, note))
+    log("🔐 登录成功 %s" % (note or ("账号%d" % idx)))
 
     # 签到（YYB 回读确认流程）
     try:
@@ -2832,7 +2865,7 @@ def run_account(idx, client, account, do_desktop, no_school):
 
 
 # ============================================================================ #
-# 推送摘要
+# 执行汇总
 # ============================================================================ #
 def build_summary(summaries):
     summaries.sort(key=lambda x: x.get("idx", 0))
@@ -2871,7 +2904,7 @@ def build_summary(summaries):
         else:
             lines.append("   ✅ 全部完成！")
         lines.append("")
-    lines.append("📊 ══ 总计 ══")
+    lines.append("📊 总计")
     lines.append("👥 共%d个账号，任务完成 %d/%d 项" % (len(summaries), total_done, total_tasks))
     all_rest = {}
     for sm in summaries:
@@ -2887,101 +2920,6 @@ def build_summary(summaries):
     return "\n".join(lines)
 
 
-# ============================================================================ #
-# 通知（青龙 notify.py 优先，回落到内置通道）
-# ============================================================================ #
-HERE = Path(__file__).resolve().parent
-
-QL_PUSH_ENVS = (
-    "BARK_PUSH", "DD_BOT_TOKEN", "FSKEY", "GOBOT_URL", "IGOT_PUSH_KEY", "PUSH_KEY",
-    "DEER_KEY", "CHAT_URL", "PUSH_PLUS_TOKEN", "WE_PLUS_BOT_TOKEN", "QMSG_KEY",
-    "QYWX_KEY", "QYWX_AM", "TG_BOT_TOKEN", "SMTP_SERVER", "PUSHME_KEY",
-    "WEBHOOK_URL", "NTFY_TOPIC", "WXPUSHER_APP_TOKEN", "OPENILINK_APP_TOKEN",
-)
-
-
-def load_notify():
-    candidates = [HERE / "notify.py",
-                  Path("/ql/data/scripts/notify.py"),
-                  Path("/ql/scripts/notify.py"),
-                  Path("/ql/data/notify.py")]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                spec = importlib.util.spec_from_file_location("_wb_ql_notify", path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                for name in ("send", "sendNotify"):
-                    func = getattr(module, name, None)
-                    if callable(func):
-                        return func
-        except Exception:
-            continue
-    return None
-
-
-def send_notify(title, content):
-    panel_channel = next((k for k in QL_PUSH_ENVS if (os.getenv(k) or "").strip()), "")
-    sender = load_notify()
-    if sender is not None:
-        if panel_channel:
-            try:
-                sender(title, content)
-                print("✅ [通知] 已通过青龙通知模块发送（通道 %s）" % panel_channel, flush=True)
-                return True
-            except Exception as exc:
-                print("⚠️ [通知] 青龙通知发送失败（不影响结果）：%s" % str(exc)[:120], flush=True)
-        else:
-            print("ℹ️ [通知] 青龙面板未配置推送变量，改用脚本自带通道", flush=True)
-    else:
-        print("⚠️ [通知] 未找到青龙 notify.py，使用脚本自带通道", flush=True)
-
-    sent = False
-    plusplus = (os.getenv("PUSH_PLUS_TOKEN", "") or os.getenv("PLUSPLUS_TOKEN", "") or "").strip()
-    if plusplus:
-        try:
-            r = requests.post("https://www.pushplus.plus/send",
-                              json={"token": plusplus, "title": title, "content": content,
-                                    "template": "txt"}, timeout=20)
-            ok = r.status_code == 200 and (r.json().get("code") == 200)
-            sent = sent or ok
-            print("%s [通知] PushPlus 发送%s" % ("✅" if ok else "❌", "成功" if ok else "失败"), flush=True)
-        except Exception as exc:
-            print("❌ [通知] PushPlus 发送失败：%s" % str(exc)[:120], flush=True)
-    server_push = (os.getenv("PUSH_KEY", "") or os.getenv("SERVERPUSHKEY", "") or "").strip()
-    if server_push and not sent:
-        try:
-            requests.post("https://sctapi.ftqq.com/%s.send" % server_push,
-                          data={"title": title, "desp": content}, timeout=15)
-            sent = True
-            print("✅ [通知] Server 酱发送成功", flush=True)
-        except Exception as exc:
-            print("❌ [通知] Server 酱发送失败：%s" % str(exc)[:120], flush=True)
-    qywx = (os.getenv("QYWX_KEY", "") or os.getenv("QYWX_TOKEN", "") or "").strip()
-    if qywx and not sent:
-        try:
-            requests.post("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=%s" % qywx,
-                          json={"msgtype": "text", "text": {"content": "%s\n\n%s" % (title, content)}},
-                          timeout=15)
-            sent = True
-            print("✅ [通知] 企业微信机器人发送成功", flush=True)
-        except Exception as exc:
-            print("❌ [通知] 企业微信机器人发送失败：%s" % str(exc)[:120], flush=True)
-    bark = (os.getenv("BARK_PUSH", "") or "").strip()
-    if bark and not sent:
-        try:
-            requests.post(bark.rstrip("/"), json={"title": title, "body": content}, timeout=15)
-            sent = True
-            print("✅ [通知] Bark 发送成功", flush=True)
-        except Exception as exc:
-            print("❌ [通知] Bark 发送失败：%s" % str(exc)[:120], flush=True)
-    if not sent:
-        print("ℹ️ [通知] 未配置任何可用推送通道，结果仅输出到日志", flush=True)
-    return sent
-
-
 def default_cache_dir():
     ql_config = Path("/ql/data/config")
     if ql_config.is_dir():
@@ -2990,12 +2928,7 @@ def default_cache_dir():
 
 
 def print_banner(query=False):
-    print("╔════════════════════════════════════════╗")
-    print("║ 🌱 WorkBuddy 全能脚本（YYB无感取码）   ║")
-    print("║ 🔐取码 💰积分 📊用量 🌱成长            ║")
-    print("║ ✅任务 🎮玩法 🎁领奖 📢通知            ║")
-    print("╚════════════════════════════════════════╝")
-    print("📦 v%s · %s" % (VERSION, "签到状态查询" if query else "全流程"), flush=True)
+    log("🌱 WorkBuddy 全能脚本 v%s（YYB无感取码）｜%s" % (VERSION, "签到状态查询" if query else "全流程"))
 
 
 def main(argv=None):
@@ -3004,7 +2937,6 @@ def main(argv=None):
     parser.add_argument("--query", action="store_true", help="仅查询积分/用量/签到状态，不执行任务")
     parser.add_argument("--no-school", action="store_true", help="跳过开学季活动")
     parser.add_argument("--no-desktop", action="store_true", help="跳过桌面任务")
-    parser.add_argument("--no-notify", action="store_true", help="不发送青龙通知")
     parser.add_argument("--gap", type=float, default=1.5, help="写动作间隔秒数")
     args = parser.parse_args(argv)
 
@@ -3027,14 +2959,14 @@ def main(argv=None):
     try:
         accounts = select_accounts(accounts_from_env(os.getenv("YYB_SERVER", "")), only_expr)
     except SafeError as exc:
-        print("❌ " + str(exc), flush=True)
+        err(str(exc))
         return 1
     total = len(accounts)
-    print("👥 账号数: %d" % total, flush=True)
+    log("👥 账号数: %d" % total)
 
     do_desktop = not args.no_desktop
     if do_desktop and sys.platform != "win32":
-        print("🖥️ 非Windows环境：桌面任务自动降级为指纹上报模式", flush=True)
+        log("🖥️ 非Windows环境：桌面任务自动降级为指纹上报模式")
 
     try:
         with State(os.getenv("WB_CACHE_DIR") or default_cache_dir()) as state:
@@ -3081,24 +3013,17 @@ def main(argv=None):
                         client.session.close()
     except SafeError as exc:
         errors.append(str(exc))
-        print("❌ " + str(exc), flush=True)
+        err(str(exc))
     except Exception as exc:
         errors.append("任务失败（%s）" % type(exc).__name__)
-        print("❌ " + errors[-1], flush=True)
+        err(errors[-1])
 
     elapsed = time.monotonic() - started
     summary_text = build_summary(reports)
     if errors:
         summary_text += "\n\n❌ " + "\n❌ ".join(errors)
-    print("", flush=True)
-    print(summary_text, flush=True)
-    print("⏱️ 运行耗时 %.1f 秒" % elapsed, flush=True)
-
-    if not args.no_notify and os.getenv("WB_NO_NOTIFY") != "1":
-        try:
-            send_notify("🌱 WorkBuddy 签到报告", summary_text)
-        except Exception as exc:
-            print("⚠️ 通知发送异常（不影响结果）：%s" % str(exc)[:160], flush=True)
+    log(summary_text)
+    log("⏱️ 运行耗时 %.1f 秒" % elapsed)
 
     ok = sum(1 for r in reports if not r.get("error"))
     return 0 if total > 0 and ok == total and not errors else 1
@@ -3108,5 +3033,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n⏹️ 已手动中断")
+        log("⏹️ 已手动中断")
         sys.exit(130)

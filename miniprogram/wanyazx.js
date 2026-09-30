@@ -9,7 +9,7 @@
 //   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 //   3. 用 code 走有赞 authorize 静默登录，换取 session
 //   4. 查询签到活动(check-in-info)，执行签到(checkinV2)，并查询积分
-//   5. 输出汇总（含今日领取 / 总积分）并由 $.done 发送通知
+//   5. 输出汇总（含今日领取 / 总积分）
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 //   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
@@ -35,7 +35,7 @@ function _yybRoutes() {
     if (YYB_ONLY_REFS && YYB_ONLY_REFS.length) {
         const wanted = new Set(YYB_ONLY_REFS.map(x => parseInt(x, 10)).filter(n => Number.isInteger(n) && n > 0));
         const filtered = routes.filter((_, i) => wanted.has(i + 1));
-        console.log(`[账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${routes.length} 个账号`);
+        log(`ℹ️ [账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${routes.length} 个账号`);
         return filtered;
     }
     return routes;
@@ -78,23 +78,11 @@ async function _resolveYybAccounts(envName = '') {
 global.getSingleCode = getSingleCode;
 global.resolveAccounts = _resolveYybAccounts;
 
-async function _sendQingLongNotify(title, content) {
-    const candidates = ['./sendNotify', '../sendNotify', '/ql/data/scripts/sendNotify', '/ql/scripts/sendNotify'];
-    let lastError = null;
-    for (const candidate of candidates) {
-        try {
-            const mod = require(candidate);
-            const send = mod?.sendNotify || mod?.send;
-            if (typeof send === 'function') {
-                await send(title, content);
-                return true;
-            }
-        } catch (error) { lastError = error; }
-    }
-    console.log(`青龙通知失败（不影响任务结果）：${lastError?.message || '未找到通知模块'}`);
-    return false;
-}
-const qlNotify = { sendNotify: _sendQingLongNotify, send: _sendQingLongNotify };
+// ========== 统一日志：[LEVEL] [WANYAZX] message ==========
+function emit(level, emoji, msg) { console.log(`[${level}] [WANYAZX] ${emoji} ${msg}`); }
+function log(msg)  { emit('INFO', 'ℹ️', msg); }
+function warn(msg) { emit('WARN', '⚠️', msg); }
+function err(msg)  { emit('ERROR', '❌', msg); }
 // ===== adapter end =====
 
 /*
@@ -148,21 +136,13 @@ class WeChatServer {
 }
 
 class Env {
-    constructor(name) { this.name = name; this.userList = []; this.userIdx = 1; this.userCount = 0; this.logs = []; const originalLog = console.log; console.log = (...args) => { this.logs.push(args.join(" ")); originalLog.apply(console, args); }; }
-    log(...args) { console.log(...args); }
+    constructor(name) { this.name = name; this.userList = []; this.userIdx = 1; this.userCount = 0; }
     async wait(minMs, maxMs) { const ms = maxMs ? Math.floor(minMs + Math.random() * (maxMs - minMs)) : minMs; await new Promise(r => setTimeout(r, ms)); }
     async checkEnv(ckName) {
         const list = await global.resolveAccounts(ckName);
         this.userList = list;
         this.userCount = list.length;
-        if (!this.userList.length) console.log('未配置可用的 YYB_SERVER 或脚本专用账号变量');
-    }
-    async done() {
-        try {
-            const notify = qlNotify;
-            const content = (LAST_RESULTS && buildSummaryContent(LAST_RESULTS)) || this.logs.join('\n');
-            await notify.sendNotify("====== 丸丫甄选 汇总日志 ======", content);
-        } catch (e) { console.log('通知发送失败', e); }
+        if (!this.userList.length) err('🚫 未配置可用的 YYB_SERVER 或脚本专用账号变量');
     }
 }
 
@@ -261,7 +241,7 @@ function writeTokenCache(cache) {
     try {
         fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
     } catch (e) {
-        $.log(`写入token缓存失败: ${e.message || e}`);
+        err(`写入token缓存失败: ${e.message || e}`);
     }
 }
 
@@ -312,10 +292,10 @@ class Task {
         const cached = this.getCachedToken();
         if (cached) {
             this.applyToken(cached);
-            $.log(`账号[${this.index}] 使用缓存token`);
+            log(`账号[${this.index}] 使用缓存token`);
             if (!(await this.checkToken())) {
                 this.removeCachedToken();
-                $.log(`账号[${this.index}] 缓存token失效，重新登录`);
+                warn(`账号[${this.index}] 缓存token失效，重新登录`);
             }
         }
 
@@ -433,12 +413,12 @@ class Task {
             this.userInfo = data || {};
             if (!this.token) throw new Error(`登录响应未包含 accessToken: ${short(data)}`);
             this.saveCachedToken();
-            $.log(
+            log(
                 `账号[${this.index}] 登录成功: ${data.nick_name || data.nickName || ""} ${maskPhone(data.mobile) || ""}`
             );
         } catch (e) {
             this.todayStatus = "登录失败";
-            $.log(`账号[${this.index}] 登录失败: ${e.message || e}`);
+            err(`账号[${this.index}] 登录失败: ${e.message || e}`);
         }
     }
 
@@ -456,14 +436,14 @@ class Task {
             const info = await this.request({ path: "/wscump/checkin/check-in-info.json" });
             this.checkinId = info?.checkInId || info?.checkinId || "";
             this.isShow = true;
-            $.log(`账号[${this.index}] 签到活动: checkInId=${this.checkinId || "未获取"}`);
+            err(`账号[${this.index}] 签到活动: checkInId=${this.checkinId || "未获取"}`);
         } catch (e) {
-            $.log(`账号[${this.index}] 获取签到活动失败: ${e.message || e}`);
+            err(`账号[${this.index}] 获取签到活动失败: ${e.message || e}`);
             if (isTokenError(e.message || e)) this.removeCachedToken();
             return;
         }
         if (!this.checkinId) {
-            $.log(`账号[${this.index}] 未获取到 checkInId，跳过签到`);
+            err(`账号[${this.index}] 未获取到 checkInId，跳过签到`);
             return;
         }
         try {
@@ -483,24 +463,24 @@ class Task {
                 .map(x => `${x?.duration || "?"}天/${x?.prize?.[0]?.desc?.middle ?? "?"}${x?.prize?.[0]?.desc?.right || ""}`)
                 .filter(Boolean)
                 .join("、");
-            $.log(
+            log(
                 `账号[${this.index}] 今日${this.signedBefore ? "已签" : "未签"}` +
                     (this.continuesDay ? ` 连续${this.continuesDay}天` : "") +
                     (todayReward ? ` 今日奖励:${todayReward}` : "") +
                     (milestones ? ` 连签奖励:${milestones}` : "")
             );
         } catch (e) {
-            $.log(`账号[${this.index}] 获取签到状态失败: ${e.message || e}`);
+            err(`账号[${this.index}] 获取签到状态失败: ${e.message || e}`);
         }
     }
 
     async doCheckin() {
         if (!this.checkinId) {
-            $.log(`账号[${this.index}] 未获取到 checkinId，跳过签到`);
+            err(`账号[${this.index}] 未获取到 checkinId，跳过签到`);
             return;
         }
         if (this.signedBefore) {
-            $.log(`账号[${this.index}] 今日已签到，跳过提交`);
+            warn(`账号[${this.index}] 今日已签到，跳过提交`);
             return;
         }
         try {
@@ -514,16 +494,16 @@ class Task {
                 .join(", ");
             this.todayStatus = "签到成功";
             this.todayEarned = parsePoints(awards);
-            $.log(`账号[${this.index}] 签到成功: ${data?.desc || ""}${awards ? ` ${awards}` : ""}`);
+            log(`账号[${this.index}] 签到成功: ${data?.desc || ""}${awards ? ` ${awards}` : ""}`);
         } catch (e) {
             const message = String(e.message || e);
             if (isRepeatCheckin(message)) {
                 this.todayStatus = "今日已签";
-                $.log(`账号[${this.index}] 今日已签到`);
+                log(`账号[${this.index}] 今日已签到`);
                 return;
             }
             this.todayStatus = "签到失败";
-            $.log(`账号[${this.index}] 签到失败: ${message}`);
+            err(`账号[${this.index}] 签到失败: ${message}`);
             if (isTokenError(message)) this.removeCachedToken();
         }
     }
@@ -535,17 +515,16 @@ class Task {
             const pts = data?.current_points ?? data?.real_points;
             if (pts !== undefined && pts !== null) {
                 this.totalPoints = Number(pts);
-                $.log(`账号[${this.index}] 当前积分: ${pts}`);
+                log(`账号[${this.index}] 当前积分: ${pts}`);
                 return;
             }
         } catch (e) {
             // 部分店铺无此余额接口，忽略
         }
-        if (this.continuesDay) $.log(`账号[${this.index}] 连续签到: ${this.continuesDay} 天`);
+        if (this.continuesDay) log(`账号[${this.index}] 连续签到: ${this.continuesDay} 天`);
     }
 }
 
-let LAST_RESULTS = null;
 function buildSummaryContent(results) {
     const seq = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
     const lines = [];
@@ -566,13 +545,12 @@ function buildSummaryContent(results) {
     }
     return lines.join("\n");
 }
+
 function printSummary(results) {
     if (!results || !results.length) return;
-    LAST_RESULTS = results;
-    $.log("");
-    $.log("──── 丸丫甄选 执行汇总 ────");
-    $.log(buildSummaryContent(results));
-    $.log("==========================================");
+    for (const line of buildSummaryContent(results).split('\n')) {
+        if (line) log(line);
+    }
 }
 
 !(async () => {
@@ -586,5 +564,4 @@ function printSummary(results) {
     }
     printSummary(results);
 })()
-    .catch((e) => $.log(e.message || e))
-    .finally(() => $.done());
+    .catch((e) => err('💥 ' + (e.message || e)));

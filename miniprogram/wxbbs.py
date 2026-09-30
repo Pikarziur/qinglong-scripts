@@ -7,13 +7,13 @@
 #   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 #   3. 用 code 完成登录（jscode → session_token）
-#   4. 查询余额 / 领券 / 提现额度等任务，输出汇总并发送通知
+#   4. 查询余额 / 领券 / 提现额度等任务，输出汇总
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。默认 ["1"]（只跑第 1 个账号）；留空 [] 跑全部
-#   LY_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
 #
+# 日志规范：[LEVEL] [WXBBS] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 YYB_ONLY_REFS = ["1"] # 账号序号白名单（1 起），默认 ["1"] = 只跑第 1 个账号；留空 [] = 跑全部
@@ -28,20 +28,10 @@ import base64
 import hashlib
 import traceback
 import ssl
-import sys
 from datetime import datetime, timedelta
 
 MULTI_ACCOUNT_SPLIT = ["\n", "@"] # 分隔符列表
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
-NOTIFY = (os.getenv("LY_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no") # 是否推送日志，默认开启，填 0/false/off/no 关闭
-
-# 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
-# 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它
-_NOTIFY_DIR = os.path.dirname(os.path.abspath(__file__))
-if not os.path.exists(os.path.join(_NOTIFY_DIR, "notify.py")):
-    _NOTIFY_DIR = os.path.dirname(_NOTIFY_DIR)   # 脚本同目录没有 → 用仓库根那份
-if _NOTIFY_DIR not in sys.path:
-    sys.path.insert(0, _NOTIFY_DIR)
 
 class YYBGoEnhancedAdapter:
     """YYB-Go-Enhanced 的 wx.login code 客户端。"""
@@ -53,7 +43,7 @@ class YYBGoEnhancedAdapter:
     def log(self, msg, level="info"):
         self.log_msgs.append(str(msg))
         prefix = {"error": "ERROR", "warning": "WARN"}.get(level, "INFO")
-        print(f"[{prefix}] {msg}")
+        print(f"[{prefix}] [WXBBS] {msg}", flush=True)
 
     @staticmethod
     def parse_entry(entry):
@@ -89,11 +79,11 @@ class YYBGoEnhancedAdapter:
                 result = (body.get("data") or {}).get("result")
             code = (result or {}).get("code")
             if code:
-                self.log(f"[YYB] 账号 {ref} 获取code成功")
+                self.log(f"🔑 [YYB] 账号 {ref} 获取code成功")
                 return code
-            self.log(f"[YYB] 获取code失败: {str(body)[:300]}", "error")
+            self.log(f"❌ [YYB] 获取code失败: {str(body)[:300]}", "error")
         except Exception as exc:
-            self.log(f"[YYB] 获取code异常: {exc}", "error")
+            self.log(f"💥 [YYB] 获取code异常: {exc}", "error")
         return None
 
 class TLSAdapter(requests.adapters.HTTPAdapter):
@@ -151,12 +141,12 @@ class AutoTask:
         :return: 代理
         """
         if not self.proxy_url:
-            self.log("[获取代理] 没有找到环境变量PROXY_API_URL，不使用代理", level="warning")
+            self.log("ℹ️ [获取代理] 没有找到环境变量PROXY_API_URL，不使用代理", level="warning")
             return None
         url = self.proxy_url
         response = requests.get(url)
         proxy = response.text
-        self.log(f"[获取代理] {proxy}")
+        self.log(f"🛡️ [获取代理] {proxy}")
         return proxy
 
     def check_proxy(self, proxy, session):
@@ -170,10 +160,10 @@ class AutoTask:
             url = f"https://{self.host}/"
             response = session.get(url, timeout=5)
             if response.status_code == 200:
-                self.log(f"[检查代理] {proxy} 应该可用")
+                self.log(f"🛡️ [检查代理] {proxy} 应该可用")
                 return True
             else:
-                self.log(f"[检查代理] {response.text}")
+                self.log(f"⚠️ [检查代理] {response.text}")
                 return False
         except Exception as e:
             return False
@@ -186,7 +176,7 @@ class AutoTask:
         try:
             yyb_server = os.getenv("YYB_SERVER", "").strip()
             if not yyb_server:
-                self.log("[检查环境变量] 没有找到YYB_SERVER；格式：地址@账号ref，多账号换行", level="error")
+                self.log("🚫 [检查环境变量] 没有找到YYB_SERVER；格式：地址@账号ref，多账号换行", level="error")
                 return None
             for entry in yyb_server.splitlines():
                 entry = entry.strip()
@@ -196,9 +186,9 @@ class AutoTask:
                     _server, _ref = self.wechat_code_adapter.parse_entry(entry)
                     yield entry
                 except ValueError as exc:
-                    self.log(f"[检查环境变量] 跳过无效配置 {entry!r}: {exc}", level="error")
+                    self.log(f"⚠️ [检查环境变量] 跳过无效配置 {entry!r}: {exc}", level="error")
         except Exception as e:
-            self.log(f"[检查环境变量] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [检查环境变量] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             raise
 
     # ── 已移除本地 token 缓存（原 save/load/remove_account_info）──
@@ -223,13 +213,13 @@ class AutoTask:
                 # 注意：不要在此打印 token 明文（青龙日志会持久化并可能推送出去）
                 return self.token
             else:
-                self.log(f"[登录] 失败 错误信息: {response_json.get('msg', '未知错误')}", level="warning")
+                self.log(f"❌ [登录] 失败 错误信息: {response_json.get('msg', '未知错误')}", level="warning")
                 return False
         except requests.RequestException as e:
-            self.log(f"[登录] 发生网络错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [登录] 发生网络错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
         except Exception as e:
-            self.log(f"[登录] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [登录] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
 
     def get_balance(self, session):
@@ -247,10 +237,10 @@ class AutoTask:
                 self.points = int(response_json['data']['balance']) // 100
                 return self.points
             else:
-                self.log(f"[{self.nickname}] 获取用户余额 发生错误: {response_json.get('msg', '未知错误')}", level="warning")
+                self.log(f"❌ [{self.nickname}] 获取用户余额 发生错误: {response_json.get('msg', '未知错误')}", level="warning")
                 return None
         except Exception as e:
-            self.log(f"[{self.nickname}] 获取用户余额 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [{self.nickname}] 获取用户余额 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return None
 
     def get_gifts_list(self, session):
@@ -268,10 +258,10 @@ class AutoTask:
                 gifts = response_json['data']['gift_info_list']
                 return gifts
             else:
-                self.log(f"[{self.nickname}] 获取优惠券列表 发生错误: {response_json.get('msg', '未知错误')}", level="warning")
+                self.log(f"❌ [{self.nickname}] 获取优惠券列表 发生错误: {response_json.get('msg', '未知错误')}", level="warning")
                 return []
         except Exception as e:
-            self.log(f"[{self.nickname}] 获取优惠券列表 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [{self.nickname}] 获取优惠券列表 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return []
 
     def redeem_gift(self, session, gift_id):
@@ -290,59 +280,22 @@ class AutoTask:
             if int(response_json['errcode']) == 0:
                 gift_info = response_json['data']['gift_info']
                 gift_name = gift_info.get('coupon_info', {}).get('name', '未知名称')
-                self.log(f"[{self.nickname}] 领取优惠券成功: {gift_name}")
+                self.log(f"🎁 [{self.nickname}] 领取优惠券成功: {gift_name}")
                 return True
             else:
                 error_msg = response_json.get('msg', '领取失败，未获取到具体信息')
-                self.log(f"[{self.nickname}] 领取优惠券失败: {error_msg}", level="warning")
+                self.log(f"❌ [{self.nickname}] 领取优惠券失败: {error_msg}", level="warning")
                 return False
         except Exception as e:
-            self.log(f"[{self.nickname}] 领取优惠券发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.log(f"💥 [{self.nickname}] 领取优惠券发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False
-
-    def load_notify(self):
-        """
-        加载青龙官方 notify 模块。
-        使用仓库根共享的 notify.py（脚本同目录有旧副本时优先用它，向后兼容）；
-        不存在时依次尝试 CDN 镜像→官方源→ghproxy 下载。
-        任何失败都不抛异常（避免在 finally 里报错盖掉真正的业务异常），返回 None。
-        """
-        notify_path = os.path.join(_NOTIFY_DIR, "notify.py")
-        if not os.path.exists(notify_path):
-            # 国内直连 raw.githubusercontent.com 常被重置，故 CDN 镜像优先
-            urls = [
-                "https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
-                "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
-                "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
-            ]
-            for url in urls:
-                try:
-                    response = requests.get(url, timeout=15)
-                    if response.status_code == 200 and "def send" in response.text:
-                        with open(notify_path, "wb") as f:
-                            f.write(response.content)
-                        self.log(f"[通知] notify.py 下载成功（{url.split('/')[2]}）")
-                        break
-                except Exception as e:
-                    self.log(f"[通知] notify.py 下载失败（{url.split('/')[2]}）: {e}", level="warning")
-        if not os.path.exists(notify_path):
-            return None
-        try:
-            import notify
-            return notify
-        except Exception as e:
-            self.log(f"[通知] notify.py 导入失败: {e}", level="error")
-            return None
 
     def run(self):
         """
         运行任务
         """
-        # 推送摘要：每个账号一行；完整运行日志只留在青龙日志里，不推给第三方渠道
-        push_lines = []
-        total_accounts = 0
         try:
-            self.log(f"【{self.script_name}】开始执行任务")
+            self.log(f"🚀 【{self.script_name}】开始执行任务")
             entries = list(self.check_env())
             # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
             if YYB_ONLY_REFS:
@@ -351,16 +304,16 @@ class AutoTask:
                     entries = [e for i, e in enumerate(entries, 1) if i in wanted]
                     self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(entries)} 个账号")
             total_accounts = len(entries)
-            self.log(f"共 {len(entries)} 个账号待执行")
+            self.log(f"👥 共 {len(entries)} 个账号待执行")
             if not entries:
-                self.log("没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
+                self.log("🚫 没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
                 return
+            ok_cnt = 0
             for index, wx_id in enumerate(entries, 1):
                 # 清理账号信息
                 self.nickname = f"账号{index}"
                 self.token = ""
-                self.log("")
-                self.log(f"------ 账号{index} 开始执行任务 ------")
+                self.log(f"👤 ----- 账号{index} 开始执行任务 -----")
                 session = requests.Session()
                 headers = {
                     "User-Agent": self.user_agent,
@@ -380,31 +333,27 @@ class AutoTask:
                 # 每次运行强制重新取码 + 登录，拿全新 token（不落盘、不复用本地缓存）
                 code = self.wechat_code_adapter.get_code(wx_id)
                 if not code:
-                    self.log(f"[{self.nickname}] YYB取码失败，跳过该账号", level="error")
-                    push_lines.append(f"{self.nickname}: ❌ YYB取码失败")
+                    self.log(f"❌ [{self.nickname}] YYB取码失败，跳过该账号", level="error")
                     session.close()
                     continue
                 token = self.login(session, code)
                 if not token:
-                    self.log(f"[{self.nickname}] 登录失败，跳过该账号", level="error")
-                    push_lines.append(f"{self.nickname}: ❌ 登录失败")
+                    self.log(f"❌ [{self.nickname}] 登录失败，跳过该账号", level="error")
                     session.close()
                     continue
                 self.token = token
                 session.headers['Session-Token'] = token
                 # 校验刚登录的 token（失效则重登一次，仍失败则跳过；全程不落盘）
                 if self.get_balance(session) is None:
-                    self.log(f"[{self.nickname}] 登录态校验失败，尝试重登一次", level="warning")
+                    self.log(f"🔁 [{self.nickname}] 登录态校验失败，尝试重登一次", level="warning")
                     code = self.wechat_code_adapter.get_code(wx_id)
                     if not code:
-                        self.log(f"[{self.nickname}] 授权失败，跳过该账号", level="error")
-                        push_lines.append(f"{self.nickname}: ❌ 授权失败")
+                        self.log(f"❌ [{self.nickname}] 授权失败，跳过该账号", level="error")
                         session.close()
                         continue
                     token = self.login(session, code)
                     if not token:
-                        self.log(f"[{self.nickname}] 重新登录失败，跳过该账号", level="error")
-                        push_lines.append(f"{self.nickname}: ❌ 重新登录失败")
+                        self.log(f"❌ [{self.nickname}] 重新登录失败，跳过该账号", level="error")
                         session.close()
                         continue
                     self.token = token
@@ -417,58 +366,15 @@ class AutoTask:
                         self.redeem_gift(session, gift_id)
                 # 再次获取用户余额
                 self.get_balance(session)
-                self.log(f"[{self.nickname}] 当前提现免费券: {self.points}元")
-                push_lines.append(f"{self.nickname}: ✅ 提现免费券 {self.points}元")
+                self.log(f"💳 [{self.nickname}] 当前提现免费券: {self.points}元")
+                ok_cnt += 1
                 # 清理session
                 session.close()
-                self.log(f"------ 账号{index} 执行任务结束 ------")
+                self.log(f"🏁 ----- 账号{index} 执行任务结束 -----")
             # 不落盘：每次运行的 token 均为临时登录获取，不写入本地文件
+            self.log(f"🏁 【{self.script_name}】执行汇总 · 账号 {total_accounts}｜成功 {ok_cnt}｜失败 {total_accounts - ok_cnt}")
         except Exception as e:
-            self.log(f"【{self.script_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
-        finally:
-            if NOTIFY:
-                # 推送失败不能影响脚本退出状态，整段兜住
-                try:
-                    notify = self.load_notify()
-                    if notify is None:
-                        self.log("[通知] 未找到 notify.py，跳过推送")
-                    else:
-                        # 只推精简摘要（每账号一行）：第三方渠道有正文长度上限，
-                        # 且 PushPlus 免费版在微信里只显示标题，成功数必须进 title。
-                        ok_cnt = sum(1 for _l in push_lines if "✅" in _l)
-                        if total_accounts:
-                            title = f"{self.script_name} {ok_cnt}/{total_accounts} 成功"
-                            if ok_cnt < total_accounts:
-                                title += f"  ❌{total_accounts - ok_cnt}"
-                        else:
-                            title = f"{self.script_name} 无账号可执行"
-                        content = "\n".join(push_lines) or "无账号可执行，请检查 YYB_SERVER / YYB_ONLY_REFS"
-                        # 控制台执行汇总
-                        self.log(f"──── {self.script_name} 执行汇总 ────")
-                        self.log(f"账号 {total_accounts}｜成功 {ok_cnt}｜失败 {total_accounts - ok_cnt}")
-                        self.log("────────────────────────────")
-                        # 渲染分账号汇总（面向 notify，简洁精要；多任务型按任务行 ✔️/❌）
-                        _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-                        _fmt = []
-                        for _i, _pl in enumerate(content.splitlines(), 1):
-                            if not _pl.strip():
-                                continue
-                            if ": " in _pl:
-                                _nick, _rest = _pl.split(": ", 1)
-                            else:
-                                _nick, _rest = f"账号{_i}", _pl
-                            _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-                            _fmt.append(f"{_em} [{_nick}]")
-                            if _rest.startswith("✅"):
-                                _fmt.append("✔️ " + _rest[1:].lstrip())
-                            elif _rest.startswith("❌"):
-                                _fmt.append("❌ " + _rest[1:].lstrip())
-                            else:
-                                _fmt.append(_rest)
-                        notify.send("====== 微信支付提现笔笔省 汇总日志 ======", "\n".join(_fmt))
-                        self.log(f"[通知] 推送已提交：{title}")
-                except Exception as e:
-                    self.log(f"[通知] 推送失败: {e}", level="error")
+            self.log(f"💥 【{self.script_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
 
 if __name__ == "__main__":
     auto_task = AutoTask("微信支付提现笔笔省")

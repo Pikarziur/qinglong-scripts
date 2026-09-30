@@ -82,7 +82,7 @@ async function getSingleCode(appId, identifier) {
         if (!result.code) throw new Error('YYB未返回有效code');
         return result.code;
     } catch (error) {
-        console.log(`[YYB] 获取code失败：${error.message}`);
+        console.log(`[WARN] [HSHJ] ⚠️ [YYB] 获取code失败：${error.message}`);
         return null;
     }
 }
@@ -105,30 +105,28 @@ const AUTO_CLAIM_H5_RED_PACKET = process.env.HSJJ_AUTO_CLAIM_H5 !== '0';
 const CACHE_DIR = pathMod.join(process.cwd(), '.cache');
 const ACCOUNT_CACHE_FILE = pathMod.join(CACHE_DIR, 'hsjj_accounts.json');
 
-// ==================== 通知模块 ====================
-let notify;
-try { notify = require('./sendNotify'); } catch (e) { notify = null; }
-
-// 消息收集
-let _logMessages = [];
-function log(str) {
-    console.log(str);
-    _logMessages.push(str);
+// ==================== 统一日志 ====================
+// 格式：[LEVEL] [HSHJ] emoji message；行首自带 emoji 时沿用，否则按级别补默认 emoji
+const SRC = 'HSHJ';
+const _LEVEL_EMOJI = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌' };
+const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
+function _levelOfLine(line) {
+    if (/^(?:\u274C|\uD83D\uDCA5)/.test(line)) return 'ERROR'; // ❌ 💥
+    if (/^\u26A0/.test(line)) return 'WARN';                   // ⚠️
+    return 'INFO';
 }
-async function push_notification() {
-    const title = "红色火箭（华泰基金）";
-    const content = _logMessages.join('\n');
-    if (notify && typeof notify.sendNotify === 'function') {
-        try {
-            await notify.sendNotify(title, content);
-            log('✅ 通知发送成功');
-        } catch (e) {
-            log('⚠️ 通知发送失败: ' + e.message);
-        }
-    } else {
-        log("--- 通知 ---\n" + title + "\n" + content + "\n-------------");
+function emit(level, text) {
+    const s = String(text === undefined || text === null ? '' : text);
+    for (const raw of s.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const lv = level || _levelOfLine(line);
+        console.log(`[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`);
     }
 }
+function log(text) { emit(null, text); }
+function warn(text) { emit('WARN', text); }
+function err(text) { emit('ERROR', text); }
 
 // ==================== SM4 加密（从逆向代码移植） ====================
 const SM4_SBOX = [214,144,233,254,204,225,61,183,22,182,20,194,40,251,44,5,43,103,154,118,42,190,4,195,170,68,19,38,73,134,6,153,156,66,80,244,145,239,152,122,51,84,11,67,237,207,172,98,228,179,28,169,201,8,232,149,128,223,148,250,117,143,63,166,71,7,167,252,243,115,23,186,131,89,60,25,230,133,79,168,104,107,129,178,113,100,218,139,248,235,15,75,112,86,157,53,30,36,14,94,99,88,209,162,37,34,124,59,1,33,120,135,212,0,70,87,159,211,39,82,76,54,2,231,160,196,200,158,234,191,138,210,64,199,56,181,163,247,242,206,249,97,21,161,224,174,93,164,155,52,26,85,173,147,50,48,245,140,177,227,29,246,226,46,130,102,202,96,192,41,35,171,13,83,78,111,213,219,55,69,222,253,142,47,3,255,106,114,109,108,91,81,141,27,175,146,187,221,188,127,17,217,92,65,31,16,90,216,10,193,49,136,165,205,123,189,45,116,208,18,184,229,180,176,137,105,151,74,12,150,119,126,101,185,241,9,197,110,198,132,24,240,125,236,58,220,77,32,121,238,95,62,215,203,57,72];
@@ -1234,9 +1232,7 @@ async function runTask(accountInfo) {
     const wxid = accountInfo.wxid;
     const note = accountInfo.note || '';
     const display = note || wxid;
-    log('\n' + '='.repeat(50));
     log('▶ 账号: ' + display);
-    log('='.repeat(50));
 
     const cache = loadCache();
     const cacheKey = wxid;
@@ -1436,8 +1432,7 @@ async function main() {
     log('🚀 红色火箭脚本启动');
 
     if (!taskVar.trim()) {
-        log('环境变量未设置: ' + ckName);
-        await push_notification();
+        err('环境变量未设置: ' + ckName);
         process.exit(0);
     }
 
@@ -1478,11 +1473,10 @@ async function main() {
     }
 
     // 汇总输出
-    log('\n' + '='.repeat(50));
     log('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
 
     // 输出每个账号的汇总信息
-    log('\n📋 账号汇总:');
+    log('📋 账号汇总:');
     let totalClaimed = 0;
     for (const account of accounts) {
         const display = account.note || account.wxid;
@@ -1494,11 +1488,8 @@ async function main() {
         log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前总获得红包:' + formatMoney(redPacketAmount) + '元 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
     }
     if (totalClaimed > 0) {
-        log('\n💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
+        log('💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
     }
-
-    // 推送通知
-    await push_notification();
 }
 
-main().catch(e => { log('❌ 脚本异常: ' + e.message); log(e.stack); });
+main().catch(e => { err('脚本异常: ' + e.message); err(e.stack); });

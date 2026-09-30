@@ -9,14 +9,13 @@
 //   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 //   2. 调用 YYBGO 的 /wxapp/getCode 获取 wx.login code
 //   3. 登录创维小程序，依次执行固定任务（共 5 个）
-//   4. 输出汇总并发送通知（未注册创维的账号自动跳过）
+//   4. 输出汇总（未注册创维的账号自动跳过）
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 //   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 //   CHUANGW_APPID / APP_VERSION / SDK_VERSION / APP_PATH / APP_SYSTEM / APP_MODEL
 //                  可选。小程序设备指纹参数，不填用内置默认（iPhone 15 Pro Max / iOS 26.1）
 //   CHUANGW_RUN_TASKS  任务总开关，默认 1（开）；填 0 跳过所有任务只登录
-//   CHUANGW_NOTIFY  通知开关，默认开启；填 0 关闭
 // ────────────────────────────────────────────
 
 'use strict';
@@ -24,7 +23,6 @@
 const crypto = require('crypto');
 const vm = require('vm');
 const path = require('path');
-const { spawnSync } = require('child_process');
 
 const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 
@@ -40,7 +38,6 @@ const APP_SYSTEM = process.env.CHUANGW_APP_SYSTEM || 'iOS 26.1';
 const APP_MODEL = process.env.CHUANGW_APP_MODEL || 'iPhone 15 pro max<iPhone16,2>';
 
 const RUN_TASKS = (process.env.CHUANGW_RUN_TASKS || '1') !== '0';
-const NOTIFY_ENABLED = (process.env.CHUANGW_NOTIFY || '1') !== '0';
 // 固定任务：5个（不走环境变量）
 const TASK_CODES = ['TS00016', 'TS00210', 'TS00203', 'TS00211', 'TS00213'];
 const TASK_NAME_MAP = {
@@ -94,66 +91,28 @@ function parseAccounts(raw) {
   if (YYB_ONLY_REFS && YYB_ONLY_REFS.length) {
     const wanted = new Set(YYB_ONLY_REFS.map(x => parseInt(x, 10)).filter(n => Number.isInteger(n) && n > 0));
     const filtered = accounts.filter((_, i) => wanted.has(i + 1));
-    console.log(`[账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${accounts.length} 个账号`);
+    logInfo(`ℹ️ [账号过滤] YYB_ONLY_REFS=${JSON.stringify(YYB_ONLY_REFS)} 命中 ${filtered.length}/${accounts.length} 个账号`);
     return filtered;
   }
   return accounts;
 }
 
-const LOG_WIDTH = 74;
-
-function hr(char = '─') {
-  console.log(char.repeat(LOG_WIDTH));
+// ========== 统一日志：[LEVEL] [CHUANGWEI] message ==========
+function emit(level, msg) {
+  console.log(`[${level}] [CHUANGWEI] ${msg}`);
 }
+
+function logInfo(msg) { emit('INFO', msg); }
+function logOk(msg)   { emit('INFO', msg); }
+function logWarn(msg) { emit('WARN', msg); }
+function logErr(msg)  { emit('ERROR', msg); }
+
+function section(title) { logInfo(`━━━ ${title} ━━━`); }
 
 function truncText(s, max = 96) {
   const str = String(s ?? '');
   if (str.length <= max) return str;
   return `${str.slice(0, max - 1)}…`;
-}
-
-function wrapText(s, max = 86) {
-  const str = String(s ?? '').replace(/\n+/g, ' ').trim();
-  if (!str) return [''];
-  const lines = [];
-  for (let i = 0; i < str.length; i += max) lines.push(str.slice(i, i + max));
-  return lines;
-}
-
-function section(title) {
-  console.log(`\n━━━ ${title} ━━━`);
-}
-
-function logWithIcon(icon, msg) {
-  const lines = wrapText(msg);
-  lines.forEach((line, idx) => {
-    if (idx === 0) console.log(`${icon} ${line}`);
-    else console.log(`   ${line}`);
-  });
-}
-
-function logInfo(msg) {
-  logWithIcon('ℹ️', msg);
-}
-
-function logOk(msg) {
-  logWithIcon('✅', msg);
-}
-
-function logWarn(msg) {
-  logWithIcon('⚠️', msg);
-}
-
-function logErr(msg) {
-  logWithIcon('❌', msg);
-}
-
-function logSep(char = '─') {
-  console.log(char.repeat(LOG_WIDTH));
-}
-
-function endSection() {
-  console.log('');
 }
 
 function maskMiddle(s, left = 10, right = 8) {
@@ -646,7 +605,6 @@ async function runTasks(token) {
   section('任务中心');
   const before = await getWdStatus(token);
   logInfo(`固定任务(${TASK_CODES.length})：${TASK_CODES.map(c => `${c}(${taskName(c)})`).join('，')}`);
-  logSep();
 
   let execCount = 0;
   let successCount = 0;
@@ -678,7 +636,6 @@ async function runTasks(token) {
   }
 
   const after = await getWdStatus(token);
-  logSep();
   logInfo('任务状态对比（执行前 -> 执行后）');
   for (const taskCode of TASK_CODES) {
     const name = taskName(taskCode);
@@ -687,9 +644,7 @@ async function runTasks(token) {
     const icon = a === '已完成' ? '✅' : '▫️';
     logInfo(`${icon} ${taskCode} ${name}: ${b} -> ${a}`);
   }
-  logSep();
   logOk(`任务执行结束：尝试 ${execCount} 个，成功 ${successCount} 个，跳过 ${TASK_CODES.length - execCount} 个`);
-  endSection();
   return `固定任务：尝试${execCount}，成功${successCount}，跳过${TASK_CODES.length - execCount}`;
 }
 
@@ -773,7 +728,6 @@ async function runDuibaExtraSign(token) {
     const aCon = Number(after?.data?.consecutiveCount || 0);
     const aTot = Number(after?.data?.totalCount || 0);
     const afterSigned = Boolean(after?.data?.signResult);
-    logSep();
     logInfo(`状态对比: 连签 ${bCon} -> ${aCon}，总签到 ${bTot} -> ${aTot}`);
     logInfo(`签到后状态：${afterSigned ? '今日已签到' : '今日未签到'}`);
 
@@ -809,7 +763,6 @@ async function runOne(account, idx) {
   const token = await signinByTicket(ticket);
   logOk('signin成功');
   printTokenInfo(token);
-  logSep();
 
   const profile = await getUserByToken(token);
   if (!(Number(profile?.code) === 0 || String(profile?.code) === '0')) {
@@ -818,7 +771,6 @@ async function runOne(account, idx) {
   const beforeScore = scoreSnapshot(profile);
   logOk('/v1/get-user 成功');
   logInfo(`执行前积分：${beforeScore.current ?? '接口未返回'}，今日累计：${beforeScore.today ?? '接口未返回'}`);
-  logSep();
 
   if (RUN_TASKS) {
     const taskSummary = await runTasks(token);
@@ -835,46 +787,10 @@ async function runOne(account, idx) {
   }
 }
 
-function sendQingLongNotify(title, content) {
-  if (!NOTIFY_ENABLED) {
-    logInfo('CHUANGW_NOTIFY=0，已关闭通知');
-    return;
-  }
-  const py = String.raw`
-import importlib.util, os, sys
-paths = ['/ql/data/scripts/notify.py', '/ql/scripts/notify.py', os.path.join(os.getcwd(), 'notify.py')]
-for candidate in paths:
-    if not os.path.isfile(candidate):
-        continue
-    spec = importlib.util.spec_from_file_location('ql_notify', candidate)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    sender = getattr(module, 'send', None) or getattr(module, 'sendNotify', None)
-    if not callable(sender):
-        continue
-    sender(os.environ['CW_NOTIFY_TITLE'], os.environ['CW_NOTIFY_CONTENT'])
-    print('notify.py调用完成')
-    sys.exit(0)
-print('未找到可用的青龙notify.py', file=sys.stderr)
-sys.exit(2)
-`;
-  try {
-    const result = spawnSync(process.env.PYTHON_BIN || 'python3', ['-c', py], {
-      encoding: 'utf8',
-      timeout: 120000,
-      env: { ...process.env, CW_NOTIFY_TITLE: title, CW_NOTIFY_CONTENT: content },
-    });
-    if (result.status === 0) logOk('青龙通知模块调用完成');
-    else logWarn(`青龙通知失败（不影响任务结果）：${truncText(result.stderr || result.stdout || `exit ${result.status}`, 160)}`);
-  } catch (e) {
-    logWarn(`青龙通知异常（不影响任务结果）：${e.message || e}`);
-  }
-}
-
 (async () => {
   const raw = process.env.YYB_SERVER || '';
   if (!raw.trim()) {
-    console.log('未设置环境变量 YYB_SERVER；格式：YYB-Go-Enhanced地址@账号标识，多账号每行一条');
+    logErr('❌ 未设置环境变量 YYB_SERVER；格式：YYB-Go-Enhanced地址@账号标识，多账号每行一条');
     process.exitCode = 1;
     return;
   }
@@ -887,56 +803,23 @@ sys.exit(2)
     process.exitCode = 1;
     return;
   }
-  hr('═');
-  console.log(`🚀 创维 YYB-Go-Enhanced 任务启动 | 共 ${accounts.length} 个账号`);
-  hr('═');
+  logInfo(`🚀 创维 YYB-Go-Enhanced 任务启动 | 共 ${accounts.length} 个账号`);
 
-  const results = [];
   let failed = 0;
   let skipped = 0;
   for (let i = 0; i < accounts.length; i++) {
     try {
-      const summary = await runOne(accounts[i], i + 1);
-      results.push(`【账号${i + 1}${accounts[i].note ? ` · ${accounts[i].note}` : ''}】\n${summary}`);
+      await runOne(accounts[i], i + 1);
     } catch (e) {
       if (e?.accountSkipped) {
-        logWarn(`账号${i + 1}未注册创维小程序，已跳过`);
-        results.push(`【账号${i + 1}${accounts[i].note ? ` · ${accounts[i].note}` : ''}】\n⏭️ 未注册创维，已跳过`);
+        logWarn(`⚠️ 账号${i + 1}未注册创维小程序，已跳过`);
         skipped++;
       } else {
-        logErr(`账号${i + 1}失败: ${e.message || e}`);
-        results.push(`【账号${i + 1}${accounts[i].note ? ` · ${accounts[i].note}` : ''}】\n❌ 失败：${truncText(e.message || e, 80)}`);
+        logErr(`❌ 账号${i + 1}失败: ${e.message || e}`);
         failed++;
       }
-      endSection();
     }
   }
-  hr('═');
-  console.log(`🎉 全部账号处理完成：成功 ${accounts.length - failed - skipped}，跳过 ${skipped}，失败 ${failed}`);
-  hr('═');
-  console.log('──── 创维 执行汇总 ────');
-  // 构建分账号汇总（面向 notify，简洁精要；多任务按任务行 ✔️/❌，跳过也归一展示）
-  const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-  const summaryOut = [];
-  for (let i = 0; i < results.length; i++) {
-    const block = results[i];
-    const headerMatch = block.match(/^【(.+?)】/);
-    const ident = headerMatch ? headerMatch[1] : `账号${i + 1}`;
-    const em = seqEmoji[i] || `${i + 1}.`;
-    summaryOut.push(`${em} [${ident}]`);
-    const bodyLines = block.split('\n').slice(1).filter(l => l.trim());
-    for (const bl of bodyLines) {
-      const t = bl.trim();
-      if (t.startsWith('✅')) summaryOut.push('✔️ ' + t.slice(1).trim());
-      else if (t.startsWith('❌')) summaryOut.push('❌ ' + t.slice(1).trim());
-      else if (t.startsWith('⏭️')) summaryOut.push('⏭️ ' + t.slice(1).trim());
-      else summaryOut.push(t);
-    }
-  }
-  sendQingLongNotify('====== 创维 汇总日志 ======', [
-    `📊 成功 ${accounts.length - failed - skipped}｜跳过 ${skipped}｜失败 ${failed}`,
-    '',
-    summaryOut.join('\n'),
-  ].join('\n'));
+  logInfo(`🏁 创维 执行汇总 · 账号 ${accounts.length}｜成功 ${accounts.length - failed - skipped}｜跳过 ${skipped}｜失败 ${failed}`);
   if (failed > 0) process.exitCode = 1;
 })();

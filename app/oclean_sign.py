@@ -7,16 +7,15 @@
 #   1. 读取 OCLEAN_COOKIE（或回退 OCLEAN_SHOP_MEMBER）中的 Shop-Member 值
 #   2. 逐个账号 POST 签到接口完成每日签到
 #   3. 解析响应判断成功 / 已签 / Cookie 失效，并打印积分
-#   4. 末尾输出执行汇总并发送通知
+#   4. 末尾输出执行汇总
 # 可控参数：
 #   OCLEAN_COOKIE       必填。一行一个 Shop-Member 值，多账号换行
 #   OCLEAN_SHOP_MEMBER  可选。单账号回退变量，OCLEAN_COOKIE 为空时才生效
-#   OCLEAN_NOTIFY       通知开关，默认开启；填 0/false/off/no 关闭
 #
+# 日志规范：[LEVEL] [OCLEAN] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 import os
-import sys
 import json
 import time
 import requests
@@ -32,74 +31,14 @@ HEADERS = {
 }
 
 # ────────────────────────────────────────────
-# 日志美化
+# 统一日志
 # ────────────────────────────────────────────
-def _box(title, width=40):
-    bar = "─" * (width - 2)
-    print("╭" + bar + "╮")
-    pad = (width - 2 - len(title))
-    left, right = pad // 2, pad - pad // 2
-    print("│" + (" " * left) + title + (" " * right) + "│")
-    print("╰" + bar + "╯")
+def _emit(level, msg):
+    print(f"[{level}] [OCLEAN] {msg}", flush=True)
 
-def log(msg):
-    print("· " + msg)
-
-# ────────────────────────────────────────────
-# 通知推送（只推精简摘要，不推全量日志）
-# ────────────────────────────────────────────
-# 开关：默认开启，填 0/false/off/no 可关闭
-NOTIFY = (os.getenv("OCLEAN_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")
-
-# 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
-# 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它
-_NOTIFY_DIR = os.path.dirname(os.path.abspath(__file__))
-if not os.path.exists(os.path.join(_NOTIFY_DIR, "notify.py")):
-    _NOTIFY_DIR = os.path.dirname(_NOTIFY_DIR)   # 脚本同目录没有 → 用仓库根那份
-if _NOTIFY_DIR not in sys.path:
-    sys.path.insert(0, _NOTIFY_DIR)
-
-
-def _ensure_notify():
-    """确保共享的 notify.py 就位（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
-    try:
-        import notify  # noqa: F401
-        return True
-    except Exception:
-        pass
-    target = os.path.join(_NOTIFY_DIR, "notify.py")
-    for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
-                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
-                 "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
-        try:
-            _r = requests.get(_url, timeout=15)
-            if _r.status_code == 200 and "def send" in _r.text:
-                with open(target, "wb") as _f:
-                    _f.write(_r.content)
-                log("已自愈下载 notify.py（" + _url.split("/")[2] + "）")
-                return True
-        except Exception as _e:
-            log("notify.py 下载失败（" + _url.split("/")[2] + "）: " + str(_e))
-    return False
-
-
-def send_notify(title, content):
-    """推送到青龙面板配置的通知渠道；失败只打日志，不影响脚本退出状态。"""
-    if not NOTIFY:
-        return
-    try:
-        if not _ensure_notify():
-            log("未安装 notify.py，跳过推送")
-            return
-        from notify import send as _notify_send
-        if len(content) > 3000:
-            content = content[:3000] + "...(内容过长已截断)"
-        _notify_send(title, content)
-    except ImportError:
-        log("未安装 notify.py，跳过推送")
-    except Exception as e:
-        log("推送失败: " + str(e))
-
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 # ────────────────────────────────────────────
 # 解析青龙环境变量
@@ -176,18 +115,20 @@ def interpret(jr, raw_text):
 
 # ────────────────────────────────────────────
 def run_one(idx, cookie):
-    _box(f"账号 #{idx}")
     short = cookie[:8] + "..." + cookie[-6:]
-    log(f"Cookie: Shop-Member={short}")
+    log(f"👤 账号 #{idx} · Cookie: Shop-Member={short}")
     status_code, jr, raw = sign_in(cookie)
     if status_code is None:
-        print("│ ❌ 请求异常: " + raw)
-        print()
-        return False, "异常", " ".join(str(raw).split())[:80]
+        brief = " ".join(str(raw).split())[:80]
+        err(f"❌ 账号 #{idx} 请求异常: {brief}")
+        return False, "异常", brief
     st, detail = interpret(jr, raw)
-    emoji = {"success": "✅", "already": "🟡", "expired": "🔴", "fail": "❌"}.get(st, "❔")
-    print(f"│ {emoji} HTTP {status_code}  {detail}")
-    print()
+    icon = {"success": "✅", "already": "🟡", "expired": "🔴", "fail": "❌", "unknown": "❔"}.get(st, "❔")
+    line = f"{icon} 账号 #{idx} · HTTP {status_code} {detail}"
+    if st in ("success", "already"):
+        log(line)
+    else:
+        err(line)
     return st in ("success", "already"), st, detail
 
 # ────────────────────────────────────────────
@@ -195,30 +136,16 @@ def main():
     cookies = load_cookies()
     total = len(cookies)
 
-    print()
-    print("╔" + "═" * 40 + "╗")
-    title = "Oclean 欧克林商城 · 每日签到"
-    pad = 40 - 2 - len(title)
-    print("║" + (" " * (pad // 2)) + title + (" " * (pad - pad // 2)) + "║")
-    sub = f"共 {total} 个账号"
-    pad2 = 40 - 2 - len(sub)
-    print("║" + (" " * (pad2 // 2)) + sub + (" " * (pad2 - pad2 // 2)) + "║")
-    print("╚" + "═" * 40 + "╝")
-    print()
+    log(f"🚀 Oclean 欧克林商城 每日签到开始 · 共 {total} 个账号")
 
     if not cookies:
-        print("⚠️  青龙环境变量 OCLEAN_COOKIE 未设置")
-        print("   格式: 一行一个 Shop-Member 值")
-        send_notify("Oclean签到 无账号可执行", "⚠️ 青龙环境变量 OCLEAN_COOKIE 未设置")
+        err("🚫 青龙环境变量 OCLEAN_COOKIE 未设置（格式: 一行一个 Shop-Member 值）")
         return
 
     ok_count = 0
     expired_count = 0
-    push_lines = []
-    st_emoji = {"success": "✅", "already": "🟡", "expired": "🔴", "fail": "❌", "异常": "⚠️"}
     for i, ck in enumerate(cookies, start=1):
         ok, st, detail = run_one(i, ck)
-        push_lines.append("账号%d: %s %s" % (i, st_emoji.get(st, "❔"), detail))
         if ok:
             ok_count += 1
         elif st == "expired":
@@ -226,36 +153,10 @@ def main():
         if i < total:
             time.sleep(1)
 
-    # 汇总
-    print("──── Oclean 执行汇总 ────")
-    print("╔" + "═" * 40 + "╗")
-    tail = f"🎉 完成  {ok_count}/{total}"
+    tail = f"🏁 Oclean 执行汇总 · 账号 {total}｜成功 {ok_count}｜失败 {total - ok_count}"
     if expired_count:
-        tail += f"  🔴失效 {expired_count}"
-    pad3 = 40 - 2 - len(tail)
-    print("║" + (" " * max(0, pad3 // 2)) + tail + (" " * max(0, pad3 - pad3 // 2)) + "║")
-    print("╚" + "═" * 40 + "╝")
-    print(f"账号 {total}｜成功 {ok_count}｜失败 {total - ok_count}")
-    print()
-
-    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
-    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    _content = []
-    for _i, _pl in enumerate(push_lines, 1):
-        # _pl 形如 "账号%d: ✅ 签到成功" / "账号%d: 🔴 Cookie 失效"
-        if ": " in _pl:
-            _acct, _rest = _pl.split(": ", 1)
-        else:
-            _acct, _rest = f"账号{_i}", _pl
-        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-        _content.append(f"{_em} [{_acct}]")
-        if _rest.startswith("✅") or _rest.startswith("🟡"):
-            _content.append("✔️ " + _rest[1:].lstrip())
-        elif _rest.startswith("🔴") or _rest.startswith("⚠️") or _rest.startswith("❌"):
-            _content.append("❌ " + _rest[1:].lstrip())
-        else:
-            _content.append(_rest)
-    send_notify("====== Oclean 汇总日志 ======", "\n".join(_content))
+        tail += f"｜🔴 失效 {expired_count}"
+    log(tail)
 
 
 if __name__ == "__main__":

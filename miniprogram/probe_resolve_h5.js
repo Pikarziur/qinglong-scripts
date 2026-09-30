@@ -10,6 +10,29 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+// ==================== 统一日志 ====================
+// 格式：[LEVEL] [H5PROBE] emoji message；行首自带 emoji 时沿用，否则按级别补默认 emoji
+const SRC = 'H5PROBE';
+const _LEVEL_EMOJI = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌' };
+const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
+function _levelOfLine(line) {
+  if (/^(?:\u274C|\uD83D\uDCA5)/.test(line)) return 'ERROR'; // ❌ 💥
+  if (/^\u26A0/.test(line)) return 'WARN';                   // ⚠️
+  return 'INFO';
+}
+function emit(level, text) {
+  const s = String(text === undefined || text === null ? '' : text);
+  for (const raw of s.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const lv = level || _levelOfLine(line);
+    console.log(`[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`);
+  }
+}
+function log(text) { emit(null, text); }
+function warn(text) { emit('WARN', text); }
+function err(text) { emit('ERROR', text); }
+
 const hshjCandidates = [path.join(__dirname, 'hshj.js')];
 try {
   const { execSync } = require('child_process');
@@ -18,7 +41,7 @@ try {
 } catch (e) { /* Windows/非容器环境忽略 */ }
 let HSHJ = hshjCandidates.find(p => { try { return fs.existsSync(p); } catch (e) { return false; } });
 if (!HSHJ) HSHJ = hshjCandidates[0];
-console.log('📂 加载 hshj.js: ' + HSHJ);
+log('📂 加载 hshj.js: ' + HSHJ);
 let src = fs.readFileSync(HSHJ, 'utf8');
 
 // 剥离末尾 main() 自执行副作用，改为导出我们需要的函数
@@ -105,42 +128,42 @@ vm.runInContext(src, sandbox, { filename: 'hshj.js' });
 const mod = sandbox.module.exports;
 
 // ---- 诊断（不联网） ----
-console.log('========== 桥接兜底配置诊断 ==========');
-console.log('注意: ticketCode 来自红包数据包(packet.ticketCode)，脚本并不读取 HSJJ_H5_TICKETCODE 环境变量，无需手动配置');
+log('🔎 桥接兜底配置诊断');
+log('注意: ticketCode 来自红包数据包(packet.ticketCode)，脚本并不读取 HSJJ_H5_TICKETCODE 环境变量，无需手动配置');
 const entries = mod.YYB_ENTRIES || [];
-console.log('YYB_SERVER 已设置           :', !!process.env.YYB_SERVER);
-console.log('YYB_ENTRIES 数量           :', entries.length);
-console.log('  账号 ref 列表            :', entries.map(e => e.ref).join(', ') || '(空)');
-console.log('AUTO_CLAIM_H5_RED_PACKET   :', process.env.AUTO_CLAIM_H5_RED_PACKET !== '0', '(默认开，控制是否走桥接)');
-console.log('HSJJ_MKTZB_OPENID 已设置   :', !!process.env.HSJJ_MKTZB_OPENID, '(写死会全局串号，不建议)');
+log('YYB_SERVER 已设置         : ' + !!process.env.YYB_SERVER);
+log('YYB_ENTRIES 数量          : ' + entries.length);
+log('账号 ref 列表             : ' + (entries.map(e => e.ref).join(', ') || '(空)'));
+log('AUTO_CLAIM_H5_RED_PACKET  : ' + (process.env.AUTO_CLAIM_H5_RED_PACKET !== '0') + ' (默认开，控制是否走桥接)');
+log('HSJJ_MKTZB_OPENID 已设置  : ' + !!process.env.HSJJ_MKTZB_OPENID + ' (写死会全局串号，不建议)');
 
 const prereqOk = entries.length > 0;
-console.log('----------------------------------------');
-console.log('硬前提是否满足（可进入桥接）:', prereqOk ? '✅ 满足（另需：该微信已授权mktzb公众号 + YYB在线）' : '❌ 不满足——YYB_SERVER 未配/为空');
+const prereqText = '硬前提是否满足（可进入桥接）: ' + (prereqOk ? '✅ 满足（另需：该微信已授权mktzb公众号 + YYB在线）' : '❌ 不满足——YYB_SERVER 未配/为空');
+(prereqOk ? log : err)(prereqText);
 
 const diagOnly = process.env.PROBE_DIAG_ONLY === '1';
 if (diagOnly) {
-  console.log('\n（PROBE_DIAG_ONLY=1：仅做配置诊断，未跑联网实测）');
+  log('（PROBE_DIAG_ONLY=1：仅做配置诊断，未跑联网实测）');
   process.exit(0);
 }
-console.log('\n▶ 默认联网实测 resolveH5Openid（仅看诊断请设 PROBE_DIAG_ONLY=1）...');
+log('▶ 默认联网实测 resolveH5Openid（仅看诊断请设 PROBE_DIAG_ONLY=1）...');
 
 // ---- 联网实测（--live） ----
 (async () => {
-  console.log('\n========== 联网实测 resolveH5Openid ==========');
+  log('🚀 联网实测 resolveH5Openid');
   // ticketCode 在这里仅用作 OAuth state/prjCode 以触发桥接链路；用任一有效的 mktzb 活动码即可（默认取之前抓包里的 WV4OZBUWGP202609）
   const testCode = process.env.HSJJ_H5_PRJCODE || 'WV4OZBUWGP202609';
   for (const e of entries) {
     const ref = String(e.ref).split('#')[0].trim();
-    console.log(`\n[账号 ${ref}] 调用 resolveH5Openid(testCode=${testCode}) ...`);
+    log(`[账号 ${ref}] 调用 resolveH5Openid(testCode=${testCode}) ...`);
     try {
       // 真实签名: resolveH5Openid(wxid, ticketCode, cache, cacheKey)
       const o = await mod.resolveH5Openid(ref, testCode, null, null);
-      if (o) console.log(`  ✅ 成功拿到 openid: ${o.substring(0, 8)}*** (完整: ${o})`);
-      else console.log('  ⚠️ 未拿到 openid（返回空）——检查 YYB-Go-Enhanced 是否在线 / 该微信是否登录并授权 mktzb 公众号 / WX_ID 对应微信是否已在 YYB 登录');
-    } catch (err) {
-      console.log('  ❌ 调用异常:', err.message);
+      if (o) log(`✅ 成功拿到 openid: ${o.substring(0, 8)}*** (完整: ${o})`);
+      else warn('未拿到 openid（返回空）——检查 YYB-Go-Enhanced 是否在线 / 该微信是否登录并授权 mktzb 公众号 / WX_ID 对应微信是否已在 YYB 登录');
+    } catch (error) {
+      err('调用异常: ' + error.message);
     }
   }
-  console.log('\n实测结束。若全部为空/异常，多半是网络不通或 YYB 服务/微信授权问题，与本次代码改动无关。');
+  log('实测结束。若全部为空/异常，多半是网络不通或 YYB 服务/微信授权问题，与本次代码改动无关。');
 })();

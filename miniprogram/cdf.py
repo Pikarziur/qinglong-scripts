@@ -12,13 +12,14 @@
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行 / 空格 / & 分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
-#   CDF_NOTIFY      通知开关，默认开启；填 0/false/off/no 关闭
+#
+# 日志规范：[LEVEL] [CDF] message   （LEVEL: INFO / WARN / ERROR）
 #
 # =========================================================
 
 YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
-import os, re, sys, time, random, traceback, json
+import os, re, time, random, traceback, json
 import requests
 
 # ============== 新手配置区 ==============
@@ -36,77 +37,13 @@ LOGIN_URL       = "https://" + HOST + "/api/session/wxSession/v2"
 SIGN_URL        = "https://" + HOST + "/api/user/sign"
 SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
 
-# ———————————— 通知推送（只推精简摘要）————————————
-# 开关：默认开启，填 0/false/off/no 可关闭
-NOTIFY = (os.getenv("CDF_NOTIFY", "1") or "1").strip().lower() not in ("0", "false", "off", "no")
+# ———————————— 统一日志 ————————————
+def _emit(level, msg):
+    print(f"[{level}] [CDF] {msg}", flush=True)
 
-# 共享 notify 模块定位：仓库根目录放一份 notify.py，全部脚本共用（不再各目录放副本）
-# 兼容旧布局：脚本同目录若已有 notify.py（老版本自愈下载留下的），优先用它
-_NOTIFY_DIR = os.path.dirname(os.path.abspath(__file__))
-if not os.path.exists(os.path.join(_NOTIFY_DIR, "notify.py")):
-    _NOTIFY_DIR = os.path.dirname(_NOTIFY_DIR)   # 脚本同目录没有 → 用仓库根那份
-if _NOTIFY_DIR not in sys.path:
-    sys.path.insert(0, _NOTIFY_DIR)
-
-
-def _ensure_notify():
-    """确保共享的 notify.py 就位（缺失时从 CDN 自愈下载，订阅更新/容器重建后不用手动补）。"""
-    try:
-        import notify  # noqa: F401
-        return True
-    except Exception:
-        pass
-    target = os.path.join(_NOTIFY_DIR, "notify.py")
-    for _url in ("https://cdn.jsdelivr.net/gh/whyour/qinglong@develop/sample/notify.py",
-                 "https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py",
-                 "https://ghproxy.net/https://raw.githubusercontent.com/whyour/qinglong/refs/heads/develop/sample/notify.py"):
-        try:
-            _r = requests.get(_url, timeout=15)
-            if _r.status_code == 200 and "def send" in _r.text:
-                with open(target, "wb") as _f:
-                    _f.write(_r.content)
-                log("已自愈下载 notify.py（" + _url.split("/")[2] + "）")
-                return True
-        except Exception as _e:
-            log("notify.py 下载失败（" + _url.split("/")[2] + "）: " + str(_e))
-    return False
-
-
-def send_notify(title, content):
-    """推送到青龙面板配置的通知渠道；失败只打日志，不影响脚本退出状态。"""
-    if not NOTIFY:
-        return
-    try:
-        if not _ensure_notify():
-            log("未安装 notify.py，跳过推送")
-            return
-        from notify import send as _notify_send
-        if len(content) > 3000:
-            content = content[:3000] + "...(内容过长已截断)"
-        _notify_send(title, content)
-    except ImportError:
-        log("未安装 notify.py，跳过推送")
-    except Exception as e:
-        log("推送失败: " + str(e))
-
-
-# ———————————— 美化小工具 ————————————
-_BAR = "─" * 42
-def _box(title, width=40):
-    """打印一个圆角小盒子，包住一行标题"""
-    pad = width - 2 - len(title)
-    print("╭" + _BAR + "╮")
-    if pad >= 0:
-        left = pad // 2
-        right = pad - left
-        print("│" + (" " * left) + title + (" " * right) + "│")
-    else:
-        print("│ " + title + " │")
-    print("╰" + _BAR + "╯")
-
-def log(msg):
-    """普通日志（左边一个小竖点对齐）"""
-    print("· " + msg)
+def log(msg):   _emit("INFO", msg)
+def warn(msg):  _emit("WARN", msg)
+def err(msg):   _emit("ERROR", msg)
 
 def today_str():
     y, m, d = time.localtime()[:3]
@@ -269,12 +206,12 @@ def get_today_done(token):
 
 def ensure_token(server, ref):
     """每次都强制重新取码 + 登录，返回 (token, 状态说明)；失败返回 (None, 原因)。"""
-    code, err = YYBClient(APP_ID).get_code(server, ref)
+    code, err_msg = YYBClient(APP_ID).get_code(server, ref)
     if not code:
-        return None, "YYB取码失败: " + str(err)
-    token, err = login_with_code(code)
+        return None, "YYB取码失败: " + str(err_msg)
+    token, err_msg = login_with_code(code)
     if not token:
-        return None, "登录失败: " + str(err)
+        return None, "登录失败: " + str(err_msg)
     return token, "新登录"
 
 def _status_emoji_and_tag(status):
@@ -286,34 +223,35 @@ def _status_emoji_and_tag(status):
     }.get(status, ("❔", status))
 
 def run_account(server, ref):
-    _box("账号  ref = " + str(ref))
+    log("👤 账号  ref = " + str(ref))
     token, status_msg = ensure_token(server, ref)
     if not token:
-        # 整个账号失败的情况，这里单独美化一行大字 + 错误详情
-        print("│ ❌ 账号不可用")
-        print("│ · 原因: " + str(status_msg))
-        print()
-        return False, "ref " + str(ref) + ": ❌ " + " ".join(str(status_msg).split())[:80]
+        brief = " ".join(str(status_msg).split())[:80]
+        err("❌ 账号不可用 · 原因: " + brief)
+        return False, "ref " + str(ref) + ": ❌ " + brief
     # 登录状态一行简注（每次都是新登录）
-    print("├ 登录态 · " + status_msg)
+    log("🔑 登录态 · " + status_msg)
     t_short, t_long, _ = today_str()
     before, txt = get_today_done(token)
     sym1 = "✅" if before else "⭕"
-    log("签到前 · 今日(" + t_short + ") " + sym1
+    log("📊 签到前 · 今日(" + t_short + ") " + sym1
         + ("  signText=" + str(txt) if txt is not None else ""))
     status, msg, extra = do_sign(token)
     emoji, tag = _status_emoji_and_tag(status)
-    print("│ " + emoji + " " + tag + "  ──  服务端 msg: " + (msg or ""))
-    for line in extra:
-        print("│     🎁 " + line)
+    line = emoji + " " + tag + "  ──  服务端 msg: " + (msg or "")
+    if status in ("成功", "已签"):
+        log(line)
+    else:
+        err(line)
+    for one in extra:
+        log("🎁 " + one)
     after, txt2 = get_today_done(token)
     sym2 = "✅" if after else "⭕"
-    log("签到后 · 今日(" + t_short + ") " + sym2
+    log("📊 签到后 · 今日(" + t_short + ") " + sym2
         + ("  signText=" + str(txt2) if txt2 is not None else ""))
     # 如果之前没签 / 之后签了，加一行 🎉 高亮
     if before is False and after is True:
-        print("│ 🎉 本账号首次签到成功！")
-    print()
+        log("🎉 本账号首次签到成功！")
     return True, "ref " + str(ref) + ": " + emoji + " " + tag
 
 def main():
@@ -323,78 +261,31 @@ def main():
         wanted = set(int(x) for x in YYB_ONLY_REFS if str(x).strip().isdigit() and int(x) > 0)
         if wanted:
             entries = [e for i, e in enumerate(entries, 1) if i in wanted]
-            print("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
+            log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
     total = len(entries)
     tday, _, _ = today_str()
 
-    # ══════════ 顶部标题盒 ══════════
-    print()
-    print("╔" + ("═" * 42) + "╗")
-    title = "中免会员小程序 · 每日签到"
-    pad = 42 - 2 - len(title)
-    print("║" + (" " * (pad // 2)) + title + (" " * (pad - pad // 2)) + "║")
-    sub = "日期 " + tday + "   共 " + str(total) + " 个账号"
-    pad2 = 42 - 2 - len(sub)
-    print("║" + (" " * (pad2 // 2)) + sub + (" " * (pad2 - pad2 // 2)) + "║")
-    print("╚" + ("═" * 42) + "╝")
-    print()
+    log("🚀 中免会员小程序 每日签到开始 · 日期 " + tday + " · 共 " + str(total) + " 个账号")
 
     if not entries:
-        print("⚠️ 没有可执行账号（青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空）")
-        send_notify("中免会员签到 无账号可执行", "⚠️ 青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空")
+        err("🚫 没有可执行账号（青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空）")
         return
 
     success = 0
-    push_lines = []
     for i, (server, ref, _) in enumerate(entries, start=1):
         try:
             ok, line = run_account(server, ref)
-            push_lines.append(line)
             if ok:
                 success += 1
         except Exception as e:
-            print("│ ❌ 账号异常: " + str(e))
-            print(traceback.format_exc())
-            print()
-            push_lines.append("ref " + str(ref) + ": ❌ 账号异常 " + " ".join(str(e).split())[:80])
+            err("💥 账号异常: " + str(e))
+            err(traceback.format_exc())
         if i < total:
             wait = random.randint(3, 8)
             # 不打印休息，避免啰嗦；真卡住了用户能从执行计时看在等
             time.sleep(wait)
 
-    # ══════════ 底部结果盒 ══════════
-    print("──── 中免会员 执行汇总 ────")
-    print("╔" + ("═" * 42) + "╗")
-    ok_rate = str(success) + " / " + str(total)
-    if success == total:
-        tail_title = "🎉 全部完成  " + ok_rate
-    else:
-        tail_title = "📋 执行结束  " + ok_rate
-    pad3 = 42 - 2 - len(tail_title)
-    print("║" + (" " * (pad3 // 2)) + tail_title + (" " * (pad3 - pad3 // 2)) + "║")
-    print("╚" + ("═" * 42) + "╝")
-    print(f"账号 {total}｜成功 {success}｜失败 {total - success}")
-    print()
-
-    # 推送分账号汇总（面向 notify，简洁精要；纯签到无积分，账号行只显示账号）
-    _seq = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    _content = []
-    for _i, _line in enumerate(push_lines, 1):
-        # _line 形如 "ref xxx: ✅ 签到成功" / "ref xxx: ❌ 账号异常 ..."
-        if ": " in _line:
-            _ref, _rest = _line.split(": ", 1)
-            _ref = _ref[4:] if _ref.startswith("ref ") else _ref
-        else:
-            _ref, _rest = "账号" + str(_i), _line
-        _em = _seq[_i - 1] if _i <= len(_seq) else f"{_i}."
-        _content.append(f"{_em} [{_ref}]")
-        if _rest.startswith("✅") or _rest.startswith("⭕"):
-            _content.append("✔️ " + _rest[1:].lstrip())
-        elif _rest.startswith("❌"):
-            _content.append("❌ " + _rest[1:].lstrip())
-        else:
-            _content.append(_rest)
-    send_notify("====== 中免会员 汇总日志 ======", "\n".join(_content))
+    log(f"🏁 中免会员 执行汇总 · 账号 {total}｜成功 {success}｜失败 {total - success}")
 
 if __name__ == "__main__":
     main()
