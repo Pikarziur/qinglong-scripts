@@ -6,16 +6,18 @@
  *   XJB_COOKIE    必填。登录后的 b2_token（JWT），既作 Cookie 也作 Bearer
  *   XJB_NOTIFY    可选，通知开关，默认开启；填 0/false/off/no 关闭
  *
- * 认证说明（必须同时带 Cookie + Bearer，两个都不能少）：
- *   学姐吧 B2 主题 API：
- *   - unread-count 只认 Cookie 或 Bearer（GET）
- *   - userMission   签到接口只认 Bearer
- *   - getUserMission 认 Cookie 或 Bearer（POST form）
- *   所以保险做法是 Cookie + Bearer 双带，本脚本把 XJB_COOKIE 同时用于两者。
+ * 认证说明（B2 主题签到只需 Bearer，参考通用 HAR 模板「通杀B2主题签到」）：
+ *   - 签到接口 userMission、读取接口 getUserMission 均只认 Authorization: Bearer <b2_token>
+ *   - 不要带 Cookie 头：带上 b2_token Cookie 反而会在部分 B2 站点触发会话校验分支，
+ *     返回 403「请先登录」（Bearer 是无状态 JWT 校验，两者逻辑不同）
+ *   所以本脚本只发 Bearer，XJB_COOKIE 的值即 b2_token（JWT）。
  *
- * 🚀 Cookie 获取（登录 xuejieba2026.com 后 F12 → Console 执行，结果会直接打印，确认有数据后手动复制）：
- *   console.log(document.cookie.match(/b2_token=([^;]+)/)?.[1] || '')
- *   把打印出的 JWT 字符串填进 XJB_COOKIE 即可（脚本会同时当作 Cookie 和 Bearer 使用）。
+ * 🚀 Cookie 获取（登录 xuejieba2026.com 后）：
+ *   方式一（推荐，Cookie-Editor 整段串也能直接用）：安装 Cookie-Editor 扩展 → 打开本站已登录页 →
+ *     导出 → 选 Header 格式 → 把整段串（含 b2_token=...）直接填进 XJB_COOKIE，脚本会自动提取 b2_token。
+ *   方式二（控制台取纯 JWT）：F12 → Console 执行（结果会直接打印，确认有数据后手动复制）：
+ *     console.log(document.cookie.match(/b2_token=([^;]+)/)?.[1] || '')
+ *   把得到的 JWT 字符串（eyJ 开头）填进 XJB_COOKIE 即可。
  */
 
 const XJB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.XJB_NOTIFY || '1').trim().toLowerCase());
@@ -27,6 +29,15 @@ function log(msg) {
   console.log(`[${t}] ${msg}`);
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// 从 XJB_COOKIE 提取 b2_token：支持直接填 JWT，也支持填 Cookie-Editor 导出的整段 cookie 串
+function extractB2Token(raw) {
+  raw = (raw || '').trim();
+  if (!raw) return '';
+  const m = raw.match(/b2_token=([^;]+)/);
+  if (m) return m[1].trim();
+  return raw;
+}
 
 // 解码 JWT，提取用户信息（仅用于展示，不做自动登录）
 function parseJWT(token) {
@@ -44,10 +55,9 @@ function parseJWT(token) {
   } catch (_) { return null; }
 }
 
-// 构造双认证 headers（Cookie + Bearer 都带）
+// 构造认证 headers（只带 Bearer，不带 Cookie —— 见顶部认证说明）
 function buildHeaders(token, contentType = null) {
   const h = {
-    'Cookie': `b2_token=${token}`,
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/json, text/plain, */*',
     'User-Agent': UA,
@@ -201,9 +211,9 @@ async function main() {
   console.log(`📅 ${new Date().toLocaleString('zh-CN')}`);
   console.log('='.repeat(42));
 
-  const token = (process.env.XJB_COOKIE || '').trim();
+  const token = extractB2Token(process.env.XJB_COOKIE);
   if (!token) {
-    console.log('❌ 未配置 Cookie（请设置环境变量 XJB_COOKIE，值为登录后的 b2_token）');
+    console.log('❌ 未配置 Cookie（请设置环境变量 XJB_COOKIE，值为登录后的 b2_token；也可直接填 Cookie-Editor 导出的整段串）');
     process.exit(1);
   }
 
