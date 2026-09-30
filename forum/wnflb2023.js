@@ -15,6 +15,7 @@
 //   WNFLB_COOKIE_CACHE 可选。Cookie 缓存文件路径，默认 /ql/data/wnflb2023.cookie（青龙持久目录，订阅更新不受影响；可覆盖）
 //   WNFLB_NOTIFY        通知开关，默认开启；填 0/false/off/no 关闭
 //   WNFLB_EXPIRE        可选，Cookie 预期过期日，如 2026-10-15。设了会提前3天提醒
+//   MY_PROXY           可选。HTTP 代理地址，如 http://192.168.31.233:7890；福利吧等站点若需代理才能出网请配置，未配则直连
 //   WNFLB_ACCOUNT      账号密码（推荐必填）。单变量存放「账号#密码」或「账号:密码」：
 //                         配了即启用「登录兜底 + Cookie 缓存」，首次/失效时自动登录并把 Cookie 写缓存文件；
 //                         不配则需本地已有缓存文件（.wnflb2023.cookie），否则报错
@@ -37,6 +38,7 @@
 
 const https = require('https');
 const http = require('http');
+const tls = require('tls');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
@@ -120,32 +122,77 @@ function checkCookieExpire(expireStr) {
   return true;
 }
 
+// 可选代理（MY_PROXY）：默认直连；配了则通过 HTTP CONNECT 隧道转发（零依赖实现）
+function getProxySocket(u) {
+    const proxy = process.env.MY_PROXY;
+    if (!proxy) return Promise.resolve(null);
+    const pu = new URL(proxy);
+    const targetPort = u.port || (u.protocol === 'https:' ? 443 : 80);
+    return new Promise((resolve, reject) => {
+        const creq = http.request({
+            host: pu.hostname,
+            port: pu.port || 80,
+            method: 'CONNECT',
+            path: `${u.hostname}:${targetPort}`,
+            timeout: 15000
+        });
+        creq.on('connect', (res, socket) => {
+            if (res.statusCode !== 200) {
+                socket.destroy();
+                reject(new Error('代理 CONNECT 失败: ' + res.statusCode));
+                return;
+            }
+            if (u.protocol === 'https:') {
+                const tlsSock = tls.connect({ socket, servername: u.hostname }, () => resolve(tlsSock));
+                tlsSock.on('error', reject);
+            } else {
+                resolve(socket);
+            }
+        });
+        creq.on('error', reject);
+        creq.on('timeout', () => { creq.destroy(); reject(new Error('代理连接超时')); });
+        creq.end();
+    });
+}
+
 function request(url, options = {}) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
         const lib = u.protocol === 'https:' ? https : http;
-        const opts = {
-            hostname: u.hostname,
-            port: u.port || (u.protocol === 'https:' ? 443 : 80),
-            path: u.pathname + u.search,
-            method: options.method || 'GET',
-            headers: Object.assign({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Language': 'zh-CN,zh;q=0.9',
-                'Referer': SITE + '/',
-                'Cookie': COOKIE
-            }, options.headers || {})
-        };
-        const req = lib.request(opts, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
-        });
-        req.on('error', reject);
-        req.setTimeout(15000, () => { req.destroy(); reject(new Error('请求超时')); });
-        if (options.body) req.write(options.body);
-        req.end();
+        const headers = Object.assign({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Referer': SITE + '/',
+            'Cookie': COOKIE
+        }, options.headers || {});
+        getProxySocket(u).then((conn) => {
+            const opts = {
+                method: options.method || 'GET',
+                path: u.pathname + u.search,
+                headers,
+                timeout: 15000
+            };
+            if (conn) {
+                // 走代理隧道：复用已建立的 socket
+                opts.host = u.hostname;
+                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
+                opts.socket = conn;
+                opts.agent = false;
+            } else {
+                opts.hostname = u.hostname;
+                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
+            }
+            const req = lib.request(opts, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+            });
+            req.on('error', reject);
+            req.setTimeout(15000, () => { req.destroy(); reject(new Error('请求超时')); });
+            if (options.body) req.write(options.body);
+            req.end();
+        }).catch(reject);
     });
 }
 
@@ -182,7 +229,8 @@ async function loginAndGetCookie(user, pass) {
         log('⚠️ 登录失败（账号密码错误或需验证码）');
         return null;
     } catch (e) {
-        log('⚠️ 登录异常: ' + (e.message || e));
+        const tip = process.env.MY_PROXY ? '' : '（若站点需代理才能出网，请配置 MY_PROXY）';
+        log('⚠️ 登录异常: ' + (e.message || e) + tip);
         return null;
     }
 }
@@ -212,7 +260,7 @@ async function main() {
         const nc = await loginAndGetCookie(USER, PASS);
         if (nc) { COOKIE = nc; saveCachedCookie(nc); }
     }
-    if (!COOKIE) { slog('未配置 Cookie（且无账号密码兜底）'); return; }
+    if (!COOKIE) { slog('无法获取 Cookie（请确认已配置 WNFLB_ACCOUNT，且容器网络/代理可访问站点）'); return; }
     if (!getCookieVal('S5r8_2132_auth', COOKIE)) { slog('Cookie 缺少 S5r8_2132_auth'); return; }
   checkCookieExpire(process.env.WNFLB_EXPIRE); // 手动过期日检测（不阻断，只提醒）
 
