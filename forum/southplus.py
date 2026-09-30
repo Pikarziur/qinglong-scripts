@@ -8,42 +8,42 @@
 南+论坛 (bbs.south-plus.org) 日常任务脚本
 论坛架构：phpwind (PW)
 ============================================================================
-基于用户提供的 HAR 逆向，关键请求（均已实锤对应 HAR 条目）：
+基于用户提供的 HAR 逆向，关键请求：
 
-  1. 验证码  GET  /ck.php?nowtime=<ms>
-             -> 返回验证码图片（~15KB），用 ddddocr 识别出 gdcode
-  2. 登录    POST /login.php?
-             body: lgt=2&pwuser=<邮箱>&pwpwd=<密码>&gdcode=<识别码>
-                   &hideid=0&forward=<跳回地址>&jumpurl=<跳回地址>
-                   &step=2&cktime=31536000
-             -> 成功时返回 <meta http-equiv="refresh" ...> 跳转页
-  3. 任务页  GET  /plugin.php?H_name-tasks.html
+  1. 任务页  GET  /plugin.php?H_name-tasks.html
              -> 页面 JS 含 var verifyhash = '82511105';（任务接口所需的 verify）
-  4. 领任务  GET  /plugin.php?H_name=tasks&action=ajax&actions=job&cid=15
+  2. 领任务  GET  /plugin.php?H_name=tasks&action=ajax&actions=job&cid=15
                    &nowtime=<ms>&verify=<verifyhash>
-             -> <ajax><![CDATA[success 已经申请[日常]完成,请赶紧去完成任务吧!]]></ajax>
-  5. 领奖励  GET  /plugin.php?H_name=tasks&action=ajax&actions=job2&cid=15
+  3. 领奖励  GET  /plugin.php?H_name=tasks&action=ajax&actions=job2&cid=15
                    &nowtime=<ms>&verify=<verifyhash>
-             -> <ajax><![CDATA[success 你[日常]已经完成! 15]]></ajax>
 
 注：日常任务 cid 在 HAR 中实证为 15（"已申请[日常]"），如需适配其他任务改 CID 即可。
-    日常任务为"每日登录"类，登录即完成，故 job 之后可直接 job2，无需中间手动动作。
+    日常任务为"每日登录"类，登录即完成，故 job 之后可直接 job2。
 
 环境变量：
-  SOUTHPLUS_ACCOUNT       必填(推荐)。格式 邮箱#密码，如 your@mail.com#yourpass
-  MY_PROXY                必填。请求代理，如 http://127.0.0.1:7890
-                         南+ 不代理无法访问，未配置将直接报错退出
-  SOUTHPLUS_COOKIE_CACHE  可选。Cookie 缓存文件路径，默认 /ql/data/southplus.cookies
-                         （青龙持久目录，订阅更新不受影响；可覆盖）
-  SOUTHPLUS_NOTIFY       可选。通知开关，默认开启；填 0/false/off/no 关闭
+  SOUTHPLUS_COOKIE       必填。登录后的 Cookie 字符串（从浏览器复制，含 PW 相关字段）
+  MY_PROXY              必填。请求代理，如 http://127.0.0.1:7890
+                       南+ 不代理无法访问，未配置将直接报错退出
+  SOUTHPLUS_NOTIFY      可选。通知开关，默认开启；填 0/false/off/no 关闭
 
-依赖：requests、ddddocr（pip install ddddocr）
+依赖：requests（pip install requests）
+
+🚀 Cookie 获取（登录 bbs.south-plus.org 后）：
+    方式一：F12 → Application → Cookies → 选中站点，手动把全部 Cookie 的 "名称=值"
+            拼成 "k=v; k2=v2; ..." 形式
+    方式二（推荐，避开 HttpOnly 限制）：F12 → Network → 任意已登录请求 →
+            右键 Copy → Copy as cURL，再从其中 -H 'Cookie: ...' 取出整段 Cookie 字符串
+    方式三（最省事，但仅当关键登录字段非 HttpOnly 时可用）：
+        控制台执行：console.log(document.cookie)
+        结果会直接打印，确认有数据后手动复制（document.cookie 已是 "k=v; k2=v2" 格式）
+        注意：phpwind 常把登录态（如 winduser）设为 HttpOnly，document.cookie 读不到
+              该字段会导致打印结果缺字段/登录失败，此时请退回方式二 Copy as cURL 拿完整 Cookie。
+    把复制到的字符串填进 SOUTHPLUS_COOKIE 即可。
 ============================================================================
 """
 
 import os
 import sys
-import json
 import time
 import random
 import requests
@@ -53,8 +53,6 @@ CID = 15  # 日常任务 cid（HAR 实证）
 TASK_PAGE = SITE + "/plugin.php?H_name-tasks.html"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
-
-CACHE = os.environ.get("SOUTHPLUS_COOKIE_CACHE") or "/ql/data/southplus.cookies"
 
 
 def notify_enabled():
@@ -79,52 +77,16 @@ def slog(msg):
             pass
 
 
-# ---------- 缓存 Cookie（requests cookie jar <-> json） ----------
-def load_cookies(path):
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("cookies", {})
-    except Exception:
-        pass
-    return {}
-
-
-def save_cookies(path, cookiejar):
-    try:
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        d2 = {"cookies": dict(cookiejar)}
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(d2, f)
-        try:
-            os.chmod(path, 0o600)
-        except Exception:
-            pass
-        log("💾 已把登录 Cookie 缓存到本地文件")
-    except Exception as e:
-        log("⚠️ Cookie 缓存写入失败: " + str(e))
-
-
-# ---------- ddddocr 延迟初始化 ----------
-_OCR = None
-
-
-def get_ocr():
-    global _OCR
-    if _OCR is None:
-        try:
-            import ddddocr
-            _OCR = ddddocr.DdddOcr(show_ad=False)
-        except ImportError:
-            slog("未安装 ddddocr，请先 pip install ddddocr")
-            sys.exit(1)
-        except Exception as e:
-            slog("ddddocr 初始化失败: " + str(e))
-            sys.exit(1)
-    return _OCR
+def parse_cookie_string(s):
+    """把 'k=v; k2=v2' 形式的 Cookie 字符串解析为 dict"""
+    d = {}
+    for part in s.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        d[k.strip()] = v.strip()
+    return d
 
 
 # ---------- 会话 ----------
@@ -165,52 +127,6 @@ def extract_verifyhash(html):
     return html[q1 + 1:q2]
 
 
-# ---------- 登录（带验证码识别重试） ----------
-def login(session, user, pwd, max_try=6):
-    # 先访问一个普通页面初始化会话（贴合 HAR 中 thread.php 前置访问）
-    try:
-        session.get(SITE + "/thread.php?fid-9.html", timeout=30)
-    except Exception:
-        pass
-
-    ocr = get_ocr()
-    for attempt in range(1, max_try + 1):
-        try:
-            # 取验证码图片（每次重新生成）
-            ck_url = SITE + "/ck.php?nowtime=" + str(int(time.time() * 1000))
-            img = session.get(ck_url, timeout=30).content
-            code = ocr.classification(img).strip()
-            log(f"   验证码识别(第{attempt}次): {code}")
-
-            data = {
-                "lgt": "2",
-                "pwuser": user,
-                "pwpwd": pwd,
-                "gdcode": code,
-                "hideid": "0",
-                "forward": SITE + "/thread.php?fid-9.html",
-                "jumpurl": SITE + "/thread.php?fid-9.html",
-                "step": "2",
-                "cktime": "31536000",
-            }
-            r = session.post(SITE + "/login.php?", data=data,
-                             allow_redirects=False, timeout=30)
-            html = r.text
-            # 登录成功：phpwind 返回 <meta http-equiv="refresh" ...> 跳转页
-            if "refresh" in html:
-                return True
-            if "验证码" in html:
-                log(f"   验证码识别错误，重试")
-                continue
-            if "用户名或密码" in html or "密码错误" in html:
-                log(f"   账号或密码错误，停止重试")
-                return False
-            log(f"   登录失败(第{attempt}次)，重试")
-        except Exception as e:
-            log(f"   登录异常(第{attempt}次): {e}")
-    return False
-
-
 # ---------- 领任务 / 领奖励 ----------
 def call_task_api(session, action, verify):
     url = (SITE + "/plugin.php?H_name=tasks&action=ajax"
@@ -240,11 +156,10 @@ def do_job2(session, verify):
 def main():
     log("🚀 南+论坛日常任务脚本")
 
-    acc = (os.environ.get("SOUTHPLUS_ACCOUNT") or "").strip()
-    if not acc or "#" not in acc:
-        slog("未配置 SOUTHPLUS_ACCOUNT（格式：邮箱#密码）")
+    cookie = (os.environ.get("SOUTHPLUS_COOKIE") or "").strip()
+    if not cookie:
+        slog("未配置 SOUTHPLUS_COOKIE（请设置环境变量为登录后的 Cookie 字符串）")
         return
-    user, pwd = acc.split("#", 1)
 
     proxy = (os.environ.get("MY_PROXY") or "").strip()
     if not proxy:
@@ -253,8 +168,9 @@ def main():
 
     session = build_session(proxy)
 
-    # 载入缓存 Cookie
-    session.cookies.update(load_cookies(CACHE))
+    # 载入 Cookie（绑定站点 domain）
+    for k, v in parse_cookie_string(cookie).items():
+        session.cookies.set(k, v, domain=".south-plus.org")
 
     # 检查登录态
     try:
@@ -263,19 +179,10 @@ def main():
         slog("访问任务页失败（代理/网络异常）: " + str(e))
         return
 
-    if is_logged_in(html):
-        log("✅ 使用缓存 Cookie，已处于登录态")
-    else:
-        log("🔑 缓存无效，开始账号密码登录（含验证码识别）...")
-        if not login(session, user, pwd):
-            slog("登录失败：验证码多次识别错误或账号密码有误，请检查 SOUTHPLUS_ACCOUNT")
-            return
-        save_cookies(CACHE, session.cookies)
-        log("✅ 登录成功")
-        try:
-            html = fetch_tasks_page(session)
-        except Exception:
-            pass
+    if not is_logged_in(html):
+        slog("Cookie 未登录或已失效，请更新 SOUTHPLUS_COOKIE")
+        return
+    log("✅ 使用 SOUTHPLUS_COOKIE，已处于登录态")
 
     verify = extract_verifyhash(html)
     if not verify:

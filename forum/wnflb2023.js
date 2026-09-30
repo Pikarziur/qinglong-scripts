@@ -1,69 +1,43 @@
-
 /*
 # name:福利吧 - 签到
 # cron: 10 0,12 * * *
 */
 
-
 // ────────────────────────────────────────────
 // 任务流程：
-//   1. 获取 Cookie：本地缓存文件为主；缓存缺失/过期时用账号密码登录自动获取并写缓存
+//   1. 从环境变量读取 Cookie（WNFLB_COOKIE / 旧 wnflb2023_cookie）
 //   2. 访问论坛首页，正则提取签到所需的 formhash
 //   3. 请求 fx_checkin 签到接口完成每日签到
-//   4. 根据响应 / Set-Cookie 判断成功 / 已签 / Cookie 过期，输出汇总并通知
+//   4. 根据响应判断成功 / 已签 / Cookie 过期，输出汇总并通知
 // 可控参数：
-//   WNFLB_COOKIE_CACHE 可选。Cookie 缓存文件路径，默认 /ql/data/wnflb2023.cookie（青龙持久目录，订阅更新不受影响；可覆盖）
+//   WNFLB_COOKIE         必填。直接给 Cookie 字符串（含 Discuz 字段 S5r8_2132_auth; S5r8_2132_saltkey）
 //   WNFLB_NOTIFY        通知开关，默认开启；填 0/false/off/no 关闭
 //   WNFLB_EXPIRE        可选，Cookie 预期过期日，如 2026-10-15。设了会提前3天提醒
-//   MY_PROXY           可选。HTTP 代理地址，如 http://192.168.31.233:7890；福利吧等站点若需代理才能出网请配置，未配则直连
-//   WNFLB_ACCOUNT      账号密码（推荐必填）。单变量存放「账号#密码」或「账号:密码」：
-//                         配了即启用「登录兜底 + Cookie 缓存」，首次/失效时自动登录并把 Cookie 写缓存文件；
-//                         不配则需本地已有缓存文件（.wnflb2023.cookie），否则报错
 //
-// 🚀 Cookie 一键获取（登录 www.wnflb2023.com 后 F12 → Console 执行）：
+// 🚀 Cookie 获取（登录 www.wnflb2023.com 后）：
+//   重要：本站 S5r8_2132_auth / S5r8_2132_saltkey 为 HttpOnly，document.cookie 读不到
+//         （console 里 document.cookie.indexOf('S5r8_2132_auth') 会返回 -1，属正常），
+//         所以下面控制台命令拿不全，请用「方式一」从 Network 拿完整 Cookie。
 //
-//   // 方法 A: 复制全部 Cookie（包含所有 Discuz 字段）
-//   copy(document.cookie)
+//   方式一（推荐，避开 HttpOnly 限制）：
+//     F12 → 网络(Network) → 刷新页面 → 点第一个请求(本页文档) → 标头 → 请求标头 → 复制 Cookie: 整行值
+//     或右键该请求 → 复制 → 作为 cURL 复制，再从 -H 'Cookie: ...' 取出整段，填进 WNFLB_COOKIE。
 //
-//   // 方法 B: 只复制关键登录字段（更干净，推荐）
-//   copy(['S5r8_2132_auth','S5r8_2132_saltkey'].map(k=>k+'='+document.cookie.match(new RegExp(k+'=([^;]+)'))?.[1]).join('; '))
+//   方式二（仅当字段非 HttpOnly 时可用，本站不适用，保留作参考）：
+//     console.log(['S5r8_2132_auth','S5r8_2132_saltkey'].map(k=>{const m=document.cookie.match(new RegExp(k+'=([^;]+)'));return m?k+'='+m[1]:null;}).filter(Boolean).join('; '))
 //
-//   // 方法 C: Application 面板 → Cookies → www.wnflb2023.com → 全选 Value 列合并
-//
-// Discuz 论坛 Cookie 说明：
-//   - S5r8_2132_auth    登录凭证（必须）
-//   - S5r8_2132_saltkey 盐值（必须）
-//   - 前缀 S5r8_2132 是站点唯一标识，不同 Discuz 站点前缀不同
+// Discuz Cookie 说明：
+//   - S5r8_2132_auth    登录凭证（必须，HttpOnly）
+//   - S5r8_2132_saltkey 盐值（必须，HttpOnly）
 // ────────────────────────────────────────────
 
 const https = require('https');
-const http = require('http');
-const net = require('net');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
 
-// ========== 配置 ==========
-const DEFAULT_COOKIE = ''; // 不使用环境变量时粘贴到这里
-// =========================
-
-let COOKIE = DEFAULT_COOKIE; // Cookie 不再从环境变量读取，改为「本地缓存文件 → 账号密码登录」自动管理
+let COOKIE = ''; // 仅从环境变量读取
 const SITE = 'https://www.wnflb2023.com';
-
-// Cookie 缓存：登录获取到的新 Cookie 落盘，仅 Cookie 失效时才重新账号密码登录
-const COOKIE_CACHE = process.env.WNFLB_COOKIE_CACHE || '/ql/data/wnflb2023.cookie';
-function loadCachedCookie() {
-    try { if (fs.existsSync(COOKIE_CACHE)) return fs.readFileSync(COOKIE_CACHE, 'utf8').trim(); } catch (e) {}
-    return '';
-}
-function saveCachedCookie(c) {
-    if (!c) return;
-    try {
-        fs.mkdirSync(path.dirname(COOKIE_CACHE), { recursive: true });
-        fs.writeFileSync(COOKIE_CACHE, c, { mode: 0o600 }); log('💾 已把新 Cookie 缓存到本地文件');
-    }
-    catch (e) { log('⚠️ Cookie 缓存写入失败: ' + (e.message || e)); }
-}
 
 // ========== 青龙通知（共享仓库根 notify.js，缺失时 CDN 回退；WNFLB_NOTIFY=0 关闭）==========
 const WNFLB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.WNFLB_NOTIFY || '1').trim().toLowerCase());
@@ -98,7 +72,6 @@ async function sendQingLongNotify(title, content) {
 
 function log(msg) { console.log(`[WN签到] ${msg}`); }
 
-// 手动过期日检测（Discuz Cookie 无内置 exp，需用户手动配 WNFLB_EXPIRE）
 function checkCookieExpire(expireStr) {
   if (!expireStr) {
     log('📅 未配置 WNFLB_EXPIRE，仅在线检测生效（设 YYYY-MM-DD 开启日期提醒）');
@@ -114,99 +87,49 @@ function checkCookieExpire(expireStr) {
   log(`📅 Cookie ${status} | 过期: ${expireStr}`);
   if (remainDays < 0) {
     log('❌ Cookie 已过期，请重新登录抓取！');
-    return false;
-  }
-  if (remainDays <= 3) {
+  } else if (remainDays <= 3) {
     log(`🔔 Cookie 即将过期（${remainDays}天），建议尽快更新！`);
   }
-  return true;
 }
 
-// 可选代理（MY_PROXY）：默认直连；配了则通过 HTTP CONNECT 隧道转发（零依赖实现）
-// 注意：必须用 net.connect 手动发 CONNECT 并消费掉代理响应头，再把干净的隧道 socket
-// 交给 https.request 在其上自建一次 TLS；直接用 http.request 的 'connect' 事件 socket
-// 会让 https 在其上 TLS 握手挂死（表现为 socket hang up / 请求超时）。
-function getProxySocket(u) {
-    const proxy = process.env.MY_PROXY;
-    if (!proxy) return Promise.resolve(null);
-    const pu = new URL(proxy);
-    const targetPort = u.port || (u.protocol === 'https:' ? 443 : 80);
-    return new Promise((resolve, reject) => {
-        const sock = net.connect(pu.port || 80, pu.hostname, () => {
-            sock.write(`CONNECT ${u.hostname}:${targetPort} HTTP/1.1\r\nHost: ${u.hostname}:${targetPort}\r\n\r\n`);
-        });
-        let buf = '';
-        const onData = (chunk) => {
-            buf += chunk.toString('latin1');
-            const idx = buf.indexOf('\r\n\r\n');
-            if (idx < 0) return; // CONNECT 响应头尚未收全，继续等
-            sock.removeListener('data', onData);
-            const statusLine = buf.split('\r\n')[0];
-            const code = parseInt((statusLine.split(' ')[1] || ''), 10);
-            if (code !== 200) { sock.destroy(); reject(new Error('代理 CONNECT 失败: ' + code)); return; }
-            // 丢弃 CONNECT 响应头；若其后有残留字节（极少），塞回 socket 交给 TLS 层
-            const rest = buf.slice(idx + 4);
-            if (rest.length > 0) sock.unshift(rest);
-            sock.setTimeout(0); // 清掉 connect 阶段的超时，避免误杀后续正常请求
-            resolve(sock);
-        };
-        sock.on('data', onData);
-        sock.on('error', reject);
-        sock.setTimeout(15000, () => { sock.destroy(); reject(new Error('代理连接超时')); });
-    });
-}
-
-// 单次请求（不含重试）：建立隧道（或直连）后发 HTTP/HTTPS 请求
-function requestOnce(url, options, headers) {
+// 单次请求（直连，无代理）：返回 { status, headers, body }
+function requestOnce(url, options = {}) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
-        const lib = u.protocol === 'https:' ? https : http;
-        getProxySocket(u).then((conn) => {
-            const opts = {
-                method: options.method || 'GET',
-                path: u.pathname + u.search,
-                headers,
-                timeout: 20000
-            };
-            if (conn) {
-                // 走代理隧道：复用已建立的 TCP 隧道 socket；https 目标由模块自建一次 TLS
-                opts.host = u.hostname;
-                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
-                opts.socket = conn;
-                opts.agent = false;
-                if (u.protocol === 'https:') opts.servername = u.hostname;
-            } else {
-                opts.hostname = u.hostname;
-                opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
-            }
-            const req = lib.request(opts, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
-            });
-            req.on('error', reject);
-            req.setTimeout(20000, () => { req.destroy(); reject(new Error('请求超时')); });
-            if (options.body) req.write(options.body);
-            req.end();
-        }).catch(reject);
+        const headers = Object.assign({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Referer': SITE + '/',
+            'Cookie': COOKIE
+        }, options.headers || {});
+        const opts = {
+            method: options.method || 'GET',
+            hostname: u.hostname,
+            port: u.port || (u.protocol === 'https:' ? 443 : 80),
+            path: u.pathname + u.search,
+            headers,
+            timeout: 20000
+        };
+        const req = https.request(opts, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+        });
+        req.on('error', reject);
+        req.setTimeout(20000, () => { req.destroy(); reject(new Error('请求超时')); });
+        if (options.body) req.write(options.body);
+        req.end();
     });
 }
 
-// 带重试的请求：代理/网络偶发卡顿时，换新隧道重连（最多 MAX_RETRY 次）
+// 带重试的请求：网络偶发卡顿时重连（最多 MAX_RETRY 次）
 const MAX_RETRY = 3;
 async function request(url, options = {}) {
-    const headers = Object.assign({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Referer': SITE + '/',
-        'Cookie': COOKIE
-    }, options.headers || {});
     let lastErr = null;
     for (let i = 0; i < MAX_RETRY; i++) {
         try {
-            const r = await requestOnce(url, options, headers);
-            return r;
+            return await requestOnce(url, options);
         } catch (e) {
             lastErr = e;
             log(`请求失败（第${i + 1}/${MAX_RETRY}次，重试）: ${e.message}`);
@@ -220,122 +143,55 @@ function getCookieVal(name, cookieStr) {
     return m ? decodeURIComponent(m[1]) : '';
 }
 
-// 账号密码登录兜底：Cookie 失效时调用，返回新 Cookie 字符串或 null
-async function loginAndGetCookie(user, pass) {
-    if (!user || !pass) return null;
-    try {
-        // 1. 匿名访问登录页取 formhash（清空 Cookie 避免带失效态）
-        const loginPage = await request(SITE + '/member.php?mod=logging&action=login', { headers: { 'Cookie': '' } });
-        const lfm = loginPage.body.match(/formhash=([a-f0-9]{8})/);
-        if (!lfm) { log('登录页未找到 formhash'); return null; }
-        const lfh = lfm[1];
-        // 2. POST 登录（该站登录页无验证码，纯账号密码即可）
-        const loginUrl = SITE + '/member.php?mod=logging&action=login&loginsubmit=yes&infloat=yes&lssubmit=yes&inajax=1';
-        const bodyStr = 'formhash=' + lfh + '&username=' + encodeURIComponent(user) + '&password=' + encodeURIComponent(pass) + '&cookietime=2592000&questionid=0&answer=';
-        const r = await request(loginUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': '' },
-            body: bodyStr
-        });
-        // 3. 从 Set-Cookie 提取 auth + saltkey 拼成新 Cookie
-        const sc = r.headers['set-cookie'] || [];
-        const auth = sc.map(c => (c.match(/S5r8_2132_auth=([^;]+)/) || [])[1]).find(Boolean);
-        const saltkey = sc.map(c => (c.match(/S5r8_2132_saltkey=([^;]+)/) || [])[1]).find(Boolean);
-        if (auth && saltkey) {
-            log('🔑 账号密码登录成功，已刷新 Cookie');
-            return 'S5r8_2132_auth=' + auth + '; S5r8_2132_saltkey=' + saltkey;
-        }
-        log('⚠️ 登录失败（账号密码错误或需验证码）');
-        return null;
-    } catch (e) {
-        const tip = process.env.MY_PROXY ? '' : '（若站点需代理才能出网，请配置 MY_PROXY）';
-        log('⚠️ 登录异常: ' + (e.message || e) + tip);
-        return null;
-    }
-}
-
 async function main() {
     const summaryLines = [];
     const slog = (m) => { log(m); summaryLines.push(m); };
     log('========== WN2023 签到 ==========');
 
-    // 账号密码：从单变量 WNFLB_ACCOUNT（账号#密码 / 账号:密码）读取
-    let USER = '';
-    let PASS = '';
-    const ACCOUNT = (process.env.WNFLB_ACCOUNT || '').trim();
-    if (ACCOUNT) {
-        // 以第一个 # 或 : 分割（账号/密码中一般不含这两个字符）
-        const sep = ACCOUNT.indexOf('#') >= 0 ? '#' : (ACCOUNT.indexOf(':') >= 0 ? ':' : '#');
-        const idx = ACCOUNT.indexOf(sep);
-        USER = ACCOUNT.substring(0, idx).trim();
-        PASS = ACCOUNT.substring(idx + 1).trim();
+    // Cookie 仅从环境变量读取（不再有缓存文件 / 账号密码登录 / 代理）
+    COOKIE = (process.env.WNFLB_COOKIE || process.env.wnflb2023_cookie || '').trim();
+    if (!COOKIE) {
+        slog('未配置 Cookie（请设置环境变量 WNFLB_COOKIE）');
+        return;
     }
-
-    // Cookie 来源：本地缓存文件为主；缓存缺失/过期时用账号密码登录获取并缓存；都没有则报错
-    const cached = loadCachedCookie();
-    if (cached) { COOKIE = cached; log('使用本地缓存的 Cookie'); }
-    if (!COOKIE && USER && PASS) {
-        log('无 Cookie 也无缓存，尝试账号密码登录...');
-        const nc = await loginAndGetCookie(USER, PASS);
-        if (nc) { COOKIE = nc; saveCachedCookie(nc); }
-    }
-    if (!COOKIE) { slog('无法获取 Cookie（请确认已配置 WNFLB_ACCOUNT，且容器网络/代理可访问站点）'); return; }
+    log('使用环境变量 Cookie');
     if (!getCookieVal('S5r8_2132_auth', COOKIE)) { slog('Cookie 缺少 S5r8_2132_auth'); return; }
-  checkCookieExpire(process.env.WNFLB_EXPIRE); // 手动过期日检测（不阻断，只提醒）
+    checkCookieExpire(process.env.WNFLB_EXPIRE);
 
-    // 签到执行（Cookie 失效时账号密码兜底重试一次）
+    // 1. 访问首页，拿 formhash
+    log('访问首页...');
+    let resp;
+    try { resp = await request(SITE + '/'); }
+    catch (e) { slog(`请求失败: ${e.message}`); return; }
+
+    const fhMatch = resp.body.match(/formhash=([a-f0-9]{8})/);
+    if (!fhMatch) {
+        slog('未找到 formhash，Cookie 可能已过期，请更新 WNFLB_COOKIE');
+        return;
+    }
+    const formhash = fhMatch[1];
+    log(`formhash: ${formhash}`);
+
+    // 2. 签到（fx_checkin 的 URL 里 formhash 出现两次，注意格式）
+    const signUrl = `${SITE}/plugin.php?id=fx_checkin:checkin&formhash=${formhash}&${formhash}&infloat=yes&handlekey=fx_checkin&inajax=1&ajaxtarget=fwin_content_fx_checkin`;
+    log('发送签到请求...');
+    const signResp = await request(signUrl, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+
+    const body = signResp.body || '';
+    const setCookie = signResp.headers['set-cookie'] || [];
     let signResult = '';
-    let triedRelogin = false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-        // 1. 访问首页，拿 formhash
-        log('访问首页...');
-        let resp;
-        try { resp = await request(SITE + '/'); }
-        catch (e) { slog(`请求失败: ${e.message}`); return; }
-
-        const fhMatch = resp.body.match(/formhash=([a-f0-9]{8})/);
-        if (!fhMatch) {
-            if (USER && PASS && !triedRelogin) {
-                triedRelogin = true;
-                log('Cookie 可能已过期，尝试账号密码重新登录...');
-                const nc = await loginAndGetCookie(USER, PASS);
-                if (nc) { COOKIE = nc; saveCachedCookie(nc); log('✅ 已刷新 Cookie，重试签到'); continue; }
-                slog('Cookie 已过期且登录兜底失败，请检查账号密码'); return;
-            }
-            slog('未找到 formhash，Cookie 可能已过期'); return;
-        }
-        const formhash = fhMatch[1];
-        log(`formhash: ${formhash}`);
-
-        // 2. 签到（fx_checkin 的 URL 里 formhash 出现两次，注意格式）
-        const signUrl = `${SITE}/plugin.php?id=fx_checkin:checkin&formhash=${formhash}&${formhash}&infloat=yes&handlekey=fx_checkin&inajax=1&ajaxtarget=fwin_content_fx_checkin`;
-        log('发送签到请求...');
-        const signResp = await request(signUrl, {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
-        });
-
-        const body = signResp.body || '';
-
-        // 3. 处理响应头里的 Set-Cookie（签到成功会返回 creditnotice/creditbase/creditrule）
-        const setCookie = signResp.headers['set-cookie'] || [];
-        if (setCookie.some(c => c.includes('creditrule'))) {
-            signResult = 'success'; break;
-        } else if (body.includes('成功') || body.includes('每日签到')) {
-            signResult = 'success'; break;
-        } else if (body.includes('已签') || body.includes('重复')) {
-            signResult = 'already'; break;
-        } else if (body.includes('login') || signResp.status === 302) {
-            if (USER && PASS && !triedRelogin) {
-                triedRelogin = true;
-                log('Cookie 已过期，尝试账号密码重新登录后续签...');
-                const nc = await loginAndGetCookie(USER, PASS);
-                if (nc) { COOKIE = nc; saveCachedCookie(nc); log('✅ 已刷新 Cookie，重试签到'); continue; }
-                slog('❌ Cookie 已过期，请重新登录'); return;
-            }
-            slog('❌ Cookie 已过期，请重新登录'); return;
-        } else {
-            slog(`⚠️ 响应片段: ${body.substring(0, 200)}`); return;
-        }
+    if (setCookie.some(c => c.includes('creditrule')) || body.includes('成功') || body.includes('每日签到')) {
+        signResult = 'success';
+    } else if (body.includes('已签') || body.includes('重复')) {
+        signResult = 'already';
+    } else if (body.includes('login') || signResp.status === 302) {
+        slog('❌ Cookie 已过期或未登录，请更新 WNFLB_COOKIE');
+        return;
+    } else {
+        slog(`⚠️ 响应片段: ${body.substring(0, 200)}`);
+        return;
     }
 
     if (signResult === 'success') slog('🎉 签到成功！');
@@ -343,9 +199,6 @@ async function main() {
 
     log('========== 签到结束 ==========');
     const wnOk = summaryLines.some(l => l.includes('签到成功') || l.includes('已签到'));
-    log('──── 福利吧 执行汇总 ────');
-    // 推送分账号汇总（面向 notify，简洁精要；单账号，纯签到无积分）
-    const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
     const summaryContent = [];
     const _lastWn = summaryLines.filter(l => l.trim()).slice(-1)[0] || '';
     if (wnOk) {
@@ -354,7 +207,6 @@ async function main() {
         summaryContent.push('❌ 签到失败' + (_lastWn ? '：' + _lastWn.slice(0, 50) : ''));
     }
     log(summaryContent.join('\n'));
-    log('────────────────────────');
     await sendQingLongNotify('====== 福利吧 汇总日志 ======', summaryContent.join('\n'));
 }
 
