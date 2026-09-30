@@ -15,20 +15,12 @@
 //   WNFLB_EXPIRE        可选，Cookie 预期过期日，如 2026-10-15。设了会提前3天提醒
 //
 // 🚀 Cookie 获取（登录 www.wnflb2023.com 后）：
-//   重要：本站 S5r8_2132_auth / S5r8_2132_saltkey 为 HttpOnly，document.cookie 读不到
-//         （console 里 document.cookie.indexOf('S5r8_2132_auth') 会返回 -1，属正常），
-//         所以下面控制台命令拿不全，请用「方式一」从 Network 拿完整 Cookie。
-//
-//   方式一（推荐，避开 HttpOnly 限制）：
+//   本站 S5r8_2132_auth / S5r8_2132_saltkey 为 HttpOnly，document.cookie 读不到，请从 Network 拿完整 Cookie：
 //     F12 → 网络(Network) → 刷新页面 → 点第一个请求(本页文档) → 标头 → 请求标头 → 复制 Cookie: 整行值
 //     或右键该请求 → 复制 → 作为 cURL 复制，再从 -H 'Cookie: ...' 取出整段，填进 WNFLB_COOKIE。
+//   Discuz Cookie 说明：S5r8_2132_auth 登录凭证（必须，HttpOnly）；S5r8_2132_saltkey 盐值（必须，HttpOnly）
 //
-//   方式二（仅当字段非 HttpOnly 时可用，本站不适用，保留作参考）：
-//     console.log(['S5r8_2132_auth','S5r8_2132_saltkey'].map(k=>{const m=document.cookie.match(new RegExp(k+'=([^;]+)'));return m?k+'='+m[1]:null;}).filter(Boolean).join('; '))
-//
-// Discuz Cookie 说明：
-//   - S5r8_2132_auth    登录凭证（必须，HttpOnly）
-//   - S5r8_2132_saltkey 盐值（必须，HttpOnly）
+// 日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [WNFLB] message   （LEVEL: INFO / WARN / ERROR）
 // ────────────────────────────────────────────
 
 const https = require('https');
@@ -38,6 +30,18 @@ const path = require('path');
 
 let COOKIE = ''; // 仅从环境变量读取
 const SITE = 'https://www.wnflb2023.com';
+
+// ========== 统一日志 ==========
+function fmtTime(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function emit(level, msg) {
+  console.log(`[${fmtTime(new Date())}] [${level}] [WNFLB] ${msg}`);
+}
+function log(msg)  { emit('INFO', msg); }
+function warn(msg) { emit('WARN', msg); }
+function err(msg)  { emit('ERROR', msg); }
 
 // ========== 青龙通知（共享仓库根 notify.js，缺失时 CDN 回退；WNFLB_NOTIFY=0 关闭）==========
 const WNFLB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.WNFLB_NOTIFY || '1').trim().toLowerCase());
@@ -66,29 +70,27 @@ async function sendQingLongNotify(title, content) {
         const notify = await loadWnflbNotify();
         if (!notify) { log('未安装 notify.js，跳过推送'); return; }
         await notify.sendNotify(title, content);
-        log('✅ 通知发送成功');
-    } catch (e) { log('⚠️ 通知发送失败: ' + (e.message || e)); }
+        log('通知发送成功');
+    } catch (e) { warn('通知发送失败: ' + (e.message || e)); }
 }
-
-function log(msg) { console.log(`[WN签到] ${msg}`); }
 
 function checkCookieExpire(expireStr) {
   if (!expireStr) {
-    log('📅 未配置 WNFLB_EXPIRE，仅在线检测生效（设 YYYY-MM-DD 开启日期提醒）');
+    log('未配置 WNFLB_EXPIRE，仅在线检测生效（设 YYYY-MM-DD 开启日期提醒）');
     return;
   }
   const exp = new Date(expireStr + 'T23:59:59');
   if (isNaN(exp.getTime())) {
-    log('⚠️ WNFLB_EXPIRE 格式错误，应为 YYYY-MM-DD');
+    warn('WNFLB_EXPIRE 格式错误，应为 YYYY-MM-DD');
     return;
   }
   const remainDays = Math.ceil((exp - new Date()) / 86400000);
   const status = remainDays >= 0 ? `剩余${remainDays}天` : `已过期${-remainDays}天`;
-  log(`📅 Cookie ${status} | 过期: ${expireStr}`);
+  log(`Cookie ${status} | 过期: ${expireStr}`);
   if (remainDays < 0) {
-    log('❌ Cookie 已过期，请重新登录抓取！');
+    err('Cookie 已过期，请重新登录抓取！');
   } else if (remainDays <= 3) {
-    log(`🔔 Cookie 即将过期（${remainDays}天），建议尽快更新！`);
+    warn(`Cookie 即将过期（${remainDays}天），建议尽快更新！`);
   }
 }
 
@@ -132,7 +134,7 @@ async function request(url, options = {}) {
             return await requestOnce(url, options);
         } catch (e) {
             lastErr = e;
-            log(`请求失败（第${i + 1}/${MAX_RETRY}次，重试）: ${e.message}`);
+            warn(`请求失败（第${i + 1}/${MAX_RETRY}次，重试）: ${e.message}`);
         }
     }
     throw lastErr || new Error('请求失败');
@@ -146,10 +148,11 @@ function getCookieVal(name, cookieStr) {
 
 async function main() {
     const summaryLines = [];
-    const slog = (m) => { log(m); summaryLines.push(m); };
-    log('========== WN2023 签到 ==========');
+    const slog = (m) => { emit('ERROR', m); summaryLines.push(m); };       // 失败项：入汇总 + ERROR
+    const slogOk = (m) => { emit('INFO', m); summaryLines.push(m); };      // 成功项：入汇总 + INFO
+    console.log('========== WN2023 签到 ==========');
 
-    // Cookie 仅从环境变量读取（不再有缓存文件 / 账号密码登录 / 代理）
+    // Cookie 仅从环境变量读取
     COOKIE = (process.env.WNFLB_COOKIE || process.env.wnflb2023_cookie || '').trim();
     if (!COOKIE) {
         slog('未配置 Cookie（请设置环境变量 WNFLB_COOKIE）');
@@ -188,17 +191,17 @@ async function main() {
     } else if (body.includes('已签') || body.includes('重复')) {
         signResult = 'already';
     } else if (body.includes('login') || signResp.status === 302) {
-        slog('❌ Cookie 已过期或未登录，请更新 WNFLB_COOKIE');
+        slog('Cookie 已过期或未登录，请更新 WNFLB_COOKIE');
         return;
     } else {
-        slog(`⚠️ 响应片段: ${body.substring(0, 200)}`);
+        slog(`响应片段: ${body.substring(0, 200)}`);
         return;
     }
 
-    if (signResult === 'success') slog('🎉 签到成功！');
-    else if (signResult === 'already') slog('✅ 今天已签到');
+    if (signResult === 'success') slogOk('签到成功！');
+    else if (signResult === 'already') slogOk('今天已签到');
 
-    log('========== 签到结束 ==========');
+    console.log('========== 签到结束 ==========');
     const wnOk = summaryLines.some(l => l.includes('签到成功') || l.includes('已签到'));
     const summaryContent = [];
     const _lastWn = summaryLines.filter(l => l.trim()).slice(-1)[0] || '';
@@ -211,4 +214,4 @@ async function main() {
     await sendQingLongNotify('====== 福利吧 汇总日志 ======', summaryContent.join('\n'));
 }
 
-main().catch(e => log(`脚本异常: ${e.message}`));
+main().catch(e => err(`脚本异常: ${e.message}`));

@@ -33,13 +33,9 @@
             拼成 "k=v; k2=v2; ..." 形式
     方式二（推荐，避开 HttpOnly 限制）：F12 → Network → 任意已登录请求 →
             右键 Copy → Copy as cURL，再从其中 -H 'Cookie: ...' 取出整段 Cookie 字符串
-    方式三（最省事，但仅当关键登录字段非 HttpOnly 时可用）：
-        控制台执行：console.log(document.cookie)
-        结果会直接打印，确认有数据后手动复制（document.cookie 已是 "k=v; k2=v2" 格式）
-        注意：phpwind 常把登录态（如 winduser）设为 HttpOnly，document.cookie 读不到
-              该字段会导致打印结果缺字段/登录失败，此时请退回方式二 Copy as cURL 拿完整 Cookie。
     把复制到的字符串填进 SOUTHPLUS_COOKIE 即可。
 ============================================================================
+日志规范：[YYYY-MM-DD HH:MM:SS] [LEVEL] [SOUTHPLUS] message   （LEVEL: INFO / WARN / ERROR）
 """
 
 import os
@@ -47,6 +43,7 @@ import sys
 import time
 import random
 import requests
+from datetime import datetime
 
 SITE = "https://bbs.south-plus.org"
 CID = 15  # 日常任务 cid（HAR 实证）
@@ -55,20 +52,26 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
 
 
+# ========== 统一日志 ==========
+def _ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def _emit(level, msg):
+    print(f"[{_ts()}] [{level}] [SOUTHPLUS] {msg}", flush=True)
+
+def log(msg):  _emit("INFO", msg)
+def warn(msg): _emit("WARN", msg)
+def err(msg):  _emit("ERROR", msg)
+
+
 def notify_enabled():
     v = (os.environ.get("SOUTHPLUS_NOTIFY") or "").strip().lower()
     return v not in ("0", "false", "off", "no")
 
 
-def log(msg):
-    print(msg)
-    sys.stdout.flush()
-
-
 def slog(msg):
-    """失败/异常日志（默认也通知）"""
-    print("❌ " + msg)
-    sys.stdout.flush()
+    """失败/异常日志（记录并通知）"""
+    _emit("ERROR", msg)
     if notify_enabled():
         try:
             from notify import send  # 青龙 notify 模块（如有）
@@ -156,37 +159,37 @@ def short_resp(txt):
 
 
 def do_job(session, verify):
-    log("🔧 申请日常任务...")
+    log("申请日常任务...")
     txt = call_task_api(session, "job", verify)
     if "success" in txt:
-        log("   ✅ 申请成功")
+        log("申请成功")
         return "ok"
     # 冷却/已申请：如"上次申请[日常]还没超过 18 小时"= 今日已在冷却期内，
     # 即日常任务今日已完成，无需重复申请（视为成功）
     if "还没超过" in txt:
-        log("   ✅ 日常任务今日已完成（冷却期内，无需重复申请）")
+        log("日常任务今日已完成（冷却期内，无需重复申请）")
         return "done"
-    log("   ⚠️ 申请未成功: " + short_resp(txt))
+    warn("申请未成功: " + short_resp(txt))
     return "fail"
 
 
 def do_job2(session, verify, job_status):
-    log("🎁 领取日常任务奖励...")
+    log("领取日常任务奖励...")
     txt = call_task_api(session, "job2", verify)
     if "success" in txt:
-        log("   ✅ 领奖成功")
+        log("领奖成功")
         return "ok"
     # 若申请已是冷却/已完成态，则领奖返回"未申请任务"属预期（已领过），不算失败
     if job_status == "done" and "未申请任务" in txt:
-        log("   ✅ 奖励今日已领取（无需重复领取）")
+        log("奖励今日已领取（无需重复领取）")
         return "done"
-    log("   ⚠️ 领奖未成功: " + short_resp(txt))
+    warn("领奖未成功: " + short_resp(txt))
     return "fail"
 
 
 # ---------- 主流程 ----------
 def main():
-    log("🚀 南+论坛日常任务脚本")
+    log("南+论坛日常任务脚本")
 
     cookie = (os.environ.get("SOUTHPLUS_COOKIE") or "").strip()
     if not cookie:
@@ -214,13 +217,13 @@ def main():
     if not is_logged_in(html):
         slog("Cookie 未登录或已失效，请更新 SOUTHPLUS_COOKIE")
         return
-    log("✅ 使用 SOUTHPLUS_COOKIE，已处于登录态")
+    log("使用 SOUTHPLUS_COOKIE，已处于登录态")
 
     verify = extract_verifyhash(html)
     if not verify:
         slog("未能从任务页提取 verifyhash，登录态可能异常")
         return
-    log(f"🔖 verifyhash = {verify}")
+    log("verifyhash = " + verify)
 
     j1 = do_job(session, verify)
     time.sleep(random.uniform(1.0, 2.5))
@@ -228,11 +231,11 @@ def main():
 
     if j1 == "done":
         # 申请已是冷却/已完成态 → 今日任务确定已完成，领奖失败也属预期
-        log("🏁 日常任务：今日已完成（无需重复操作）")
+        log("日常任务：今日已完成（无需重复操作）")
     elif j1 == "ok" and j2 in ("ok", "done"):
-        log("🏁 日常任务：申请 + 领奖 成功")
+        log("日常任务：申请 + 领奖 成功")
     elif j1 == "ok" and j2 == "fail":
-        log("⚠️ 任务已申请，但领奖未成功（可能任务尚未完成）")
+        warn("任务已申请，但领奖未成功（可能任务尚未完成）")
     elif j1 == "fail":
         slog("日常任务申请失败，请查看上方响应")
     else:
