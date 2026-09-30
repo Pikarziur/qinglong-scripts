@@ -12,6 +12,11 @@
  *     返回 403「请先登录」（Bearer 是无状态 JWT 校验，两者逻辑不同）
  *   所以本脚本只发 Bearer，XJB_COOKIE 的值即 b2_token（JWT）。
  *
+ * ⚠️ 验证接口坑：/wp-json/b2-me/v1/unread-count 属 b2-me 命名空间，要求 WP 会话 Cookie，
+ *    不认 b2_token JWT，哪怕 JWT 合法也会返回 403 noauth「请先登录」——不能用来验证 token。
+ *    本脚本改用 b2/v1/getUserMission 在线验证（与签到同命名空间、只认 Bearer），
+ *    并以签到接口 userMission 的返回作为最终成败判定。
+ *
  * 🚀 Cookie 获取（登录 xuejieba2026.com 后）：
  *   方式一（推荐，Cookie-Editor 整段串也能直接用）：安装 Cookie-Editor 扩展 → 打开本站已登录页 →
  *     导出 → 选 Header 格式 → 把整段串（含 b2_token=...）直接填进 XJB_COOKIE，脚本会自动提取 b2_token。
@@ -66,24 +71,6 @@ function buildHeaders(token, contentType = null) {
   };
   if (contentType) h['Content-Type'] = contentType;
   return h;
-}
-
-async function apiGet(path, token) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    const resp = await fetch(BASE_URL + path, {
-      method: 'GET',
-      headers: buildHeaders(token),
-      signal: controller.signal,
-    });
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch (_) { data = text; }
-    return { status: resp.status, data };
-  } catch (err) {
-    return { status: 0, error: err.message };
-  } finally { clearTimeout(timer); }
 }
 
 async function apiPost(path, token, body = null, contentType = null) {
@@ -146,8 +133,26 @@ async function doCheckin(token) {
   return false;
 }
 
-// 获取任务状态
-async function getMission(token) {
+// 验证 token 有效性（本地校验结构/过期 + b2/v1 在线确认，无自动登录）
+async function verifyToken(token) {
+  const info = parseJWT(token);
+  if (!info) {
+    log('  ⚠️ Token 格式无效（非合法 JWT，应以 eyJ 开头且含两个"."）。请从 Cookie-Editor 重新复制完整 b2_token');
+    return false;
+  }
+  const now = Date.now() / 1000;
+  const remainDays = info.exp ? Math.floor((info.exp - now) / 86400) : -1;
+  if (info.exp && info.exp < now) {
+    log(`  ❌ Token 已过期 (${info.expDate})，请重新获取 XJB_COOKIE`);
+    return false;
+  }
+  log(`  👤 用户ID: ${info.userId} | 剩余${remainDays}天 | 过期: ${info.expDate}`);
+  if (remainDays >= 0 && remainDays <= 3) {
+    log(`  🔔 Token 即将过期(${remainDays}天)，建议尽快更新！`);
+  }
+
+  // 用正确的 b2/v1 接口在线确认（与签到同命名空间，只认 Bearer）
+  // 注意：b2-me/v1/unread-count 要 WP 会话 Cookie，不能用来验证 b2_token（会 403 noauth）
   const res = await apiPost(
     '/wp-json/b2/v1/getUserMission',
     token,
@@ -156,42 +161,20 @@ async function getMission(token) {
   );
   if (res.status === 200 && res.data?.mission) {
     const m = res.data.mission;
-    log(`  📊 今日签到日期: ${m.date || '未签到'} | 当前积分: ${m.my_credit}`);
-    return true;
-  }
-  return false;
-}
-
-// 验证 token 有效性（纯在线验证，无自动登录）
-async function verifyToken(token) {
-  const info = parseJWT(token);
-  if (!info) {
-    log('  ⚠️ Token 格式无效');
-    return false;
-  }
-  const now = Date.now() / 1000;
-  const remainDays = info.exp ? Math.floor((info.exp - now) / 86400) : -1;
-  if (info.exp && info.exp < now) {
-    log(`  ❌ Token 已过期 (${info.expDate})，请更新 XJB_COOKIE`);
-    return false;
-  }
-  log(`  👤 用户ID: ${info.userId} | 剩余${remainDays}天 | 过期: ${info.expDate}`);
-  if (remainDays >= 0 && remainDays <= 3) {
-    log(`  🔔 Token 即将过期(${remainDays}天)，建议尽快更新！`);
-  }
-
-  // unread-count 接口验证（GET 方法）
-  const res = await apiGet('/wp-json/b2-me/v1/unread-count', token);
-  if (res.status === 200 && res.data?.msg !== undefined) {
-    log(`  ✅ Token 验证通过`);
+    log(`  ✅ Token 验证通过 | 今日签到日期: ${m.date || '未签到'} | 当前积分: ${m.my_credit}`);
     return true;
   }
   if (res.status === 0) {
-    log(`  ⚠️ 验证请求失败: ${res.error}`);
-  } else {
-    log(`  ⚠️ Token 验证失败: ${JSON.stringify(res.data).slice(0, 100)}`);
+    // 网络异常不阻断，交给签到接口最终判定
+    log(`  ⚠️ 验证请求失败(${res.error})，继续尝试签到`);
+    return true;
   }
-  return false;
+  if (res.data?.code === 'noauth' || res.status === 403) {
+    log(`  ❌ Token 被服务端拒绝(noauth)，请重新从 Cookie-Editor 获取 b2_token 填进 XJB_COOKIE`);
+    return false;
+  }
+  log(`  ⚠️ Token 在线验证异常: ${JSON.stringify(res.data).slice(0, 120)}，继续尝试签到`);
+  return true;
 }
 
 // ---------- 单账号入口 ----------
@@ -200,8 +183,6 @@ async function runOne(token) {
   if (!await verifyToken(token)) return false;
   await sleep(500);
   const ok = await doCheckin(token);
-  await sleep(500);
-  await getMission(token);
   return ok;
 }
 
