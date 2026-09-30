@@ -24,7 +24,6 @@
   SOUTHPLUS_COOKIE       必填。登录后的 Cookie 字符串（从浏览器复制，含 PW 相关字段）
   MY_PROXY              必填。请求代理，如 http://127.0.0.1:7890
                        南+ 不代理无法访问，未配置将直接报错退出
-  SOUTHPLUS_NOTIFY      可选。通知开关，默认开启；填 0/false/off/no 关闭
 
 依赖：requests（pip install requests）
 
@@ -39,7 +38,6 @@
 """
 
 import os
-import sys
 import time
 import random
 import requests
@@ -58,22 +56,6 @@ def _emit(level, msg):
 def log(msg):  _emit("INFO", msg)
 def warn(msg): _emit("WARN", msg)
 def err(msg):  _emit("ERROR", msg)
-
-
-def notify_enabled():
-    v = (os.environ.get("SOUTHPLUS_NOTIFY") or "").strip().lower()
-    return v not in ("0", "false", "off", "no")
-
-
-def slog(msg):
-    """失败/异常日志（记录并通知）"""
-    _emit("ERROR", msg)
-    if notify_enabled():
-        try:
-            from notify import send  # 青龙 notify 模块（如有）
-            send("南+任务", msg)
-        except Exception:
-            pass
 
 
 def parse_cookie_string(s):
@@ -155,46 +137,46 @@ def short_resp(txt):
 
 
 def do_job(session, verify):
-    log("申请日常任务...")
+    log("🔧 申请日常任务...")
     txt = call_task_api(session, "job", verify)
     if "success" in txt:
-        log("申请成功")
+        log("✅ 申请成功")
         return "ok"
     # 冷却/已申请：如"上次申请[日常]还没超过 18 小时"= 今日已在冷却期内，
     # 即日常任务今日已完成，无需重复申请（视为成功）
     if "还没超过" in txt:
-        log("日常任务今日已完成（冷却期内，无需重复申请）")
+        log("♻️ 日常任务今日已完成（冷却期内，无需重复申请）")
         return "done"
-    warn("申请未成功: " + short_resp(txt))
+    warn("⚠️ 申请未成功: " + short_resp(txt))
     return "fail"
 
 
 def do_job2(session, verify, job_status):
-    log("领取日常任务奖励...")
+    log("🎁 领取日常任务奖励...")
     txt = call_task_api(session, "job2", verify)
     if "success" in txt:
-        log("领奖成功")
+        log("🎉 领奖成功")
         return "ok"
     # 若申请已是冷却/已完成态，则领奖返回"未申请任务"属预期（已领过），不算失败
     if job_status == "done" and "未申请任务" in txt:
-        log("奖励今日已领取（无需重复领取）")
+        log("✅ 奖励今日已领取（无需重复领取）")
         return "done"
-    warn("领奖未成功: " + short_resp(txt))
+    warn("⚠️ 领奖未成功: " + short_resp(txt))
     return "fail"
 
 
 # ---------- 主流程 ----------
 def main():
-    log("南+论坛 日常任务开始")
+    log("🚀 南+论坛 日常任务开始")
 
     cookie = (os.environ.get("SOUTHPLUS_COOKIE") or "").strip()
     if not cookie:
-        slog("未配置 SOUTHPLUS_COOKIE（请设置环境变量为登录后的 Cookie 字符串）")
+        err("⚠️ 未配置 SOUTHPLUS_COOKIE（请设置环境变量为登录后的 Cookie 字符串）")
         return
 
     proxy = (os.environ.get("MY_PROXY") or "").strip()
     if not proxy:
-        slog("未配置 MY_PROXY，南+ 不代理无法访问，请先配置代理")
+        err("🛡️ 未配置 MY_PROXY，南+ 不代理无法访问，请先配置代理")
         return
 
     session = build_session(proxy)
@@ -207,19 +189,19 @@ def main():
     try:
         html = fetch_tasks_page(session)
     except Exception as e:
-        slog("访问任务页失败（代理/网络异常）: " + str(e))
+        err("❌ 访问任务页失败（代理/网络异常）: " + str(e))
         return
 
     if not is_logged_in(html):
-        slog("Cookie 未登录或已失效，请更新 SOUTHPLUS_COOKIE")
+        err("🚫 Cookie 未登录或已失效，请更新 SOUTHPLUS_COOKIE")
         return
-    log("使用 SOUTHPLUS_COOKIE，已处于登录态")
+    log("🔑 使用 SOUTHPLUS_COOKIE，已处于登录态")
 
     verify = extract_verifyhash(html)
     if not verify:
-        slog("未能从任务页提取 verifyhash，登录态可能异常")
+        err("🚫 未能从任务页提取 verifyhash，登录态可能异常")
         return
-    log("verifyhash = " + verify)
+    log("🔑 verifyhash = " + verify)
 
     j1 = do_job(session, verify)
     time.sleep(random.uniform(1.0, 2.5))
@@ -227,15 +209,15 @@ def main():
 
     if j1 == "done":
         # 申请已是冷却/已完成态 → 今日任务确定已完成，领奖失败也属预期
-        log("日常任务：今日已完成（无需重复操作）")
+        log("✅ 日常任务：今日已完成（无需重复操作）")
     elif j1 == "ok" and j2 in ("ok", "done"):
-        log("日常任务：申请 + 领奖 成功")
+        log("🎉 日常任务：申请 + 领奖 成功")
     elif j1 == "ok" and j2 == "fail":
-        warn("任务已申请，但领奖未成功（可能任务尚未完成）")
+        warn("⚠️ 任务已申请，但领奖未成功（可能任务尚未完成）")
     elif j1 == "fail":
-        slog("日常任务申请失败，请查看上方响应")
+        err("❌ 日常任务申请失败，请查看上方响应")
     else:
-        slog("日常任务执行未完全成功，请查看上方响应")
+        err("❌ 日常任务执行未完全成功，请查看上方响应")
 
 
 if __name__ == "__main__":

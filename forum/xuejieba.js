@@ -4,7 +4,6 @@
  *
  * 环境变量：
  *   XJB_COOKIE    必填。登录后的 b2_token（JWT），既作 Cookie 也作 Bearer
- *   XJB_NOTIFY    可选，通知开关，默认开启；填 0/false/off/no 关闭
  *
  * 认证说明（B2 主题签到只需 Bearer，参考通用 HAR 模板「通杀B2主题签到」）：
  *   - 签到接口 userMission、读取接口 getUserMission 均只认 Authorization: Bearer <b2_token>
@@ -25,7 +24,6 @@
  * 日志规范：[LEVEL] [XJB] message   （LEVEL: INFO / WARN / ERROR）
  */
 
-const XJB_NOTIFY = !['0', 'false', 'off', 'no'].includes((process.env.XJB_NOTIFY || '1').trim().toLowerCase());
 const BASE_URL = 'https://xuejieba2026.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -102,11 +100,11 @@ async function apiPost(path, token, body = null, contentType = null) {
 async function doCheckin(token) {
   const res = await apiPost('/wp-json/b2/v1/userMission', token);
   if (res.status === 0) {
-    err(`请求失败: ${res.error}`);
+    err(`❌ 请求失败: ${res.error}`);
     return false;
   }
   if (res.status !== 200) {
-    err(`HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 200)}`);
+    err(`❌ HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 200)}`);
     return false;
   }
   const d = res.data;
@@ -116,15 +114,15 @@ async function doCheckin(token) {
     // 不同站点版本数值不固定，无固定 code）。只要返回非空且含数字即视为今日已签到。
     const s = d.trim();
     if (s && /\d/.test(s)) {
-      log('您今天已经签到过了（重复签到）');
+      log('♻️ 您今天已经签到过了（重复签到）');
       return true; // 算成功（不报错）
     }
-    err(`签到返回: ${d}`);
+    err(`⚠️ 签到返回: ${d}`);
     return false;
   }
   if (d?.mission) {
     const signDays = d.mission.tk?.days || 0;
-    let msg = `签到成功！+${d.credit || ''}积分`;
+    let msg = `🎉 签到成功！+${d.credit || ''}积分`;
     if (signDays) msg += ` | 连续签到:${signDays}天`;
     msg += ` | 当前积分:${d.mission.my_credit || '?'}`;
     log(msg);
@@ -132,10 +130,10 @@ async function doCheckin(token) {
   }
   // 可能是 {"code":"invitation_error","message":"点太快啦！"}
   if (d?.code) {
-    err(`${d.message || d.code}`);
+    err(`❌ ${d.message || d.code}`);
     return false;
   }
-  err(`签到返回异常: ${JSON.stringify(d).slice(0, 200)}`);
+  err(`⚠️ 签到返回异常: ${JSON.stringify(d).slice(0, 200)}`);
   return false;
 }
 
@@ -143,18 +141,18 @@ async function doCheckin(token) {
 async function verifyToken(token) {
   const info = parseJWT(token);
   if (!info) {
-    err('Token 格式无效（非合法 JWT，应以 eyJ 开头且含两个"."）。请从 Cookie-Editor 重新复制完整 b2_token');
+    err('🚫 Token 格式无效（非合法 JWT，应以 eyJ 开头且含两个"."）。请从 Cookie-Editor 重新复制完整 b2_token');
     return false;
   }
   const now = Date.now() / 1000;
   const remainDays = info.exp ? Math.floor((info.exp - now) / 86400) : -1;
   if (info.exp && info.exp < now) {
-    err(`Token 已过期 (${info.expDate})，请重新获取 XJB_COOKIE`);
+    err(`⏰ Token 已过期 (${info.expDate})，请重新获取 XJB_COOKIE`);
     return false;
   }
-  log(`用户ID: ${info.userId} | 剩余${remainDays}天 | 过期: ${info.expDate}`);
+  log(`👤 用户ID: ${info.userId} | 剩余${remainDays}天 | 过期: ${info.expDate}`);
   if (remainDays >= 0 && remainDays <= 3) {
-    warn(`Token 即将过期(${remainDays}天)，建议尽快更新！`);
+    warn(`⏰ Token 即将过期(${remainDays}天)，建议尽快更新！`);
   }
 
   // 用正确的 b2/v1 接口在线确认（与签到同命名空间、只认 Bearer）
@@ -166,19 +164,19 @@ async function verifyToken(token) {
   );
   if (res.status === 200 && res.data?.mission) {
     const m = res.data.mission;
-    log(`Token 验证通过 | 今日签到日期: ${m.date || '未签到'} | 当前积分: ${m.my_credit}`);
+    log(`🔓 Token 验证通过 | 今日签到日期: ${m.date || '未签到'} | 当前积分: ${m.my_credit}`);
     return true;
   }
   if (res.status === 0) {
     // 网络异常不阻断，交给签到接口最终判定
-    warn(`验证请求失败(${res.error})，继续尝试签到`);
+    warn(`🔁 验证请求失败(${res.error})，继续尝试签到`);
     return true;
   }
   if (res.data?.code === 'noauth' || res.status === 403) {
-    err('Token 被服务端拒绝(noauth)，请重新从 Cookie-Editor 获取 b2_token 填进 XJB_COOKIE');
+    err('🚫 Token 被服务端拒绝(noauth)，请重新从 Cookie-Editor 获取 b2_token 填进 XJB_COOKIE');
     return false;
   }
-  warn(`Token 在线验证异常: ${JSON.stringify(res.data).slice(0, 120)}，继续尝试签到`);
+  warn(`⚠️ Token 在线验证异常: ${JSON.stringify(res.data).slice(0, 120)}，继续尝试签到`);
   return true;
 }
 
@@ -192,21 +190,21 @@ async function runOne(token) {
 
 // ---------- 主入口 ----------
 async function main() {
-  log('学姐吧 签到开始');
+  log('🚀 学姐吧 签到开始');
 
   const token = extractB2Token(process.env.XJB_COOKIE);
   if (!token) {
-    err('未配置 Cookie（请设置环境变量 XJB_COOKIE，值为登录后的 b2_token；也可直接填 Cookie-Editor 导出的整段串）');
+    err('⚠️ 未配置 Cookie（请设置环境变量 XJB_COOKIE，值为登录后的 b2_token；也可直接填 Cookie-Editor 导出的整段串）');
     process.exit(1);
   }
 
   const ok = await runOne(token);
 
-  log(`完成：学姐吧 ${ok ? '签到成功' : '签到失败'}`);
+  log(`🏁 完成：学姐吧 ${ok ? '签到成功' : '签到失败'}`);
   if (!ok) process.exit(1);
 }
 
 main().catch((e) => {
-  err('脚本崩溃: ' + (e?.message || e));
+  err('💥 脚本崩溃: ' + (e?.message || e));
   process.exit(1);
 });

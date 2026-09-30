@@ -45,7 +45,7 @@ def err(msg):  _emit("ERROR", msg)
 try:
     from curl_cffi import requests as cf_requests
 except ImportError:
-    err("缺少依赖 curl_cffi，请在青龙依赖管理安装：pip install curl_cffi")
+    err("📦 缺少依赖 curl_cffi，请在青龙依赖管理安装：pip install curl_cffi")
     sys.exit(1)
 
 BASE = "https://xsijishe.com"
@@ -60,17 +60,17 @@ def check_cookie_expire(expire_str):
     try:
         exp = datetime.strptime(expire_str, "%Y-%m-%d") + timedelta(hours=23, minutes=59, seconds=59)
     except ValueError:
-        warn("XIJISHE_EXPIRE 格式错误，应为 YYYY-MM-DD")
+        warn("📝 XIJISHE_EXPIRE 格式错误，应为 YYYY-MM-DD")
         return
     now = datetime.now()
     delta = exp - now
     remain_days = delta.days + (1 if delta.seconds > 0 else 0)  # ceil
     status = ("剩余" + str(remain_days) + "天") if remain_days >= 0 else ("已过期" + str(-remain_days) + "天")
-    log("Cookie " + status + " | 过期: " + expire_str)
+    log("🍪 Cookie " + status + " | 过期: " + expire_str)
     if remain_days < 0:
-        err("Cookie 已过期，请重新登录抓取！")
+        err("⏰ Cookie 已过期，请重新登录抓取！")
     elif remain_days <= 3:
-        warn("Cookie 即将过期（" + str(remain_days) + "天），建议尽快更新！")
+        warn("⏰ Cookie 即将过期（" + str(remain_days) + "天），建议尽快更新！")
 
 
 def put_cookies(session, cookie_str):
@@ -90,10 +90,10 @@ def get_formhash(session):
     try:
         r = session.get(BASE + "/", timeout=20)
     except Exception as e:
-        err("访问首页失败: " + str(e))
+        err("❌ 访问首页失败: " + str(e))
         return None
     if r.status_code != 200:
-        warn("首页返回 HTTP " + str(r.status_code))
+        warn("⚠️ 首页返回 HTTP " + str(r.status_code))
     m = re.search(r'name="formhash" value="([0-9a-f]{8})"', r.text)
     if not m:
         m = re.search(r'formhash=([0-9a-f]{8})', r.text)
@@ -101,18 +101,18 @@ def get_formhash(session):
 
 
 def main():
-    log("西集社 签到开始")
+    log("🚀 西集社 签到开始")
     cookie = (os.environ.get("XIJISHE_COOKIE") or "").strip()
     if not cookie:
-        err("未配置 Cookie（请设置环境变量 XIJISHE_COOKIE）")
+        err("⚠️ 未配置 Cookie（请设置环境变量 XIJISHE_COOKIE）")
         sys.exit(1)
 
     session = cf_requests.Session(impersonate="chrome")
     if not PROXY:
-        err("未配置 MY_PROXY，西集社需走代理才能访问，请先配置代理")
+        err("🛡️ 未配置 MY_PROXY，西集社需走代理才能访问，请先配置代理")
         sys.exit(1)
     session.proxies = {"http": PROXY, "https": PROXY}
-    log("使用代理: " + PROXY)
+    log("🌐 使用代理: " + PROXY)
     session.headers.update({
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
@@ -126,9 +126,9 @@ def main():
 
     formhash = get_formhash(session)
     if not formhash:
-        err("未提取到 formhash（Cookie 失效或页面改版），请更新 XIJISHE_COOKIE")
+        err("🚫 未提取到 formhash（Cookie 失效或页面改版），请更新 XIJISHE_COOKIE")
         sys.exit(1)
-    log("formhash = " + formhash)
+    log("🔑 formhash = " + formhash)
 
     url = (BASE + "/k_misign-sign.html?operation=qiandao"
            "&format=global_usernav_extra&formhash=" + formhash +
@@ -136,21 +136,21 @@ def main():
     try:
         r = session.get(url, headers={"Referer": BASE + "/"}, timeout=20)
     except Exception as e:
-        err("签到请求失败: " + str(e))
+        err("❌ 签到请求失败: " + str(e))
         sys.exit(1)
 
     text = re.sub(r"\s+", " ", r.text)
-    log("HTTP " + str(r.status_code))
+    log("📡 HTTP " + str(r.status_code))
 
     if "成功" in text or "签到成功" in text:
-        log("签到成功")
+        log("🎉 签到成功")
     elif "已签到" in text or "今日已" in text or "已经签到" in text:
-        log("今日已签到")
+        log("✅ 今日已签到")
     elif "登录" in text or "未登录" in text or "login" in text.lower():
-        err("貌似未登录，请检查/更新 XIJISHE_COOKIE")
+        err("🚫 貌似未登录，请检查/更新 XIJISHE_COOKIE")
         sys.exit(1)
     else:
-        err("结果未知: " + text[:200])
+        err("❓ 结果未知: " + text[:200])
         sys.exit(1)
 
 
