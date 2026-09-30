@@ -38,6 +38,7 @@
 
 const https = require('https');
 const http = require('http');
+const net = require('net');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
@@ -122,52 +123,50 @@ function checkCookieExpire(expireStr) {
 }
 
 // 可选代理（MY_PROXY）：默认直连；配了则通过 HTTP CONNECT 隧道转发（零依赖实现）
+// 注意：必须用 net.connect 手动发 CONNECT 并消费掉代理响应头，再把干净的隧道 socket
+// 交给 https.request 在其上自建一次 TLS；直接用 http.request 的 'connect' 事件 socket
+// 会让 https 在其上 TLS 握手挂死（表现为 socket hang up / 请求超时）。
 function getProxySocket(u) {
     const proxy = process.env.MY_PROXY;
     if (!proxy) return Promise.resolve(null);
     const pu = new URL(proxy);
     const targetPort = u.port || (u.protocol === 'https:' ? 443 : 80);
     return new Promise((resolve, reject) => {
-        const creq = http.request({
-            host: pu.hostname,
-            port: pu.port || 80,
-            method: 'CONNECT',
-            path: `${u.hostname}:${targetPort}`,
-            timeout: 15000
+        const sock = net.connect(pu.port || 80, pu.hostname, () => {
+            sock.write(`CONNECT ${u.hostname}:${targetPort} HTTP/1.1\r\nHost: ${u.hostname}:${targetPort}\r\n\r\n`);
         });
-        creq.on('connect', (res, socket) => {
-            if (res.statusCode !== 200) {
-                socket.destroy();
-                reject(new Error('代理 CONNECT 失败: ' + res.statusCode));
-                return;
-            }
-            // 返回明文隧道 socket；https 目标交由 https.request 在其上自建一次 TLS，
-            // 避免在隧道上重复做 TLS 导致 "wrong version number"
-            resolve(socket);
-        });
-        creq.on('error', reject);
-        creq.on('timeout', () => { creq.destroy(); reject(new Error('代理连接超时')); });
-        creq.end();
+        let buf = '';
+        const onData = (chunk) => {
+            buf += chunk.toString('latin1');
+            const idx = buf.indexOf('\r\n\r\n');
+            if (idx < 0) return; // CONNECT 响应头尚未收全，继续等
+            sock.removeListener('data', onData);
+            const statusLine = buf.split('\r\n')[0];
+            const code = parseInt((statusLine.split(' ')[1] || ''), 10);
+            if (code !== 200) { sock.destroy(); reject(new Error('代理 CONNECT 失败: ' + code)); return; }
+            // 丢弃 CONNECT 响应头；若其后有残留字节（极少），塞回 socket 交给 TLS 层
+            const rest = buf.slice(idx + 4);
+            if (rest.length > 0) sock.unshift(rest);
+            sock.setTimeout(0); // 清掉 connect 阶段的超时，避免误杀后续正常请求
+            resolve(sock);
+        };
+        sock.on('data', onData);
+        sock.on('error', reject);
+        sock.setTimeout(15000, () => { sock.destroy(); reject(new Error('代理连接超时')); });
     });
 }
 
-function request(url, options = {}) {
+// 单次请求（不含重试）：建立隧道（或直连）后发 HTTP/HTTPS 请求
+function requestOnce(url, options, headers) {
     return new Promise((resolve, reject) => {
         const u = new URL(url);
         const lib = u.protocol === 'https:' ? https : http;
-        const headers = Object.assign({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-            'Referer': SITE + '/',
-            'Cookie': COOKIE
-        }, options.headers || {});
         getProxySocket(u).then((conn) => {
             const opts = {
                 method: options.method || 'GET',
                 path: u.pathname + u.search,
                 headers,
-                timeout: 15000
+                timeout: 20000
             };
             if (conn) {
                 // 走代理隧道：复用已建立的 TCP 隧道 socket；https 目标由模块自建一次 TLS
@@ -186,11 +185,34 @@ function request(url, options = {}) {
                 res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
             });
             req.on('error', reject);
-            req.setTimeout(15000, () => { req.destroy(); reject(new Error('请求超时')); });
+            req.setTimeout(20000, () => { req.destroy(); reject(new Error('请求超时')); });
             if (options.body) req.write(options.body);
             req.end();
         }).catch(reject);
     });
+}
+
+// 带重试的请求：代理/网络偶发卡顿时，换新隧道重连（最多 MAX_RETRY 次）
+const MAX_RETRY = 3;
+async function request(url, options = {}) {
+    const headers = Object.assign({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': SITE + '/',
+        'Cookie': COOKIE
+    }, options.headers || {});
+    let lastErr = null;
+    for (let i = 0; i < MAX_RETRY; i++) {
+        try {
+            const r = await requestOnce(url, options, headers);
+            return r;
+        } catch (e) {
+            lastErr = e;
+            log(`请求失败（第${i + 1}/${MAX_RETRY}次，重试）: ${e.message}`);
+        }
+    }
+    throw lastErr || new Error('请求失败');
 }
 
 function getCookieVal(name, cookieStr) {
