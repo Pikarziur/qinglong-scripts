@@ -38,7 +38,6 @@
 
 const https = require('https');
 const http = require('http');
-const tls = require('tls');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
@@ -142,12 +141,9 @@ function getProxySocket(u) {
                 reject(new Error('代理 CONNECT 失败: ' + res.statusCode));
                 return;
             }
-            if (u.protocol === 'https:') {
-                const tlsSock = tls.connect({ socket, servername: u.hostname }, () => resolve(tlsSock));
-                tlsSock.on('error', reject);
-            } else {
-                resolve(socket);
-            }
+            // 返回明文隧道 socket；https 目标交由 https.request 在其上自建一次 TLS，
+            // 避免在隧道上重复做 TLS 导致 "wrong version number"
+            resolve(socket);
         });
         creq.on('error', reject);
         creq.on('timeout', () => { creq.destroy(); reject(new Error('代理连接超时')); });
@@ -174,11 +170,12 @@ function request(url, options = {}) {
                 timeout: 15000
             };
             if (conn) {
-                // 走代理隧道：复用已建立的 socket
+                // 走代理隧道：复用已建立的 TCP 隧道 socket；https 目标由模块自建一次 TLS
                 opts.host = u.hostname;
                 opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
                 opts.socket = conn;
                 opts.agent = false;
+                if (u.protocol === 'https:') opts.servername = u.hostname;
             } else {
                 opts.hostname = u.hostname;
                 opts.port = u.port || (u.protocol === 'https:' ? 443 : 80);
