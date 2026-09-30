@@ -35,6 +35,7 @@
 //                       与仓库其他脚本（southplus.py / xsijishe.py）统一用这个变量名
 //   WNFLB_PROXY         可选。同 MY_PROXY，仅本脚本的覆盖别名；两者都配时以它为准
 //   WNFLB_NO_PROXY      可选。=1 忽略上述代理强制直连（面板的 MY_PROXY 是给别站用时可用）
+//   WNFLB_SITE          可选。站点地址，默认 https://www.wnflb2023.com；仅供本地 mock 回归测试
 //
 // 日志规范：[LEVEL] [WNFLB] emoji message   （LEVEL: INFO / WARN / ERROR）
 // 报错输出：所有失败路径都会打印「HTTP 状态 + 错误码 + 关键响应头 + 完整响应原文 + 异常堆栈」，
@@ -50,7 +51,11 @@ const dns = require('dns');
 const { URL } = require('url');
 
 // ========== 配置 ==========
-const SITE = 'https://www.wnflb2023.com';
+// 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
+// （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
+const SCRIPT_VER = '2026-09-30b';
+// 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
+const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
 const AUTH_KEY = 'S5r8_2132_auth';        // Discuz 登录凭证（本站在用前缀）
 const SALT_KEY = 'S5r8_2132_saltkey';      // Discuz 盐值
@@ -442,12 +447,24 @@ function getCookieVal(name, cookieStr) {
     try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
 }
 
+// ⚠️ Discuz 的 `dsetcookie()` 在「删除该 cookie」时下发的值是 `deleted`（不是空串）。
+//    所以 `auth=deleted` 表示**已清除登录态**，绝不能当成有效凭证 —— 实测踩过：
+//    首次登录后 auth 被清为 deleted，脚本却判为登录成功、写入缓存，导致紧接着的签到返回「未登录」。
+const isDeletedCookieVal = (v) => /^deleted$/i.test(String(v || '').trim());
+
+// 真正判断「Cookie 里有没有可用的登录态」——存在 auth 且不是 deleted 才算。
+function isAuthValid(cookieStr) {
+    const v = getCookieVal(AUTH_KEY, cookieStr);
+    return !!v && !isDeletedCookieVal(v);
+}
+
 // ========== 账号密码登录（兜底）==========
-async function loginAndGetCookie(user, pass) {
-    if (!user || !pass) {
-        warn('⚠️ 未配置账号密码（WNFLB_ACCOUNT=账号#密码），无法自动登录');
-        return null;
-    }
+// 单次登录尝试。返回 { state, cookie }，state 含义：
+//   'ok'      拿到有效 auth（非 deleted）+ saltkey
+//   'deleted' 服务端把 auth 置为 deleted —— 这是「清除登录态」而非「凭据错误」，**可安全重试一次**
+//   'cred'    响应明确是「登录失败…还可以尝试 N 次」→ 凭据问题，绝不重试（Discuz 会累计失败次数）
+//   'nomark'  没拿到凭证、也没有明确失败原因（风控 / 验证码 / 响应不是登录结果页）
+async function loginAttempt(user, pass, attemptNo) {
     const jar = new CookieJar();
     const loginPageUrl = SITE + '/member.php?mod=logging&action=login';
     try {
@@ -466,7 +483,6 @@ async function loginAndGetCookie(user, pass) {
         const formhash = lfm[1];
 
         // 2) 提交登录（该站登录页无验证码，纯账号密码即可）
-        log('📤 提交登录...');
         const loginUrl = SITE + '/member.php?mod=logging&action=login&loginsubmit=yes&infloat=yes&lssubmit=yes&inajax=1';
         const bodyStr = [
             'formhash=' + formhash,
@@ -477,6 +493,7 @@ async function loginAndGetCookie(user, pass) {
             'answer=',
             'loginsubmit=yes'
         ].join('&');
+        log(`📤 提交登录${attemptNo > 1 ? `...（第 ${attemptNo} 次尝试）` : '...'}`);
         const r = await request(loginUrl, {
             method: 'POST',
             cookie: jar.toString(),
@@ -491,14 +508,30 @@ async function loginAndGetCookie(user, pass) {
         jar.absorb(r.headers);
         const rText = textOf(r);
 
-        // 3) 判定：拿到 auth + saltkey，或响应里出现 Discuz 的登录成功回调标记
+        // 3) 判定：必须拿到**有效** auth（deleted 不算）+ saltkey
         const auth = jar.get(AUTH_KEY);
         const saltkey = jar.get(SALT_KEY);
-        const okMarker = /succeedhandle_login/.test(rText);
-        if ((auth && saltkey) || okMarker) {
-            log(`🔑 登录成功（${auth && saltkey ? 'auth+saltkey' : 'succeedhandle_login 标记'}，共 ${jar.size()} 个 Cookie 字段）`);
-            log(`🍪 ${AUTH_KEY}=${auth ? auth.substring(0, 12) + '***' : '(无)'}`);
-            return jar.toString();
+        const authOk = !!auth && !isDeletedCookieVal(auth);
+        if (authOk && saltkey) {
+            log(`🔑 登录成功（auth+saltkey，共 ${jar.size()} 个 Cookie 字段）`);
+            log(`🍪 ${AUTH_KEY}=${auth.substring(0, 12)}***`);
+            return { state: 'ok', cookie: jar.toString() };
+        }
+
+        // auth=deleted：Discuz 的清除标记。登录流程本身没报错，只是会话被清 —— 可安全重试一次。
+        if (isDeletedCookieVal(auth)) {
+            warn(`⚠️ 服务端把 ${AUTH_KEY} 置为 deleted（Discuz 的「清除登录态」标记），本次登录态无效`);
+            // 打印本次响应下发的全部 Set-Cookie（含先后顺序）：用来判断是「只发了 deleted」，
+            // 还是「真值在前、被后面的 deleted 覆盖」—— 这两种情况的处理方向不一样。
+            const scList = [].concat(r.headers['set-cookie'] || []).filter(Boolean).map(c => {
+                const kv = String(c).split(';')[0].trim();
+                const i = kv.indexOf('=');
+                if (i <= 0) return kv;
+                const n = kv.slice(0, i), v = kv.slice(i + 1);
+                return (n === AUTH_KEY && v && !isDeletedCookieVal(v)) ? `${n}=${v.slice(0, 8)}***` : kv;
+            });
+            warn(`🍪 本次 Set-Cookie（${scList.length} 条，按先后顺序）: ${scList.join(' | ') || '(无)'}`);
+            return { state: 'deleted', resp: r };
         }
 
         warn(`⚠️ 登录失败（HTTP ${r.status}）：未拿到登录凭证`);
@@ -508,7 +541,10 @@ async function loginAndGetCookie(user, pass) {
         if (/登录失败/.test(rText)) {
             warn(`🚫 账号或密码不正确${perm ? `（短时间内还可尝试 ${perm[1]} 次）` : ''}：请核对 WNFLB_ACCOUNT 的「账号#密码」，不要连续重试以免被临时禁止登录`);
             if (user.length <= 2) warn(`🚫 另外注意：当前账号只有 ${user.length} 个字符（${user}），像是占位符没被替换成真实账号`);
-        } else if (/验证码|seccode|secqaa|安全提问/.test(rText)) {
+            dumpResp('登录POST', r);
+            return { state: 'cred', resp: r };
+        }
+        if (/验证码|seccode|secqaa|安全提问/.test(rText)) {
             warn('🚫 站点要求验证码/安全提问：本次登录已被风控，建议先用浏览器登录一次或稍后再试');
         } else if (!auth) {
             warn(`⚠️ 未拿到 ${AUTH_KEY}，常见原因：账号密码错误 / 需安全提问 / 触发登录频率限制 / 响应不是登录结果页`);
@@ -516,11 +552,32 @@ async function loginAndGetCookie(user, pass) {
             warn(`⚠️ 已拿到 ${AUTH_KEY} 但缺少 ${SALT_KEY}（登录态不完整）`);
         }
         dumpResp('登录POST', r);
-        return null;
+        return { state: 'nomark', resp: r };
     } catch (e) {
         dumpErr('登录流程', e);
+        return { state: 'nomark' };
+    }
+}
+
+// 外层封装：先试一次；只有「auth 被清成 deleted」这种**非凭据问题**才会重试一次
+// （实测该站首次登录常返回 auth=deleted，第二次即正常；凭据错误则绝不重试，避免打满 Discuz 的失败计数）
+const MAX_LOGIN_ATTEMPT = 2;
+async function loginAndGetCookie(user, pass) {
+    if (!user || !pass) {
+        warn('⚠️ 未配置账号密码（WNFLB_ACCOUNT=账号#密码），无法自动登录');
         return null;
     }
+    for (let i = 1; i <= MAX_LOGIN_ATTEMPT; i++) {
+        const r = await loginAttempt(user, pass, i);
+        if (r.state === 'ok') return r.cookie;
+        if (r.state === 'deleted' && i < MAX_LOGIN_ATTEMPT) {
+            warn(`🔁 登录态被服务端清空（非账号密码问题），重试登录（第 ${i + 1}/${MAX_LOGIN_ATTEMPT} 次）...`);
+            continue;
+        }
+        if (r.state === 'deleted') warn('🚫 连续两次都被清成 deleted：站点可能在风控 / 要求安全提问，建议先用浏览器登录一次');
+        return null;
+    }
+    return null;
 }
 
 // ========== Cookie 解析：缓存（主） → 账号密码登录（辅）==========
@@ -530,14 +587,18 @@ async function resolveCookie(user, pass) {
     // 1) 本地缓存为主
     if (!forceLogin) {
         const cached = readCache();
-        if (cached && getCookieVal(AUTH_KEY, cached.cookie)) {
+        if (cached && isAuthValid(cached.cookie)) {
             COOKIE = cached.cookie;
             log(`📦 使用本地缓存 Cookie（来源: ${cached.source} | 写入: ${cached.savedAt}）`);
             return true;
         }
         if (cached) {
             const names = String(cached.cookie || '').split(';').map(kv => kv.split('=')[0].trim()).filter(Boolean);
-            warn(`⚠️ 缓存存在但缺少 ${AUTH_KEY}，视为无效，改走账号密码登录（缓存内 ${names.length} 个字段: ${names.join(', ') || '(空)'}）`);
+            if (isDeletedCookieVal(getCookieVal(AUTH_KEY, cached.cookie))) {
+                warn(`⚠️ 缓存里的 ${AUTH_KEY} 是 deleted（Discuz 的「已登出」标记），视为无效，改走账号密码登录`);
+            } else {
+                warn(`⚠️ 缓存存在但缺少 ${AUTH_KEY}，视为无效，改走账号密码登录（缓存内 ${names.length} 个字段: ${names.join(', ') || '(空)'}）`);
+            }
         }
     } else {
         warn('🔁 WNFLB_FORCE_LOGIN 已开启：忽略缓存，强制账号密码登录');
@@ -563,6 +624,24 @@ async function resolveCookie(user, pass) {
 // 顺序很重要：先看最强的成功信号（creditrule Set-Cookie / 明确的「签到成功」），
 // 再判「已签」，最后才用宽泛的「成功」兜底，避免把已签误判成成功。
 // ⚠️ 注意 `已签` 并不是 `已经签到` 的子串（已/经/签/到），所以两种写法都要列。
+// 把响应正文压成一行便于阅读的摘要（去 script/style / 去标签 / 压空白 / 截断）。
+// 只用于结果那一行日志，避免 dump 整个响应造成日志臃肿。
+function brief(text, n) {
+    const s = String(text || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<!\[CDATA\[/g, ' ')
+        .replace(/\]\]>/g, ' ')
+        // ⚠️ 只吃「真标签」（< 后面跟字母或 /）。写成 <[^>]+> 会把 Discuz 的
+        //    <![CDATA[...]]> 整段正文当成标签吞掉，摘要直接变空 —— 实测踩过。
+        .replace(/<[a-zA-Z/][^>]*>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const lim = n || 80;
+    return s.length > lim ? s.slice(0, lim) + '…' : s;
+}
+
 function classifySign(signResp) {
     const text = textOf(signResp);
     const setCookie = signResp.headers['set-cookie'] || [];
@@ -633,7 +712,7 @@ async function netDiag(timeoutMs) {
 
 // ========== 预检：只探测，不登录、不签到 ==========
 async function runProbe(user, pass) {
-    log('🔎 预检模式（WNFLB_PROBE=1）：只探测，不登录、不签到');
+    log(`🔎 预检模式（WNFLB_PROBE=1）：只探测，不登录、不签到｜脚本 v${SCRIPT_VER}`);
     log(`📁 Cookie 缓存路径: ${CACHE_FILE}`);
     log(`⏱️ 单次超时 ${TIMEOUT_MS}ms｜地址族顺序 [${FAMILY_SEQ.map(f => f || 'auto').join(' → ')}]`);
     log(`🔌 代理: ${PROXY_DESC}`);
@@ -650,7 +729,7 @@ async function runProbe(user, pass) {
         return;
     }
     const cached = readCache();
-    if (cached) log(`📦 缓存存在：来源 ${cached.source}｜写入 ${cached.savedAt}｜${AUTH_KEY} ${getCookieVal(AUTH_KEY, cached.cookie) ? '✓' : '✗'}`);
+    if (cached) log(`📦 缓存存在：来源 ${cached.source}｜写入 ${cached.savedAt}｜${AUTH_KEY} ${isAuthValid(cached.cookie) ? '✓' : (isDeletedCookieVal(getCookieVal(AUTH_KEY, cached.cookie)) ? '✗(deleted)' : '✗')}`);
     else log('📦 缓存不存在（首次运行会走账号密码登录）');
     log(`👤 WNFLB_ACCOUNT ${user && pass ? '已配置' : '未配置'}`);
 
@@ -703,7 +782,7 @@ async function main() {
     const failLog = (m) => { emit('ERROR', m); summaryLines.push(m); };
     const okLog = (m) => { emit('INFO', m); summaryLines.push(m); };
 
-    log('🚀 福利吧 签到开始');
+    log(`🚀 福利吧 签到开始（脚本 v${SCRIPT_VER}）`);
 
     // 账号密码：单变量 WNFLB_ACCOUNT（账号#密码 / 账号:密码）
     let USER = '';
@@ -733,7 +812,7 @@ async function main() {
 
     // 1. 取 Cookie
     await resolveCookie(USER, PASS);
-    if (!getCookieVal(AUTH_KEY, COOKIE)) {
+    if (!isAuthValid(COOKIE)) {
         failLog(`❌ 无法获取 Cookie（请配置 WNFLB_ACCOUNT=账号#密码；缓存路径: ${CACHE_FILE}）`);
         return;
     }
@@ -741,6 +820,7 @@ async function main() {
 
     // 2. 首页取 formhash → 签到；Cookie 失效时自动登录并续签一次
     let signResult = '';
+    let signEcho = '';          // 服务器对签到请求的回复摘要（用于确认「已签到」到底算不算签上）
     let triedRelogin = false;
     for (let attempt = 0; attempt < 2; attempt++) {
         log('🌐 访问首页...');
@@ -792,6 +872,7 @@ async function main() {
         const kind = classifySign(signResp);
         if (kind === 'success' || kind === 'already') {
             signResult = kind;
+            signEcho = brief(textOf(signResp), 80);
             break;
         }
         if (kind === 'expired') {
@@ -816,8 +897,8 @@ async function main() {
         break;
     }
 
-    if (signResult === 'success') okLog('🎉 签到成功！');
-    else if (signResult === 'already') okLog('✅ 今天已签到');
+    if (signResult === 'success') okLog(`🎉 签到成功！${signEcho ? `（服务器：${signEcho}）` : ''}`);
+    else if (signResult === 'already') okLog(`✅ 今天已签到${signEcho ? `（服务器：${signEcho}）` : ''}`);
 
     // 3. 汇总
     const wnOk = summaryLines.some(l => /签到成功|已签到/.test(l));
@@ -836,4 +917,4 @@ if (require.main === module) {
 }
 
 // 便于单测（青龙以 `node 脚本.js` 主模块方式运行，不影响实际执行）
-module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT, netDiag, FAMILY_SEQ, TIMEOUT_MS, proxyTunnel, PROXY, PROXY_SRC, PROXY_DESC };
+module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, isDeletedCookieVal, isAuthValid, brief, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT, netDiag, FAMILY_SEQ, TIMEOUT_MS, proxyTunnel, PROXY, PROXY_SRC, PROXY_DESC };
