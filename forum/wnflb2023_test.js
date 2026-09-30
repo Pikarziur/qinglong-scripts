@@ -8,7 +8,10 @@
 //   · 无代理（N1 容器实测直连 200 / 1.12s；走 mihomo 7890 反而 6.38s）
 //   · 无通知（notify 已在全仓移除）
 //   · 响应按声明的 charset 解码（本站实测为 utf-8，保留兼容以防站点换编码）
-//   ⚠️ 默认**纯直连**（N1 容器实测直连 200 / 1.12s）。若某台机器直连不通，配 WNFLB_PROXY 走 CONNECT 隧道即可。
+//   ⚠️ 出网说明（2026-09-30 22:40 在 N1 青龙容器内实测）：
+//      · 直连首页/登录页的 4 种组合（family=4 / auto × 两个 URL）**全部超时**
+//      · 走 mihomo 代理 `MY_PROXY=http://192.168.31.233:7890` **全部 200**（首页 28976B / 登录页 25014B）
+//      ⇒ 该容器**必须配代理**。（更早 curl 直连首页曾 200/1.12s，说明该站直连时通时不通，以预检实测为准）
 //   ⚠️ 已显式发送 ALPN(http/1.1)：curl 默认发 ALPN 而 Node 默认不发，部分 CDN/WAF 会丢弃「无 ALPN 的
 //      ClientHello」，典型表现就是「curl 秒回 200，Node 一直卡到超时」。
 //   ⚠️ 地址族策略：默认**强制 IPv4**。家宽 / 容器里 IPv6 常是「解析得到地址但没有出口」的黑洞，
@@ -28,7 +31,10 @@
 //   WNFLB_EXPIRE        可选。Cookie 预期过期日 YYYY-MM-DD，设了会提前 3 天提醒
 //   WNFLB_TIMEOUT       可选。单次请求超时毫秒，默认 20000
 //   WNFLB_IPV6          可选。=1 不强制 IPv4，完全按系统默认地址族走（默认优先 IPv4）
-//   WNFLB_PROXY         可选。http 代理（CONNECT 隧道），如 http://192.168.31.233:7890；直连不通时靠它
+//   MY_PROXY            可选。http 代理（CONNECT 隧道），如 http://192.168.31.233:7890；直连不通时靠它。
+//                       与仓库其他脚本（southplus.py / xsijishe.py）统一用这个变量名
+//   WNFLB_PROXY         可选。同 MY_PROXY，仅本脚本的覆盖别名；两者都配时以它为准
+//   WNFLB_NO_PROXY      可选。=1 忽略上述代理强制直连（面板的 MY_PROXY 是给别站用时可用）
 //
 // 日志规范：[LEVEL] [WNFLB] emoji message   （LEVEL: INFO / WARN / ERROR）
 // 报错输出：所有失败路径都会打印「HTTP 状态 + 错误码 + 关键响应头 + 完整响应原文 + 异常堆栈」，
@@ -52,6 +58,16 @@ const MAX_RETRY = 3;
 const truthy = (v) => ['1', 'true', 'yes', 'on'].includes(String(v || '').trim().toLowerCase());
 const SITE_HOST = new URL(SITE).hostname;
 const TIMEOUT_MS = Math.max(3000, parseInt(process.env.WNFLB_TIMEOUT || '20000', 10) || 20000);
+
+// 代理地址：优先 WNFLB_PROXY（本脚本专用覆盖），其次 MY_PROXY（与仓库其他脚本统一：
+// southplus.py / xsijishe.py 都用 MY_PROXY）。两者任配其一即可；都配时 WNFLB_PROXY 生效。
+// 若面板里的 MY_PROXY 是给别的站点用的、而本站直连也通，可用 WNFLB_NO_PROXY=1 让本脚本忽略它。
+const NO_PROXY = truthy(process.env.WNFLB_NO_PROXY);
+const PROXY = NO_PROXY ? '' : (process.env.WNFLB_PROXY || process.env.MY_PROXY || '').trim();
+const PROXY_SRC = (process.env.WNFLB_PROXY || '').trim() ? 'WNFLB_PROXY'
+    : ((process.env.MY_PROXY || '').trim() ? 'MY_PROXY' : '');
+const PROXY_DESC = NO_PROXY ? '已按 WNFLB_NO_PROXY=1 强制直连'
+    : (PROXY ? `${PROXY}（来源 ${PROXY_SRC}）` : '未配置（纯直连）');
 
 // 地址族策略：**默认强制 IPv4**。
 // 原因：家宽 / Docker 容器里 IPv6 常见「解析得到地址但没有出口路由」的黑洞，
@@ -240,13 +256,18 @@ function checkCookieExpire(expireStr) {
 }
 
 // ========== HTTP 代理（CONNECT 隧道）==========
-// 直连不通时的兜底，例如 WNFLB_PROXY=http://192.168.31.233:7890（N1 上 mihomo 的 mixed 端口）。
+// 直连不通时的兜底，例如 MY_PROXY=http://192.168.31.233:7890（N1 上 mihomo 的 mixed 端口）。
 // 走标准 CONNECT 隧道：代理只做 TCP 转发，到目标站的 TLS 依然端到端加密。
 function proxyTunnel(proxyUrl, targetHost, targetPort, timeoutMs) {
     return new Promise((resolve, reject) => {
         let p;
         try { p = new URL(proxyUrl); } catch (e) {
-            reject(new Error(`WNFLB_PROXY 格式错误（应形如 http://host:port）: ${proxyUrl}`));
+            reject(new Error(`代理地址格式错误（${PROXY_SRC || 'MY_PROXY'}，应形如 http://host:port）: ${proxyUrl}`));
+            return;
+        }
+        if (p.protocol !== 'http:' && p.protocol !== 'https:') {
+            reject(new Error(`暂不支持 ${p.protocol} 代理（仅支持 http:// / https:// 的 CONNECT 隧道；`
+                + 'socks5:// 请改用 mihomo 的 mixed 或 http 端口）: ' + proxyUrl));
             return;
         }
         const secure = p.protocol === 'https:';
@@ -315,13 +336,13 @@ function makeTunnelAgent(tunnel, secure) {
     return new PlainTunnelAgent({ keepAlive: false, maxSockets: 1 });
 }
 
-// ========== HTTP（直连 or 走 WNFLB_PROXY 隧道）==========
+// ========== HTTP（直连 or 走代理隧道，代理取 MY_PROXY / WNFLB_PROXY）==========
 async function requestOnce(url, options, headers, family) {
     const u = new URL(url);
     const timeoutMs = options.timeoutMs || TIMEOUT_MS;
     const isHttps = u.protocol === 'https:';
     const port = u.port || (isHttps ? 443 : 80);
-    const proxy = (options.proxy !== undefined ? options.proxy : (process.env.WNFLB_PROXY || '')).trim();
+    const proxy = (options.proxy !== undefined ? options.proxy : PROXY).trim();
 
     const opts = {
         method: options.method || 'GET',
@@ -391,7 +412,7 @@ async function request(url, options = {}) {
     let lastErr = null;
     const maxTry = options.noRetry ? 1 : MAX_RETRY;   // 登录 POST 不重试：避免把失败次数打满触发账号锁定
     const method = options.method || 'GET';
-    const proxyOn = !!(process.env.WNFLB_PROXY || '').trim();
+    const proxyOn = !!PROXY;
     const seq = proxyOn ? [0] : FAMILY_SEQ;   // 走代理隧道时地址族无意义，不做切换
     const famAt = (i) => seq[Math.min(i, seq.length - 1)];
     for (let i = 0; i < maxTry; i++) {
@@ -408,7 +429,7 @@ async function request(url, options = {}) {
         }
     }
     if (lastErr && lastErr.code === 'ETIMEDOUT' && !proxyOn) {
-        warn('💡 直连超时且未配置 WNFLB_PROXY：若这台机器无法直连本站，可设 WNFLB_PROXY=http://<mihomo地址>:7890 走代理');
+        warn('💡 直连超时且未配置代理：若这台机器无法直连本站，可设 MY_PROXY=http://<mihomo地址>:7890 走代理');
     }
     throw lastErr || new Error('请求失败: ' + url);
 }
@@ -481,8 +502,19 @@ async function loginAndGetCookie(user, pass) {
         }
 
         warn(`⚠️ 登录失败（HTTP ${r.status}）：未拿到登录凭证`);
-        if (!auth) warn(`⚠️ 未拿到 ${AUTH_KEY}，常见原因：账号密码错误 / 需安全提问 / 触发登录频率限制 / 响应不是登录结果页`);
-        else warn(`⚠️ 已拿到 ${AUTH_KEY} 但缺少 ${SALT_KEY}（登录态不完整）`);
+        // Discuz 会把失败原因塞在 XML CDATA 里，例如：
+        //   <![CDATA[登录失败，您还可以尝试 4 次 ... {'loginperm':'4'}]]>
+        const perm = rText.match(/还可以尝试\s*(\d+)\s*次/) || rText.match(/['"]loginperm['"]\s*:\s*['"](\d+)['"]/);
+        if (/登录失败/.test(rText)) {
+            warn(`🚫 账号或密码不正确${perm ? `（短时间内还可尝试 ${perm[1]} 次）` : ''}：请核对 WNFLB_ACCOUNT 的「账号#密码」，不要连续重试以免被临时禁止登录`);
+            if (user.length <= 2) warn(`🚫 另外注意：当前账号只有 ${user.length} 个字符（${user}），像是占位符没被替换成真实账号`);
+        } else if (/验证码|seccode|secqaa|安全提问/.test(rText)) {
+            warn('🚫 站点要求验证码/安全提问：本次登录已被风控，建议先用浏览器登录一次或稍后再试');
+        } else if (!auth) {
+            warn(`⚠️ 未拿到 ${AUTH_KEY}，常见原因：账号密码错误 / 需安全提问 / 触发登录频率限制 / 响应不是登录结果页`);
+        } else {
+            warn(`⚠️ 已拿到 ${AUTH_KEY} 但缺少 ${SALT_KEY}（登录态不完整）`);
+        }
         dumpResp('登录POST', r);
         return null;
     } catch (e) {
@@ -570,11 +602,14 @@ async function netDiag(timeoutMs) {
         'Referer': SITE + '/',
         'Cookie': ''
     };
-    const probeOne = async (label, url, opts, fam) => {
+    let directOk = false, proxyOk = false;
+    const probeOne = async (label, url, opts, fam, mark) => {
         const t0 = Date.now();
         try {
             const r = await requestOnce(url, opts, baseHeaders, fam);
             log(`📡 ${label} → HTTP ${r.status}｜${r.raw ? r.raw.length : 0} 字节｜${Date.now() - t0}ms`);
+            if (mark === 'direct') directOk = true;
+            if (mark === 'proxy') proxyOk = true;
         } catch (e) {
             warn(`📡 ${label} → 失败 ${e.message}${e.code ? ' code=' + e.code : ''}（${Date.now() - t0}ms）`);
         }
@@ -582,18 +617,18 @@ async function netDiag(timeoutMs) {
     // 1) 直连：分别测「强制 IPv4」与「系统默认」，用来区分是 IPv6 黑洞还是整站不可达
     for (const [name, url] of targets) {
         for (const fam of [4, 0]) {
-            await probeOne(`${name} 直连 family=${fam || 'auto'}`, url, { method: 'GET', timeoutMs: t, proxy: '' }, fam);
+            await probeOne(`${name} 直连 family=${fam || 'auto'}`, url, { method: 'GET', timeoutMs: t, proxy: '' }, fam, 'direct');
         }
     }
-    // 2) 代理：配了 WNFLB_PROXY 才测
-    const proxy = (process.env.WNFLB_PROXY || '').trim();
-    if (proxy) {
+    // 2) 代理：配了 MY_PROXY / WNFLB_PROXY 才测
+    if (PROXY) {
         for (const [name, url] of targets) {
-            await probeOne(`${name} 代理 ${proxy}`, url, { method: 'GET', timeoutMs: t }, 0);
+            await probeOne(`${name} 代理 ${PROXY}`, url, { method: 'GET', timeoutMs: t }, 0, 'proxy');
         }
     } else {
-        log('🔌 未配置 WNFLB_PROXY，跳过代理测试（直连不通时可用它走 mihomo）');
+        log('🔌 未配置代理（MY_PROXY），跳过代理测试（直连不通时可用它走 mihomo）');
     }
+    return { directOk, proxyOk };
 }
 
 // ========== 预检：只探测，不登录、不签到 ==========
@@ -601,8 +636,19 @@ async function runProbe(user, pass) {
     log('🔎 预检模式（WNFLB_PROBE=1）：只探测，不登录、不签到');
     log(`📁 Cookie 缓存路径: ${CACHE_FILE}`);
     log(`⏱️ 单次超时 ${TIMEOUT_MS}ms｜地址族顺序 [${FAMILY_SEQ.map(f => f || 'auto').join(' → ')}]`);
-    log(`🔌 代理: ${(process.env.WNFLB_PROXY || '').trim() || '未配置（纯直连）'}`);
-    await netDiag(Math.min(10000, TIMEOUT_MS));
+    log(`🔌 代理: ${PROXY_DESC}`);
+    const diag = await netDiag(Math.min(10000, TIMEOUT_MS));
+    if (!diag.directOk && !PROXY) {
+        warn('⏭️ 直连全部失败且未配代理：后面的探测必然失败，提前结束');
+        warn('⏭️ 请在青龙「环境变量」里加 MY_PROXY=http://192.168.31.233:7890（N1 上 mihomo 的 mixed 端口）后重跑');
+        log('🏁 预检结束（未做任何登录/签到动作）');
+        return;
+    }
+    if (!diag.directOk && !diag.proxyOk) {
+        warn('⏭️ 直连与代理都不通：先修网络（确认 mihomo 在跑、7890 端口可达）再回来');
+        log('🏁 预检结束（未做任何登录/签到动作）');
+        return;
+    }
     const cached = readCache();
     if (cached) log(`📦 缓存存在：来源 ${cached.source}｜写入 ${cached.savedAt}｜${AUTH_KEY} ${getCookieVal(AUTH_KEY, cached.cookie) ? '✓' : '✗'}`);
     else log('📦 缓存不存在（首次运行会走账号密码登录）');
@@ -612,7 +658,7 @@ async function runProbe(user, pass) {
     COOKIE = cached ? cached.cookie : '';
     try {
         const t0 = Date.now();
-        const home = await request(SITE + '/');
+        const home = await request(SITE + '/', { noRetry: true, timeoutMs: 15000 });
         const ms = Date.now() - t0;
         const homeText = textOf(home);
         const fh = homeText.match(/formhash=([a-f0-9]{8})/);
@@ -632,7 +678,7 @@ async function runProbe(user, pass) {
     // 2) 登录页可达性 + formhash（这是账号密码登录能否成功的关键）
     try {
         const t0 = Date.now();
-        const page = await request(SITE + '/member.php?mod=logging&action=login', { cookie: '' });
+        const page = await request(SITE + '/member.php?mod=logging&action=login', { cookie: '', noRetry: true, timeoutMs: 15000 });
         const ms = Date.now() - t0;
         const pageText = textOf(page);
         const lfm = pageText.match(/formhash=([a-f0-9]{8})/)
@@ -670,8 +716,13 @@ async function main() {
             USER = ACCOUNT.substring(0, idx).trim();
             PASS = ACCOUNT.substring(idx + 1).trim();
         }
-        if (USER && PASS) log(`👤 账号: ${USER.length <= 2 ? USER[0] + '***' : USER.substring(0, 2) + '***'}（密码已配置）`);
-        else warn('⚠️ WNFLB_ACCOUNT 格式应为「账号#密码」或「账号:密码」，当前无法解析');
+        if (USER && PASS) {
+            const mask = USER.length <= 1 ? '*' : USER[0] + '*'.repeat(Math.min(USER.length - 1, 3));
+            log(`👤 账号: ${mask}（账号 ${USER.length} 字符｜密码 ${PASS.length} 位）`);
+            if (USER.length <= 2) warn(`⚠️ 账号只有 ${USER.length} 个字符，像是「账号#密码」这类占位符没被替换成真实值`);
+        } else {
+            warn('⚠️ WNFLB_ACCOUNT 格式应为「账号#密码」或「账号:密码」，当前无法解析');
+        }
     }
 
     // 0. 预检模式：只探测，不登录、不签到
@@ -785,4 +836,4 @@ if (require.main === module) {
 }
 
 // 便于单测（青龙以 `node 脚本.js` 主模块方式运行，不影响实际执行）
-module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT, netDiag, FAMILY_SEQ, TIMEOUT_MS };
+module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT, netDiag, FAMILY_SEQ, TIMEOUT_MS, proxyTunnel, PROXY, PROXY_SRC, PROXY_DESC };
