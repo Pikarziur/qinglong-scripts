@@ -139,7 +139,8 @@ async function request(url, options = {}) {
 }
 
 function getCookieVal(name, cookieStr) {
-    const m = cookieStr.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    // 兼容 Cookie 串用 "; " 或 ";" 分隔（Cookie-Editor 等工具导出常为无空格分隔）
+    const m = cookieStr.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
     return m ? decodeURIComponent(m[1]) : '';
 }
 
