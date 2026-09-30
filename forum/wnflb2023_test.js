@@ -8,8 +8,11 @@
 //   · 无代理（N1 容器实测直连 200 / 1.12s；走 mihomo 7890 反而 6.38s）
 //   · 无通知（notify 已在全仓移除）
 //   · 响应按声明的 charset 解码（本站实测为 utf-8，保留兼容以防站点换编码）
-//   ⚠️ 本版为**纯直连**：实测 N1 容器直连即可（200 / 1.12s），故未实现代理。
-//      若换到无法直连该站的机器上跑，需要把 MY_PROXY 隧道支持加回来（参考 git 提交 a860657）。
+//   ⚠️ 默认**纯直连**（N1 容器实测直连 200 / 1.12s）。若某台机器直连不通，配 WNFLB_PROXY 走 CONNECT 隧道即可。
+//   ⚠️ 已显式发送 ALPN(http/1.1)：curl 默认发 ALPN 而 Node 默认不发，部分 CDN/WAF 会丢弃「无 ALPN 的
+//      ClientHello」，典型表现就是「curl 秒回 200，Node 一直卡到超时」。
+//   ⚠️ 地址族策略：默认**强制 IPv4**。家宽 / 容器里 IPv6 常是「解析得到地址但没有出口」的黑洞，
+//      典型症状就是「curl 能通、Node 一直连到超时」；失败重试会自动换回系统默认（auto）双向兜底。
 //
 // 任务流程：
 //   1. 取 Cookie：本地缓存为主；无缓存（或缓存失效）时用账号密码登录自动获取并写回缓存
@@ -21,8 +24,11 @@
 //   WNFLB_ACCOUNT       建议必配。账号密码，格式「账号#密码」或「账号:密码」；无缓存时靠它自动登录
 //   WNFLB_COOKIE_CACHE  可选。缓存文件路径，默认 /ql/data/wnflb2023.cookie（该目录不可写则回退到脚本同目录）
 //   WNFLB_FORCE_LOGIN   可选。=1 忽略缓存，强制走账号密码登录并覆盖缓存（调试用）
-//   WNFLB_PROBE         可选。=1 仅预检：探测连通性 + 登录页 formhash，不登录、不签到
+//   WNFLB_PROBE         可选。=1 仅预检：网络诊断（DNS + 4 种地址族/URL 组合）+ 登录页 formhash，不登录、不签到
 //   WNFLB_EXPIRE        可选。Cookie 预期过期日 YYYY-MM-DD，设了会提前 3 天提醒
+//   WNFLB_TIMEOUT       可选。单次请求超时毫秒，默认 20000
+//   WNFLB_IPV6          可选。=1 不强制 IPv4，完全按系统默认地址族走（默认优先 IPv4）
+//   WNFLB_PROXY         可选。http 代理（CONNECT 隧道），如 http://192.168.31.233:7890；直连不通时靠它
 //
 // 日志规范：[LEVEL] [WNFLB] emoji message   （LEVEL: INFO / WARN / ERROR）
 // 报错输出：所有失败路径都会打印「HTTP 状态 + 错误码 + 关键响应头 + 完整响应原文 + 异常堆栈」，
@@ -30,8 +36,11 @@
 // ────────────────────────────────────────────
 
 const https = require('https');
+const http = require('http');
+const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
 const { URL } = require('url');
 
 // ========== 配置 ==========
@@ -41,6 +50,15 @@ const AUTH_KEY = 'S5r8_2132_auth';        // Discuz 登录凭证（本站在用�
 const SALT_KEY = 'S5r8_2132_saltkey';      // Discuz 盐值
 const MAX_RETRY = 3;
 const truthy = (v) => ['1', 'true', 'yes', 'on'].includes(String(v || '').trim().toLowerCase());
+const SITE_HOST = new URL(SITE).hostname;
+const TIMEOUT_MS = Math.max(3000, parseInt(process.env.WNFLB_TIMEOUT || '20000', 10) || 20000);
+
+// 地址族策略：**默认强制 IPv4**。
+// 原因：家宽 / Docker 容器里 IPv6 常见「解析得到地址但没有出口路由」的黑洞，
+// 典型表现就是「curl 能通（happy-eyeballs 会快速回落 IPv4），Node 却一直连到超时」。
+// 本站 CDN 有 IPv4，故优先打 IPv4；第 2 次重试换回系统默认（auto），两个方向都留兜底。
+// 设 WNFLB_IPV6=1 则不强制，完全按系统默认走。
+const FAMILY_SEQ = truthy(process.env.WNFLB_IPV6) ? [0] : [4, 0];
 
 let COOKIE = '';                            // 当前生效的 Cookie（发送时使用）
 
@@ -221,19 +239,120 @@ function checkCookieExpire(expireStr) {
     }
 }
 
-// ========== HTTP（直连，无代理）==========
-function requestOnce(url, options, headers) {
+// ========== HTTP 代理（CONNECT 隧道）==========
+// 直连不通时的兜底，例如 WNFLB_PROXY=http://192.168.31.233:7890（N1 上 mihomo 的 mixed 端口）。
+// 走标准 CONNECT 隧道：代理只做 TCP 转发，到目标站的 TLS 依然端到端加密。
+function proxyTunnel(proxyUrl, targetHost, targetPort, timeoutMs) {
     return new Promise((resolve, reject) => {
-        const u = new URL(url);
-        const opts = {
-            method: options.method || 'GET',
-            hostname: u.hostname,
-            port: u.port || (u.protocol === 'https:' ? 443 : 80),
-            path: u.pathname + u.search,
-            headers,
-            timeout: 20000
-        };
-        const req = https.request(opts, (res) => {
+        let p;
+        try { p = new URL(proxyUrl); } catch (e) {
+            reject(new Error(`WNFLB_PROXY 格式错误（应形如 http://host:port）: ${proxyUrl}`));
+            return;
+        }
+        const secure = p.protocol === 'https:';
+        const lib = secure ? https : http;
+        const proxyPort = p.port || (secure ? 443 : 80);
+        const auth = p.username
+            ? 'Basic ' + Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password || '')}`).toString('base64')
+            : '';
+        const req = lib.request({
+            host: p.hostname,
+            port: proxyPort,
+            method: 'CONNECT',
+            path: `${targetHost}:${targetPort}`,
+            headers: Object.assign({ 'Host': `${targetHost}:${targetPort}` }, auth ? { 'Proxy-Authorization': auth } : {}),
+            timeout: timeoutMs
+        });
+        req.on('connect', (res, socket) => {
+            if (res.statusCode !== 200) {
+                socket.destroy();
+                const e = new Error(`代理 CONNECT ${targetHost}:${targetPort} 被拒绝: HTTP ${res.statusCode} ${res.statusMessage || ''}`);
+                e.code = 'EPROXYCONNECT';
+                reject(e);
+                return;
+            }
+            resolve(socket);
+        });
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            const e = new Error(`代理 CONNECT 超时（${p.hostname}:${proxyPort} 超过 ${timeoutMs}ms）`);
+            e.code = 'ETIMEDOUT';
+            reject(e);
+        });
+        req.end();
+    });
+}
+
+// 在隧道 socket 上完成 TLS 握手（SNI 仍是目标域名），握手失败可在请求前就精确定位
+function wrapTls(socket, hostname, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const t = tls.connect({ socket, servername: hostname, ALPNProtocols: ['http/1.1'] });
+        t.setTimeout(timeoutMs, () => {
+            t.destroy();
+            const e = new Error(`代理隧道 TLS 握手超时（${hostname} 超过 ${timeoutMs}ms）`);
+            e.code = 'ETIMEDOUT';
+            reject(e);
+        });
+        t.once('secureConnect', () => { t.setTimeout(0); resolve(t); });
+        t.once('error', reject);
+    });
+}
+
+// 把隧道 socket 交给请求使用。
+// ⚠️ 不能用「agent:false + options.createConnection」：Node 在 agent:false 时会忽略该回调，
+//    请求会退回直连 —— 实测现象就是「CONNECT 隧道都建好了，却仍去连真实 IP 然后 ETIMEDOUT」。必须用自定义 Agent。
+function makeTunnelAgent(tunnel, secure) {
+    if (secure) {
+        class TunnelAgent extends https.Agent {
+            createConnection() { return tunnel; }
+        }
+        return new TunnelAgent({ keepAlive: false, maxSockets: 1 });
+    }
+    class PlainTunnelAgent extends http.Agent {
+        createConnection() { return tunnel; }
+    }
+    return new PlainTunnelAgent({ keepAlive: false, maxSockets: 1 });
+}
+
+// ========== HTTP（直连 or 走 WNFLB_PROXY 隧道）==========
+async function requestOnce(url, options, headers, family) {
+    const u = new URL(url);
+    const timeoutMs = options.timeoutMs || TIMEOUT_MS;
+    const isHttps = u.protocol === 'https:';
+    const port = u.port || (isHttps ? 443 : 80);
+    const proxy = (options.proxy !== undefined ? options.proxy : (process.env.WNFLB_PROXY || '')).trim();
+
+    const opts = {
+        method: options.method || 'GET',
+        hostname: u.hostname,
+        port,
+        path: u.pathname + u.search,
+        headers,
+        timeout: timeoutMs,
+        // curl 默认会发 ALPN 扩展，Node 默认不发。部分 CDN/WAF 对「无 ALPN 的 ClientHello」直接丢弃连接，
+        // 表现就是「curl 秒回 200，Node 一直卡到超时」。这里只声明 http/1.1（不能声明 h2，
+        // 否则服务端会切到 HTTP/2 而 Node 的 http 模块解析不了）。
+        ALPNProtocols: ['http/1.1']
+    };
+    // family=4/6 时只解析并使用该地址族；不指定（0/undefined）则交给系统 autoSelectFamily
+    if (family) opts.family = family;
+
+    if (proxy) {
+        let tunnel;
+        try {
+            tunnel = await proxyTunnel(proxy, u.hostname, port, timeoutMs);
+            if (isHttps) tunnel = await wrapTls(tunnel, u.hostname, timeoutMs);
+        } catch (e) {
+            if (!e.url) e.url = `${opts.method} ${url} (via ${proxy})`;
+            throw e;
+        }
+        if (opts.family) delete opts.family;   // 隧道由代理建立，地址族不再适用
+        opts.agent = makeTunnelAgent(tunnel, isHttps);
+    }
+
+    return new Promise((resolve, reject) => {
+        const req = (isHttps ? https : http).request(opts, (res) => {
             const chunks = [];
             res.on('data', c => chunks.push(c));           // chunk 为 Buffer，保留原始字节便于 GBK 解码
             res.on('end', () => {
@@ -242,9 +361,11 @@ function requestOnce(url, options, headers) {
             });
         });
         req.on('error', reject);
-        req.setTimeout(20000, () => {
+        req.setTimeout(timeoutMs, () => {
             req.destroy();
-            const te = new Error(`请求超时（${opts.method} ${u.hostname}${u.pathname} 超过 20000ms）`);
+            const via = proxy ? ` via ${proxy}` : '';
+            const famTag = proxy ? 'proxy' : (family || 'auto');
+            const te = new Error(`请求超时（${opts.method} ${u.hostname}${u.pathname} 超过 ${timeoutMs}ms，family=${famTag}${via}）`);
             te.code = 'ETIMEDOUT';
             te.url = url;
             reject(te);
@@ -270,16 +391,24 @@ async function request(url, options = {}) {
     let lastErr = null;
     const maxTry = options.noRetry ? 1 : MAX_RETRY;   // 登录 POST 不重试：避免把失败次数打满触发账号锁定
     const method = options.method || 'GET';
+    const proxyOn = !!(process.env.WNFLB_PROXY || '').trim();
+    const seq = proxyOn ? [0] : FAMILY_SEQ;   // 走代理隧道时地址族无意义，不做切换
+    const famAt = (i) => seq[Math.min(i, seq.length - 1)];
     for (let i = 0; i < maxTry; i++) {
+        const family = famAt(i);
         try {
-            return await requestOnce(url, options, headers);
+            return await requestOnce(url, options, headers, family);
         } catch (e) {
             lastErr = e;
             if (e && !e.url) e.url = `${method} ${url}`;
             if (i < maxTry - 1) {
-                warn(`🔁 请求失败（第${i + 1}/${maxTry}次，重试）: ${e.message}` + (e.code ? ` code=${e.code}` : ''));
+                const next = famAt(i + 1);
+                warn(`🔁 请求失败（第${i + 1}/${maxTry}次，family=${family || 'auto'} → 换 family=${next || 'auto'} 重试）: ${e.message}` + (e.code ? ` code=${e.code}` : ''));
             }
         }
+    }
+    if (lastErr && lastErr.code === 'ETIMEDOUT' && !proxyOn) {
+        warn('💡 直连超时且未配置 WNFLB_PROXY：若这台机器无法直连本站，可设 WNFLB_PROXY=http://<mihomo地址>:7890 走代理');
     }
     throw lastErr || new Error('请求失败: ' + url);
 }
@@ -415,10 +544,65 @@ function classifySign(signResp) {
     return 'unknown';
 }
 
+// ========== 预检专用：网络层诊断 ==========
+// 直连报错时最难判断的是「整站连不上」还是「某个地址族 / 某条 URL 有问题」。这里一次测全：
+//   · DNS 解析出的全部 IPv4 / IPv6 地址
+//   · 「首页 / 登录页」×「强制 IPv4 / 系统默认 auto」共 4 种组合，各自的耗时与结果
+async function netDiag(timeoutMs) {
+    const t = timeoutMs || 10000;
+    try {
+        const addrs = await dns.promises.lookup(SITE_HOST, { all: true, verbatim: true });
+        const v4 = addrs.filter(a => a.family === 4).map(a => a.address);
+        const v6 = addrs.filter(a => a.family === 6).map(a => a.address);
+        log(`🧭 DNS ${SITE_HOST} → IPv4 [${v4.join(', ') || '无'}]｜IPv6 [${v6.join(', ') || '无'}]`);
+        if (v6.length && !v4.length) warn('⚠️ 只解析出 IPv6：容器若没有 IPv6 出口会全部超时');
+    } catch (e) {
+        warn(`🧭 DNS 解析 ${SITE_HOST} 失败: ${e.message}${e.code ? ' code=' + e.code : ''}`);
+    }
+    const targets = [
+        ['首页  ', SITE + '/'],
+        ['登录页', SITE + '/member.php?mod=logging&action=login']
+    ];
+    const baseHeaders = {
+        'User-Agent': UA,
+        'Accept': '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': SITE + '/',
+        'Cookie': ''
+    };
+    const probeOne = async (label, url, opts, fam) => {
+        const t0 = Date.now();
+        try {
+            const r = await requestOnce(url, opts, baseHeaders, fam);
+            log(`📡 ${label} → HTTP ${r.status}｜${r.raw ? r.raw.length : 0} 字节｜${Date.now() - t0}ms`);
+        } catch (e) {
+            warn(`📡 ${label} → 失败 ${e.message}${e.code ? ' code=' + e.code : ''}（${Date.now() - t0}ms）`);
+        }
+    };
+    // 1) 直连：分别测「强制 IPv4」与「系统默认」，用来区分是 IPv6 黑洞还是整站不可达
+    for (const [name, url] of targets) {
+        for (const fam of [4, 0]) {
+            await probeOne(`${name} 直连 family=${fam || 'auto'}`, url, { method: 'GET', timeoutMs: t, proxy: '' }, fam);
+        }
+    }
+    // 2) 代理：配了 WNFLB_PROXY 才测
+    const proxy = (process.env.WNFLB_PROXY || '').trim();
+    if (proxy) {
+        for (const [name, url] of targets) {
+            await probeOne(`${name} 代理 ${proxy}`, url, { method: 'GET', timeoutMs: t }, 0);
+        }
+    } else {
+        log('🔌 未配置 WNFLB_PROXY，跳过代理测试（直连不通时可用它走 mihomo）');
+    }
+}
+
 // ========== 预检：只探测，不登录、不签到 ==========
 async function runProbe(user, pass) {
     log('🔎 预检模式（WNFLB_PROBE=1）：只探测，不登录、不签到');
     log(`📁 Cookie 缓存路径: ${CACHE_FILE}`);
+    log(`⏱️ 单次超时 ${TIMEOUT_MS}ms｜地址族顺序 [${FAMILY_SEQ.map(f => f || 'auto').join(' → ')}]`);
+    log(`🔌 代理: ${(process.env.WNFLB_PROXY || '').trim() || '未配置（纯直连）'}`);
+    await netDiag(Math.min(10000, TIMEOUT_MS));
     const cached = readCache();
     if (cached) log(`📦 缓存存在：来源 ${cached.source}｜写入 ${cached.savedAt}｜${AUTH_KEY} ${getCookieVal(AUTH_KEY, cached.cookie) ? '✓' : '✗'}`);
     else log('📦 缓存不存在（首次运行会走账号密码登录）');
@@ -486,7 +670,8 @@ async function main() {
             USER = ACCOUNT.substring(0, idx).trim();
             PASS = ACCOUNT.substring(idx + 1).trim();
         }
-        if (!USER || !PASS) warn('⚠️ WNFLB_ACCOUNT 格式应为「账号#密码」或「账号:密码」，当前无法解析');
+        if (USER && PASS) log(`👤 账号: ${USER.length <= 2 ? USER[0] + '***' : USER.substring(0, 2) + '***'}（密码已配置）`);
+        else warn('⚠️ WNFLB_ACCOUNT 格式应为「账号#密码」或「账号:密码」，当前无法解析');
     }
 
     // 0. 预检模式：只探测，不登录、不签到
@@ -600,4 +785,4 @@ if (require.main === module) {
 }
 
 // 便于单测（青龙以 `node 脚本.js` 主模块方式运行，不影响实际执行）
-module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT };
+module.exports = { textOf, isStrictUtf8, tryDecode, CookieJar, getCookieVal, classifySign, resolveCachePath, resolveCookie, dumpResp, dumpErr, DUMP_LIMIT, netDiag, FAMILY_SEQ, TIMEOUT_MS };
