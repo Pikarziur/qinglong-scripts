@@ -30,8 +30,14 @@ HKTV论坛 www.hktv8.com 每日签到 - 青龙脚本 (Discuz! + dsu_paulsign 签
        ① 本地缓存（命中即用）
        ② 账号密码登录（缓存缺失/失效时；成功写回缓存供下次使用）
        ③ HKTV8_COOKIE 环境变量（只有①②都拿不到时才用，**不写回缓存**）
-  2. GET 首页，正则提取签到插件所需的 formhash + 用 `discuz_uid` 判定登录态
+  2. GET 首页，正则提取 formhash + 用 `discuz_uid` 判定登录态
+       **登录态门禁**：`discuz_uid == 0` 且页面无退出链接 ⇒ Cookie 已失效 →
+       直接进重登链，**不再请求签到浮窗**
+       （⚠️ 不能用 formhash 判登录态：游客首页同样带 formhash）
   3. GET 签到插件浮窗 `plugin.php?id=dsu_paulsign:sign&<formhash>&...&inajax=1`，取表单 formhash
+       ⚠️ **取不到 formhash ⇒ 默认判「今日已签到」**：插件已签到时模板走「已签到」分支，
+       签到表单（含 formhash）不再渲染。登录与否已在第 2 步用 uid 单独判掉，
+       所以这里不存在「匿名还是已签到」的歧义；唯一例外是浮窗明说「您需要先登录」→ 仍走重登续签
   4. POST `plugin.php?id=dsu_paulsign:sign&operation=qiandao&infloat=1&sign_as=1&inajax=1`
      表单体 `formhash=<hash>&qdxq=<心情>` 完成签到
   5. 判断 成功 / 已签 / 未登录；登录态失效时自动重登并续签一次
@@ -1004,6 +1010,26 @@ def main():
         log("🔑 formhash: %s｜discuz_uid: %s（%s）"
             % (formhash, uid, "已登录" if uid else "未登录"))
 
+        # 登录态门禁：`discuz_uid` 才是权威判据（HAR 实证：未登录 '0' / 已登录 >0）。
+        # ⚠️ **不能用 formhash 判登录态** —— 游客首页同样带 formhash（游客表单也要用它）。
+        # 双判据（uid>0 或 页面含退出链接）兜住模板差异把 uid 解析弄丢的情况。
+        # 判为未登录即直接进重登链、**不再请求签到浮窗** —— 这样「浮窗取不到 formhash」
+        # 就只剩「已签到」一种解释，「匿名 vs 已签到」的歧义在这一步被消掉。
+        if uid == 0 and not is_logged_in_html(home_text):
+            warn("🍪 首页显示未登录（discuz_uid=0 且无退出链接）：Cookie 已失效")
+            if not tried_relogin and (user and pwd) and not FORCE_LOGIN:
+                warn("🔁 自动重登后续签一次...")
+                fresh = login_and_get_cookie(user, pwd)
+                if fresh:
+                    c.jar = fresh
+                    write_cache(cookie_str_of(fresh), "login-relogin")
+                    tried_relogin = True
+                    continue
+                warn("⚠️ 重登失败，无法续签")
+            err("🚫 登录态失效：请检查 HKTV8_ACCOUNT 或更新 HKTV8_COOKIE")
+            dump_resp("首页", resp)
+            sys.exit(1)
+
         log("📡 请求签到浮窗取签到表单...")
         try:
             sign_fh, fwin, ftext = fetch_sign_formhash(c, formhash)
@@ -1015,9 +1041,13 @@ def main():
         if not sign_fh:
             kind = classify_sign(ftext)
             brief_txt = brief(ftext, 120)
-            if kind == "expired" or uid == 0:
+
+            # 唯一例外：浮窗明说未登录。首页刚判过「已登录」却在这里被判未登录，
+            # 多半是两次请求之间会话掉了（或插件判登录的口径与会话不同），仍走重登续签。
+            if kind == "expired":
+                warn("🍪 签到浮窗提示未登录（%s）" % (brief_txt or "无提示"))
                 if not tried_relogin and (user and pwd) and not FORCE_LOGIN:
-                    warn("🍪 登录态已失效（%s），自动重登后续签一次..." % (brief_txt or "未登录"))
+                    warn("🔁 自动重登后续签一次...")
                     fresh = login_and_get_cookie(user, pwd)
                     if fresh:
                         c.jar = fresh
@@ -1028,15 +1058,16 @@ def main():
                 err("🚫 登录态失效：请检查 HKTV8_ACCOUNT 或更新 HKTV8_COOKIE")
                 dump_resp("签到浮窗", fwin)
                 sys.exit(1)
-            warn("⚠️ 签到浮窗里没解析到 formhash（HTTP %s，%d 字节）｜摘要: %s"
-                 % (getattr(fwin, "status_code", "?"), len(ftext), brief_txt))
-            if kind == "already":
-                log("✅ 今日已签到｜%s" % brief_txt)
-                if DUMP_SIGN:
-                    dump_resp("签到浮窗", fwin)
-                return
-            dump_resp("签到浮窗", fwin)
-            sys.exit(1)
+
+            # 登录态已由上面的 uid 门禁独立确认，故「已登录却取不到浮窗 formhash」
+            # 按本站口径**默认就是今日已签到**：插件已签到时模板走「已签到」分支，
+            # 签到表单（含 formhash）不再渲染。这里刻意不再筛关键词 ——
+            # 模板文案一旦改版就会落到 unknown，被误报成签到失败。
+            log("✅ 今日已签到（浮窗未渲染签到表单，按已登录态默认判定）｜%s"
+                % (brief_txt or "服务器未返回提示"))
+            if DUMP_SIGN:
+                dump_resp("签到浮窗", fwin)
+            return
 
         log("🔑 签到表单 formhash: %s" % sign_fh)
         log("📡 提交签到（心情 %s）..." % QDXQ)

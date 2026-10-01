@@ -182,6 +182,11 @@ SIGN_OK = ('<?xml version="1.0" encoding="gbk"?><root><![CDATA['
            '<div class="c">恭喜你签到成功!获得随机奖励 TV币 5 . </div></div>]]></root>')
 SIGN_ALREADY = ('<?xml version="1.0" encoding="gbk"?><root><![CDATA['
                 '<div class="c">您今天已经签到过了，明天再来吧</div>]]></root>')
+# 已签到时浮窗的另一种形态：签到表单不再渲染，且文案不一定含「已签到」字样
+# （模板一改版就会落 unknown —— 新逻辑不再筛关键词，直接按已登录态默认判已签到）
+SIGN_FWIN_BARE = ('<?xml version="1.0" encoding="gbk"?><root><![CDATA['
+                  '<div class="c altw"><div class="alert_info">连签 12 天 · 今日排名 8</div></div>'
+                  ']]></root>')
 
 CK_LOGIN_PAGE = ["%ssaltkey=xyz789; path=/; domain=.mock.local" % PREFIX]
 CK_LOGIN_OK = ["%sauth=REALTOKEN123456; path=/; domain=.mock.local" % PREFIX,
@@ -469,7 +474,7 @@ t.add("POST", "operation=qiandao", FakeResp(200, SIGN_ALREADY))
 code, out = run_main()
 ck("退出码 0 且提示已签到", code == 0 and "✅ 今日已签到" in out, (code, out[-200:]))
 
-print("-- 6.3 缓存失效 → 自动重登 → 续签成功 --")
+print("-- 6.3 浮窗提示未登录 → 自动重登 → 续签成功 --")
 reset_cache()
 X.write_cache(PREFIX + "auth=STALE; " + PREFIX + "saltkey=S", "login")
 os.environ["HKTV8_ACCOUNT"] = "someone@example.com#pw"
@@ -486,7 +491,7 @@ ck("重登后签到成功", "🎉 签到成功" in out)
 saved = X.read_cache()
 ck("缓存被刷新（source=login-relogin）", saved and saved.get("source") == "login-relogin", saved)
 
-print("-- 6.4 缓存失效 → 重登失败 → 退出 1 --")
+print("-- 6.4 浮窗提示未登录 → 重登失败 → 退出 1 --")
 reset_cache()
 X.write_cache(PREFIX + "auth=STALE; " + PREFIX + "saltkey=S", "login")
 t = install(Script())
@@ -539,6 +544,36 @@ X.PROBE = False
 ck("预检退出码 0", code == 0, code)
 ck("预检不发签到 POST", t.n("POST", "operation=qiandao") == 0)
 ck("预检报告匿名态判定 expired", "匿名态判定: expired" in out, out[-600:])
+
+print("-- 6.9 首页显示未登录（Cookie 失效）→ 门禁拦住、不发浮窗、重登后续签 --")
+reset_cache()
+X.write_cache(PREFIX + "auth=STALE; " + PREFIX + "saltkey=S", "login")
+os.environ["HKTV8_ACCOUNT"] = "someone@example.com#pw"
+t = install(Script())
+t.add("GET", S + "/", lambda n: FakeResp(200, HOME_ANON if n == 0 else HOME_IN), exact=True)
+t.add("GET", "ajaxtarget=fwin_content_dsu_paulsign", FakeResp(200, SIGN_FORM))
+t.add("POST", "operation=qiandao", FakeResp(200, SIGN_OK))
+sc_login_ok(t)
+code, out = run_main()
+ck("退出码 0 且签到成功", code == 0 and "🎉 签到成功" in out, (code, out[-300:]))
+ck("报「首页显示未登录」", "首页显示未登录" in out, out[-500:])
+ck("未登录那轮不发签到浮窗（全程仅 1 次）",
+   t.n("GET", "ajaxtarget=fwin_content_dsu_paulsign") == 1,
+   t.n("GET", "ajaxtarget=fwin_content_dsu_paulsign"))
+ck("首页被请求 2 次（第二次是重登后）", t.n("GET", S + "/") == 2, t.n("GET", S + "/"))
+
+print("-- 6.10 已登录 + 浮窗无 formhash（文案也无关键词）→ 默认判今日已签到 --")
+reset_cache()
+X.write_cache(PREFIX + "auth=CACHED; " + PREFIX + "saltkey=S", "login")
+os.environ.pop("HKTV8_ACCOUNT", None)
+t = install(Script())
+t.add("GET", S + "/", FakeResp(200, HOME_IN), exact=True)
+t.add("GET", "ajaxtarget=fwin_content_dsu_paulsign", FakeResp(200, SIGN_FWIN_BARE))
+code, out = run_main()
+ck("退出码 0", code == 0, code)
+ck("判为「今日已签到」（不再筛关键词）", "✅ 今日已签到" in out, out[-300:])
+ck("不发签到 POST", t.n("POST", "operation=qiandao") == 0)
+ck("不误触发重登", t.n("POST", "loginsubmit=yes") == 0)
 
 reset_cache()
 os.environ.pop("HKTV8_ACCOUNT", None)
