@@ -1,10 +1,10 @@
 /*
-# name:福利吧 - 签到（Cookie 缓存为主 + 账号密码登录兜底）· 测试版
+# name:福利吧 - 签到（缓存为主 + 账号密码登录 + Cookie 环境变量兜底）· 测试版
 */
 
 // ────────────────────────────────────────────
 // 【测试版】与 forum/wnflb2023.js 的差异：
-//   · Cookie 两级兜底：本地缓存（主） → 账号密码登录（辅），不使用任何 Cookie 环境变量
+//   · Cookie 三级兜底：本地缓存（主） → 账号密码登录（辅） → WNFLB_COOKIE 环境变量（最后兜底）
 //   · 无代理（N1 容器实测直连 200 / 1.12s；走 mihomo 7890 反而 6.38s）
 //   · 无通知（notify 已在全仓移除）
 //   · 响应按声明的 charset 解码（本站实测为 utf-8，保留兼容以防站点换编码）
@@ -18,18 +18,24 @@
 //      典型症状就是「curl 能通、Node 一直连到超时」；失败重试会自动换回系统默认（auto）双向兜底。
 //
 // 任务流程：
-//   1. 取 Cookie：本地缓存为主；无缓存（或缓存失效）时用账号密码登录自动获取并写回缓存
+//   1. 取 Cookie，按此顺序：
+//        ① 本地缓存（命中即用，不发任何网络请求）
+//        ② 账号密码登录（缓存缺失/失效时；成功写回缓存供下次使用）
+//        ③ WNFLB_COOKIE 环境变量（只有①②都拿不到时才用，**不写回缓存**）
 //   2. 访问论坛首页，正则提取签到所需的 formhash
 //   3. 请求 fx_checkin 签到接口完成每日签到
 //   4. 判断成功 / 已签 / Cookie 过期；Cookie 失效时自动登录并续签一次
 //
 // 可控参数：
 //   WNFLB_ACCOUNT       建议必配。账号密码，格式「账号#密码」或「账号:密码」；无缓存时靠它自动登录
+//   WNFLB_COOKIE        可选。手工 Cookie，**最后兜底**：缓存与账号密码登录都拿不到时才用它。
+//                       刻意不写回缓存 —— 否则下一轮会直接从缓存命中，等于把它抬到登录之前
+//                       （别名 wnflb2023_cookie，小写形式同样可读）
 //   WNFLB_COOKIE_CACHE  可选。缓存文件路径，默认 /ql/data/wnflb2023.cookie（该目录不可写则回退到脚本同目录）
-//   WNFLB_FORCE_LOGIN   可选。=1 忽略缓存，强制走账号密码登录并覆盖缓存（调试用）
+//   WNFLB_FORCE_LOGIN   可选。=1 忽略缓存，强制走账号密码登录并覆盖缓存（调试用；
+//                       开启时也不会走 WNFLB_COOKIE 兜底，免得掩盖"登录到底成没成"）
 //   WNFLB_PROBE         可选。=1 仅预检：网络诊断（DNS + 4 种地址族/URL 组合）+ 登录页 formhash，不登录、不签到
 //   WNFLB_DUMP_SIGN     可选。=1 签到成功/已签到时也把服务器响应原文打出来（默认关，排查用）
-//   WNFLB_EXPIRE        可选。Cookie 预期过期日 YYYY-MM-DD，设了会提前 3 天提醒
 //   WNFLB_TIMEOUT       可选。单次请求超时毫秒，默认 20000
 //   WNFLB_IPV6          可选。=1 不强制 IPv4，完全按系统默认地址族走（默认优先 IPv4）
 //   MY_PROXY            可选。http 代理（CONNECT 隧道），如 http://192.168.31.233:7890；直连不通时靠它。
@@ -54,7 +60,7 @@ const { URL } = require('url');
 // ========== 配置 ==========
 // 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 // （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-const SCRIPT_VER = '2026-09-30c';
+const SCRIPT_VER = '2026-10-01b';
 // 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
 const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -237,27 +243,6 @@ function writeCache(cookie, source) {
         log(`💾 Cookie 已写入缓存（${source || '-'}）: ${CACHE_FILE}`);
     } catch (e) {
         warn('⚠️ Cookie 缓存写入失败: ' + (e.message || e));
-    }
-}
-
-// ========== 过期日提醒（不阻断）==========
-function checkCookieExpire(expireStr) {
-    if (!expireStr) {
-        log('💡 未配置 WNFLB_EXPIRE，仅在线检测生效（设 YYYY-MM-DD 开启日期提醒）');
-        return;
-    }
-    const exp = new Date(expireStr + 'T23:59:59');
-    if (isNaN(exp.getTime())) {
-        warn('📝 WNFLB_EXPIRE 格式错误，应为 YYYY-MM-DD');
-        return;
-    }
-    const remainDays = Math.ceil((exp - new Date()) / 86400000);
-    const status = remainDays >= 0 ? `剩余${remainDays}天` : `已过期${-remainDays}天`;
-    log(`🍪 Cookie ${status} | 过期: ${expireStr}`);
-    if (remainDays < 0) {
-        err('❌ Cookie 已过期，将尝试自动重新登录');
-    } else if (remainDays <= 3) {
-        warn(`⏰ Cookie 即将过期（${remainDays}天），建议尽快更新！`);
     }
 }
 
@@ -521,17 +506,16 @@ async function loginAttempt(user, pass, attemptNo) {
 
         // auth=deleted：Discuz 的清除标记。登录流程本身没报错，只是会话被清 —— 可安全重试一次。
         if (isDeletedCookieVal(auth)) {
-            warn(`⚠️ 服务端把 ${AUTH_KEY} 置为 deleted（Discuz 的「清除登录态」标记），本次登录态无效`);
-            // 打印本次响应下发的全部 Set-Cookie（含先后顺序）：用来判断是「只发了 deleted」，
-            // 还是「真值在前、被后面的 deleted 覆盖」—— 这两种情况的处理方向不一样。
-            const scList = [].concat(r.headers['set-cookie'] || []).filter(Boolean).map(c => {
+            // 只留一句结论（曾在这里逐条打印全部 Set-Cookie，动辄 20+ 条，日志太臃肿）：
+            // 本次响应里到底有没有下发过 auth 真值 → 区分「服务端只清不清」与「真值被 deleted 覆盖」。
+            const scAll = [].concat(r.headers['set-cookie'] || []).filter(Boolean);
+            const hadReal = scAll.some(c => {
                 const kv = String(c).split(';')[0].trim();
                 const i = kv.indexOf('=');
-                if (i <= 0) return kv;
-                const n = kv.slice(0, i), v = kv.slice(i + 1);
-                return (n === AUTH_KEY && v && !isDeletedCookieVal(v)) ? `${n}=${v.slice(0, 8)}***` : kv;
+                return i > 0 && kv.slice(0, i) === AUTH_KEY && kv.slice(i + 1) && !isDeletedCookieVal(kv.slice(i + 1));
             });
-            warn(`🍪 本次 Set-Cookie（${scList.length} 条，按先后顺序）: ${scList.join(' | ') || '(无)'}`);
+            warn(`⚠️ 服务端把 ${AUTH_KEY} 置为 deleted（Discuz 的「清除登录态」标记），本次登录态无效`
+                + `（响应共 ${scAll.length} 条 Set-Cookie，${hadReal ? '曾下发 auth 真值但被 deleted 覆盖' : '未下发新的 auth 真值'}）`);
             return { state: 'deleted', resp: r };
         }
 
@@ -581,7 +565,12 @@ async function loginAndGetCookie(user, pass) {
     return null;
 }
 
-// ========== Cookie 解析：缓存（主） → 账号密码登录（辅）==========
+// ========== Cookie 解析：缓存（主） → 账号密码登录（辅） → WNFLB_COOKIE（最后兜底）==========
+// ⚠️ 这个顺序是**有意**排的：环境变量 Cookie 放在账号密码**之后**。
+//    它只在「缓存和登录都拿不到」时救场（典型场景：站点临时上验证码/风控，登录走不通，
+//    但手里还有一份自浏览器导出的有效 Cookie）。
+//    ⇒ 环境变量 Cookie **不写回缓存**：否则下一轮会直接从缓存命中，等于把它抬到登录之前，
+//      与"最后兜底"的定位相矛盾。
 async function resolveCookie(user, pass) {
     const forceLogin = truthy(process.env.WNFLB_FORCE_LOGIN);
 
@@ -605,19 +594,40 @@ async function resolveCookie(user, pass) {
         warn('🔁 WNFLB_FORCE_LOGIN 已开启：忽略缓存，强制账号密码登录');
     }
 
-    // 2) 账号密码登录兜底：无缓存 / 缓存无效时自动登录，成功后把新 Cookie 写回缓存
+    // 2) 账号密码登录：无缓存 / 缓存无效时自动登录，成功后把新 Cookie 写回缓存
     if (user && pass) {
-        log('🔐 无可用缓存，尝试账号密码登录获取 Cookie...');
+        log('🔐 尝试账号密码登录获取 Cookie...');
         const fresh = await loginAndGetCookie(user, pass);
         if (fresh) {
             COOKIE = fresh;
             writeCache(fresh, 'login');
             return true;
         }
-        return false;
+        warn('⚠️ 账号密码登录未拿到有效 Cookie，继续尝试 WNFLB_COOKIE 兜底');
+    } else {
+        warn('⚠️ WNFLB_ACCOUNT 未配置或格式不对（应为「账号#密码」），跳过账号密码登录');
     }
 
-    if (forceLogin) warn('⚠️ 已强制登录但未配置 WNFLB_ACCOUNT，回退尝试缓存');
+    // 3) WNFLB_COOKIE 环境变量：最后兜底
+    //    调试开关开启时跳过 —— 那时要看的就是"登录本身成功没有"，兜底会把失败掩盖成成功
+    if (forceLogin) {
+        warn('🔁 WNFLB_FORCE_LOGIN 已开启：跳过 WNFLB_COOKIE 兜底（否则会掩盖登录是否真的成功）');
+        return false;
+    }
+    const envCookie = (process.env.WNFLB_COOKIE || process.env.wnflb2023_cookie || '').trim();
+    if (!envCookie) return false;
+
+    if (isAuthValid(envCookie)) {
+        COOKIE = envCookie;
+        log('🌱 账号密码登录也拿不到 Cookie，改用 WNFLB_COOKIE 环境变量兜底（本次不写缓存）');
+        return true;
+    }
+    const names = String(envCookie).split(';').map(kv => kv.split('=')[0].trim()).filter(Boolean);
+    if (isDeletedCookieVal(getCookieVal(AUTH_KEY, envCookie))) {
+        warn(`⚠️ WNFLB_COOKIE 里的 ${AUTH_KEY} 是 deleted（Discuz 的「已登出」标记），不可用`);
+    } else {
+        warn(`⚠️ WNFLB_COOKIE 里没有 ${AUTH_KEY}，不可用（共 ${names.length} 个字段: ${names.join(', ') || '(空)'}）`);
+    }
     return false;
 }
 
@@ -775,6 +785,10 @@ async function runProbe(user, pass) {
     if (cached) log(`📦 缓存存在：来源 ${cached.source}｜写入 ${cached.savedAt}｜${AUTH_KEY} ${isAuthValid(cached.cookie) ? '✓' : (isDeletedCookieVal(getCookieVal(AUTH_KEY, cached.cookie)) ? '✗(deleted)' : '✗')}`);
     else log('📦 缓存不存在（首次运行会走账号密码登录）');
     log(`👤 WNFLB_ACCOUNT ${user && pass ? '已配置' : '未配置'}`);
+    const envCk = (process.env.WNFLB_COOKIE || process.env.wnflb2023_cookie || '').trim();
+    log(`🍪 WNFLB_COOKIE ${envCk
+        ? (isAuthValid(envCk) ? `已配置（${AUTH_KEY} ✓，作为最后兜底）` : `已配置但不含有效 ${AUTH_KEY}，兜底不可用`)
+        : '未配置（可选，仅在缓存与账号密码登录都失败时兜底）'}`);
 
     // 1) 首页连通性（带当前 Cookie，若为空则匿名）
     COOKIE = cached ? cached.cookie : '';
@@ -856,10 +870,9 @@ async function main() {
     // 1. 取 Cookie
     await resolveCookie(USER, PASS);
     if (!isAuthValid(COOKIE)) {
-        failLog(`❌ 无法获取 Cookie（请配置 WNFLB_ACCOUNT=账号#密码；缓存路径: ${CACHE_FILE}）`);
+        failLog(`❌ 无法获取 Cookie（按「缓存 → 账号密码登录 → WNFLB_COOKIE」三级都失败；请检查 WNFLB_ACCOUNT=账号#密码，或配一个 WNFLB_COOKIE 兜底；缓存路径: ${CACHE_FILE}）`);
         return;
     }
-    checkCookieExpire(process.env.WNFLB_EXPIRE);
 
     // 2. 首页取 formhash → 签到；Cookie 失效时自动登录并续签一次
     let signResult = '';
