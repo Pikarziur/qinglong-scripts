@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  HKTV论坛 - 每日签到（测试版）
+# name:  HKTV论坛
 # cron: 10 0,12 * * *
 # =========================================================
 """
-HKTV论坛 www.hktv8.com 每日签到 - 青龙脚本 (Discuz! + dsu_paulsign 签到插件) · 测试版
+HKTV论坛 www.hktv8.com 每日签到 - 青龙脚本 (Discuz! + dsu_paulsign 签到插件)
 ============================================================================
-【测试版】说明：本文件验证通过后并入 forum/hktv8.py（本仓库此前没有 hktv8 脚本，属新建）
-
 凭证获取顺序：本地缓存（主） → 账号密码登录（辅） → HKTV8_COOKIE（最后兜底）
 
 站点要点（全部为实测，非猜测）：
@@ -960,7 +958,7 @@ def run_probe(user, pwd):
 
 # ========== 主流程 ==========
 def main():
-    log("🚀 HKTV论坛 每日签到开始（脚本 v%s · 测试版）" % SCRIPT_VER)
+    log("🚀 HKTV论坛 每日签到开始（脚本 v%s）" % SCRIPT_VER)
 
     if _http is None:
         err("📦 缺少 HTTP 依赖：请执行 pip install curl_cffi（推荐）或 pip install requests")
