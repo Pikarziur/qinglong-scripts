@@ -53,6 +53,123 @@ import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# ———————————— 错误通知（可选项，想用则用）————————————
+# 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
+# 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/notify.py，仓库内为同目录/上一级的 notify.py）——
+#   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
+# 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
+import os as _os
+import sys as _sys
+
+_QN_SITE = "习酒花园"
+# 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
+_QN_ENVS = (
+    "PUSH_KEY", "BARK_PUSH", "TG_BOT_TOKEN", "DD_BOT_TOKEN", "QYWX_KEY", "QYWX_AM",
+    "IGOT_PUSH_KEY", "PUSH_PLUS_TOKEN", "WE_PLUS_BOT_TOKEN", "GOBOT_URL", "GOTIFY_URL",
+    "DEER_KEY", "CHAT_URL", "AIBOTK_KEY", "CHRONOCAT_URL", "SMTP_SERVER", "SMTP_EMAIL",
+    "PUSHME_KEY", "FSKEY", "QMSG_KEY", "NTFY_URL", "WXPUSHER_APP_TOKEN",
+    "WXPUSHER_SPT_LIST", "WEBHOOK_URL", "OPENILINK_APP_TOKEN", "WPUSH_APIKEY",
+)
+_qn_send = None
+_qn_load_err = ""
+_qn_dirs = ["/ql/data/scripts", "/ql/scripts"]
+try:
+    _qn_here = _os.path.dirname(_os.path.abspath(__file__))
+    _qn_dirs += [_qn_here, _os.path.dirname(_qn_here)]
+except NameError:
+    pass
+try:
+    for _p in _qn_dirs:
+        if _p and _os.path.isfile(_os.path.join(_p, "notify.py")):
+            if _p not in _sys.path:
+                _sys.path.insert(0, _p)
+            from notify import send as _qn_send
+            break
+except Exception as _qn_e:
+    _qn_send = None
+    _qn_load_err = str(_qn_e)
+_QN_NOMOD = (
+    "[QL] 青龙通知模块 notify.py 加载失败（%s），错误日志未推送" % _qn_load_err
+    if _qn_load_err else
+    "[QL] 未找到青龙通知模块 notify.py，错误日志未推送"
+)
+
+_qn_errors = []
+_qn_seen = set()
+_qn_flushed = False
+
+
+def collect_error(line):
+    """由日志出口调用：收集 ERROR 行（去重，最多 30 条）。"""
+    _s = str(line).strip()
+    if not _s or _s in _qn_seen:
+        return False
+    _qn_seen.add(_s)
+    if len(_qn_errors) < 30:
+        _qn_errors.append(_s)
+    return True
+
+
+def flush_notify(_site=None, summary="", logger=None, **_kw):
+    """收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 notify 时只提示一行。
+
+    前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    """
+    global _qn_flushed
+    if _qn_flushed or not _qn_errors:
+        return False
+    _qn_flushed = True
+    if _qn_send is None:
+        print(_QN_NOMOD, flush=True)
+        return False
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
+        return False
+    _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
+    try:
+        _qn_send("【%s】执行出错" % _QN_SITE, _body)
+        return True
+    except Exception as _e:
+        print("[QL] 错误日志推送失败：%s" % _e, flush=True)
+        return False
+
+import atexit as _atexit
+
+
+def _qn_atexit():
+    """兜底：脚本中途 return / sys.exit 时补一次（未配置则只提示一行）。"""
+    if _qn_flushed:
+        return
+    if _qn_send is None:
+        print(_QN_NOMOD, flush=True)
+        return
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
+        return
+    if _qn_errors:
+        flush_notify(_QN_SITE, "脚本提前结束，未走到收尾汇总")
+
+
+_atexit.register(_qn_atexit)
+
+
+def _qn_excepthook(exc_type, exc, tb):
+    """兜底：脚本顶层未捕获异常时，也把错误推一次。"""
+    if exc_type is KeyboardInterrupt:
+        _qn_sys_excepthook(exc_type, exc, tb)
+        return
+    try:
+        _qn_errors.append("[ERROR] [%s] %s: %s" % (_QN_SITE, exc_type.__name__, exc))
+    except Exception:
+        pass
+    if not _qn_flushed:
+        flush_notify(_QN_SITE, "脚本异常中断（未捕获异常）")
+    _qn_sys_excepthook(exc_type, exc, tb)
+
+
+_qn_sys_excepthook = _sys.excepthook
+_sys.excepthook = _qn_excepthook
+
 # ==================== 统一微信协议 ====================
 # 支持两种模式：
 # 1. getCode.py 标准模式（推荐）：获取微信code
@@ -69,21 +186,58 @@ except ImportError:
     _HAS_GETCODE = False
 
 class _ExijiuFormatter(logging.Formatter):
-    """统一日志：[LEVEL] [EXIJIU] emoji message（emoji 按级别自动注入）。"""
+    """统一日志：[LEVEL] [EXIJIU] emoji message（行首已有 emoji 则沿用，避免重复注入）。"""
     _EMOJI = {
         logging.DEBUG: "🔍", logging.INFO: "ℹ️", logging.WARNING: "⚠️",
         logging.ERROR: "❌", logging.CRITICAL: "💥",
     }
 
+    @staticmethod
+    def _has_emoji_head(text):
+        ch = str(text).lstrip()[:1]
+        if not ch:
+            return False
+        cp = ord(ch)
+        return ((0x2300 <= cp <= 0x23FF) or (0x2600 <= cp <= 0x27BF) or (0x2B00 <= cp <= 0x2BFF)
+                or cp == 0x2139 or cp >= 0x1F300)
+
     def format(self, record):
-        record.emoji = self._EMOJI.get(record.levelno, "•")
+        emoji = "" if self._has_emoji_head(record.getMessage()) else self._EMOJI.get(record.levelno, "•")
+        record.prefix = (emoji + " ") if emoji else ""
         return super().format(record)
 
 
 _handler = logging.StreamHandler()
-_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(emoji)s %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[_handler])
+_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(prefix)s%(message)s"))
+
+
+class _NotifyHandler(logging.Handler):
+    """只把 ERROR 级日志喂给通知模块，不做输出。"""
+
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            collect_error(self.format(record))
+
+
+_notify_handler = _NotifyHandler()
+_notify_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(prefix)s%(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler, _notify_handler])
 log = logging.getLogger(__name__)
+
+
+# ———————————— 账号分隔标识 ————————————
+# 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+_ACC_RULE = "=" * 70
+
+def acc_banner(idx, total, ident=""):
+    """打印账号分隔标识（开始）。"""
+    log.info(_ACC_RULE)
+    log.info("👤 账号 %d/%d%s" % (idx, total, (" ｜ " + str(ident)) if ident else ""))
+    log.info(_ACC_RULE)
+
+def acc_footer(idx, total):
+    """打印账号分隔标识（结束）。"""
+    log.info("🔚 账号 %d/%d 处理结束" % (idx, total))
 
 
 # 月度酿酒累计（跨 cron 调用累加本月总升数），存于脚本同目录的 xijiu_monthly.json
@@ -1636,7 +1790,7 @@ if __name__ == "__main__":
     for i, acc in enumerate(accounts):
         wxid = acc["id"]; remark = acc.get("note") or acc.get('ref') or wxid
         mask = (remark[:3] + "*****" + remark[-3:]) if len(remark) >= 7 else remark
-        log.info("👤 [%d/%d] 账号: %s" % (i+1, len(accounts), mask))
+        acc_banner(i + 1, len(accounts), "备注：" + mask)
 
         client = GardenClient(ocr_server=OCR_SERVER or None)
         cache_id = APPID + ':' + wxid
@@ -1668,17 +1822,18 @@ if __name__ == "__main__":
             try:
                 result = auto_login_with_retry(client, wxid, WX_SERVER, OCR_SERVER, base_delay=5)
             except (Exception, TokenInvalidError) as e:
-                log.error("   ❌ 登录异常: %s，跳过" % e); continue
+                log.error("   ❌ 登录异常: %s，跳过" % e); acc_footer(i + 1, len(accounts)); continue
 
             log.info("   🔑 登录结果: token=%s  加密=%s" % (
                 "✅ 已获取" if result.get("token") else "❌ 失败",
                 "✅ 就绪" if result.get("crypto_ready") else "❌ 未就绪"))
 
-            if not result.get("token"): log.error("   ❌ 登录失败，跳过"); continue
+            if not result.get("token"): log.error("   ❌ 登录失败，跳过"); acc_footer(i + 1, len(accounts)); continue
             cache[cache_id] = client.token; save_cache(cache)
 
         if not client.crypto:
             log.error("   ❌ 加密未就绪，跳过")
+            acc_footer(i + 1, len(accounts))
             continue
 
         try:
@@ -1716,41 +1871,53 @@ if __name__ == "__main__":
                     log.error("   ❌ 重试异常: %s" % e2, exc_info=True)
             else:
                 log.error("   ❌ 执行异常: %s" % e, exc_info=True)
+        acc_footer(i + 1, len(accounts))
         time.sleep(random.randint(2, 5))
 
-    log.info('本次账号结果：完成 %d / %d；其余账号的原因见上方记录', completed_count, len(accounts))
-    # 全账号本月酿酒合计(一行汇总)
+    # ── [执行汇总] ──
+    _sum_rule = "➖" * 35
+    log.info(_sum_rule)
+    log.info("📊 [执行汇总] 习酒花园 · 账号 %d ｜ 完成 %d ｜ 失败 %d",
+             len(accounts), completed_count, len(accounts) - completed_count)
+    # 全账号本月酿酒合计
     try:
         _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
         if _mkey in _mdata or MONTH_BASE_L > 0:
             brewed = _mdata.get(_mkey, 0)
             if MONTH_BASE_L > 0:
-                log.info("📅 %d月全账号酿酒共计 %.2f L（起点 %.2f + 累计收获 %.2f）" % (
+                log.info("   📅 %d月全账号酿酒共计 %.2f L（起点 %.2f + 累计收获 %.2f）" % (
                     datetime.now().month, MONTH_BASE_L + brewed, MONTH_BASE_L, brewed))
             else:
-                log.info("📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed))
+                log.info("   📅 %d月全账号酿酒共计 %.2f L" % (datetime.now().month, brewed))
     except Exception:
         pass
 
-    # ── 计算下次执行时间 ──
+    # ── 下次执行时间 ──
     if all_min_harvests:
         overall_min_secs = min(harvest for _, harvest in all_min_harvests)
-        log.info("📊 各账号最短剩余成熟时间:")
+        log.info("   ⏱️ 各账号最短剩余成熟:")
         for remark, secs in sorted(all_min_harvests, key=lambda x: x[1]):
             next_time = datetime.now() + timedelta(seconds=secs)
-            log.info("   👤 %-12s  %s  （预计 %s 成熟）" % (remark, fmt_remaining_from_seconds(secs), next_time.strftime("%H:%M:%S")))
+            log.info("      👤 %-12s  %s  （预计 %s 成熟）" % (remark, fmt_remaining_from_seconds(secs), next_time.strftime("%H:%M:%S")))
         next_run_secs = overall_min_secs + 90
         next_run_time = datetime.now() + timedelta(seconds=next_run_secs)
         cron_schedule = "%d %d %d %d %d *" % (next_run_time.second, next_run_time.minute, next_run_time.hour, next_run_time.day, next_run_time.month)
-        log.info("📅 下次执行: %s  （间隔 %s）" % (next_run_time.strftime("%Y-%m-%d %H:%M:%S"), fmt_remaining_from_seconds(next_run_secs)))
-        log.info("⏰ cron 表达式: %s" % cron_schedule)
+        log.info("   📅 下次执行: %s（间隔 %s）" % (next_run_time.strftime("%Y-%m-%d %H:%M:%S"), fmt_remaining_from_seconds(next_run_secs)))
+        log.info("   ⏰ cron: %s" % cron_schedule)
         update_ql_cron_time(cron_schedule)
         print("NEXT_RUN_SECS=%s" % next_run_secs)
     else:
         default_secs = 1800
         next_run_time = datetime.now() + timedelta(seconds=default_secs)
         cron_schedule = "%d %d %d %d %d *" % (next_run_time.second, next_run_time.minute, next_run_time.hour, next_run_time.day, next_run_time.month)
-        log.info("⚠️  未获取到地块收获时间，使用默认间隔 %s" % fmt_remaining_from_seconds(default_secs))
-        log.info("📅 下次执行: %s" % next_run_time.strftime("%Y-%m-%d %H:%M:%S"))
+        log.info("   ⚠️  未获取到地块收获时间，使用默认间隔 %s" % fmt_remaining_from_seconds(default_secs))
+        log.info("   📅 下次执行: %s" % next_run_time.strftime("%Y-%m-%d %H:%M:%S"))
         update_ql_cron_time(cron_schedule)
         print("NEXT_RUN_SECS=%s" % default_secs)
+    log.info(_sum_rule)    
+    # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    flush_notify(
+        "习酒花园",
+        "账号 %d ｜ 完成 %d ｜ 失败 %d" % (len(accounts), completed_count, len(accounts) - completed_count),
+        logger=log.info,
+    )

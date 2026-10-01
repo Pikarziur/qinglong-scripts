@@ -79,11 +79,26 @@ global.getSingleCode = getSingleCode;
 global.resolveAccounts = _resolveYybAccounts;
 
 // ========== 统一日志：[LEVEL] [WANYAZX] message ==========
-function emit(level, emoji, msg) { console.log(`[${level}] [WANYAZX] ${emoji} ${msg}`); }
+function emit(level, emoji, msg) {
+    const _line = `[${level}] [WANYAZX] ${emoji} ${msg}`;
+    console.log(_line);
+    if (level === 'ERROR') collectError(_line);
+}
 function log(msg)  { emit('INFO', 'ℹ️', msg); }
 function warn(msg) { emit('WARN', '⚠️', msg); }
 function err(msg)  { emit('ERROR', '❌', msg); }
 // ===== adapter end =====
+
+// ========== 账号分隔标识：便于多账号日志区分定位 ==========
+const ACC_RULE = '='.repeat(70);
+function accBanner(idx, total, ident = '') {
+    log(ACC_RULE);
+    log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
+    log(ACC_RULE);
+}
+function accFooter(idx, total) {
+    log(`🔚 账号 ${idx}/${total} 处理结束`);
+}
 
 /*
 ------------------------------------------
@@ -202,6 +217,131 @@ const axios = Object.assign(async function axios(config = {}) {
 });
 const fs = require("fs");
 const path = require("path");
+
+// ———————————— 错误通知（可选项，想用则用）————————————
+// 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
+// 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/sendNotify.js，官方仓库内为 notify.js）——
+//   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
+// 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
+const _qfs = require('fs');
+const _qpath = require('path');
+
+const _QN_SITE = '丸丫甄选';
+// 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
+const _QN_ENVS = [
+    'PUSH_KEY', 'BARK_PUSH', 'TG_BOT_TOKEN', 'DD_BOT_TOKEN', 'QYWX_KEY', 'QYWX_AM',
+    'IGOT_PUSH_KEY', 'PUSH_PLUS_TOKEN', 'WE_PLUS_BOT_TOKEN', 'GOBOT_URL', 'GOTIFY_URL',
+    'DEER_KEY', 'CHAT_URL', 'AIBOTK_KEY', 'CHRONOCAT_URL', 'SMTP_SERVER', 'SMTP_EMAIL',
+    'PUSHME_KEY', 'FSKEY', 'QMSG_KEY', 'NTFY_URL', 'WXPUSHER_APP_TOKEN',
+    'WXPUSHER_SPT_LIST', 'WEBHOOK_URL', 'OPENILINK_APP_TOKEN', 'WPUSH_APIKEY',
+];
+let _qnNotify = null;
+let _qnLoadErr = '';
+try {
+    for (const _d of ['/ql/data/scripts', '/ql/scripts', __dirname, _qpath.dirname(__dirname)]) {
+        for (const _n of ['sendNotify.js', 'notify.js']) {
+            const _f = _qpath.join(_d, _n);
+            if (_qfs.existsSync(_f)) { _qnNotify = require(_f).sendNotify; break; }
+        }
+        if (_qnNotify) break;
+    }
+} catch (_e) { _qnNotify = null; _qnLoadErr = _e && _e.message ? _e.message : String(_e); }
+const _QN_NOMOD = _qnLoadErr
+    ? ('[QL] 青龙通知模块加载失败（' + _qnLoadErr + '），错误日志未推送')
+    : '[QL] 未找到青龙通知模块（sendNotify.js 或 notify.js），错误日志未推送';
+
+const _qnErrors = [];
+const _qnSeen = new Set();
+let _qnFlushed = false;
+
+function collectError(line) {
+    const s = String(line == null ? '' : line).trim();
+    if (!s || _qnSeen.has(s)) return false;
+    _qnSeen.add(s);
+    if (_qnErrors.length < 30) _qnErrors.push(s);
+    return true;
+}
+
+async function flushNotify(_site, summary, _logger) {
+    // 收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 sendNotify 时只提示一行。
+    // 前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    if (_qnFlushed || !_qnErrors.length) return false;
+    _qnFlushed = true;
+    if (!_qnNotify) {
+        console.log(_QN_NOMOD);
+        return false;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return false;
+    }
+    try {
+        await _qnNotify('【' + _QN_SITE + '】执行出错', (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
+        return true;
+    } catch (e) {
+        console.log('[QL] 错误日志推送失败：' + (e && e.message ? e.message : e));
+        return false;
+    }
+}
+
+// 兜底：脚本中途 process.exit() 或未走到收尾汇总就结束时，补一次推送/提示。
+// Node 的 exit 事件里发不出异步请求，所以这里包装 process.exit，等推完再真退出。
+function _qnFallback(reason) {
+    if (_qnFlushed) return undefined;
+    if (!_qnNotify) {
+        _qnFlushed = true;
+        console.log(_QN_NOMOD);
+        return undefined;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        _qnFlushed = true;
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return undefined;
+    }
+    if (_qnErrors.length) return flushNotify(_QN_SITE, reason);
+    _qnFlushed = true;
+    return undefined;
+}
+
+if (!global.__qnExitHooked) {
+    global.__qnExitHooked = true;
+    const _qnOrigExit = process.exit;
+    let _qnExiting = false;
+    process.exit = function (code) {
+        // 已在退出流程中：忽略重复调用。若此处真退出，会截断第一次启动的异步推送。
+        if (_qnExiting) return undefined;
+        _qnExiting = true;
+        let _qnP = null;
+        try { _qnP = _qnFallback('脚本中途退出，未走到收尾汇总'); } catch (_e) { _qnP = null; }
+        if (_qnP && typeof _qnP.then === 'function') {
+            // 保险：推送卡住时最多等 25 秒，之后强制退出
+            const _qnT = setTimeout(() => { _qnOrigExit.call(process, code); }, 25000);
+            _qnP.catch(() => {}).then(() => { clearTimeout(_qnT); _qnOrigExit.call(process, code); });
+            return undefined;
+        }
+        return _qnOrigExit.call(process, code);
+    };
+    process.on('beforeExit', () => {
+        const _qnP = _qnFallback('脚本未走到收尾汇总');
+        if (_qnP && typeof _qnP.then === 'function') _qnP.catch(() => {});
+    });
+}
+
+// 兜底：脚本顶层未捕获异常（依赖缺失、运行时崩溃等）时，也把错误推一次。
+process.on('uncaughtException', (e) => {
+    try {
+        _qnErrors.push('[ERROR] ' + (e && e.stack ? String(e.stack).split('\n')[0] : String(e)));
+    } catch (_) { /* 忽略 */ }
+    const _qnP = _qnFallback('脚本异常中断（未捕获异常）');
+    if (_qnP && typeof _qnP.then === 'function') {
+        _qnP.catch(() => {}).then(() => { console.error(e); process.exit(1); });
+        return;
+    }
+    console.error(e);
+    process.exit(1);
+});
+
+
 
 const MINI_APP_ID = "wx35322299c6492f6e";
 const CLIENT_BIZ = "weapp_wsc";
@@ -546,22 +686,39 @@ function buildSummaryContent(results) {
     return lines.join("\n");
 }
 
-function printSummary(results) {
+async function printSummary(results) {
     if (!results || !results.length) return;
+    let ok = 0, signed = 0;
+    for (const t of results) {
+        if (t.todayStatus === '签到成功') ok++;
+        else if (t.todayStatus === '今日已签') signed++;
+    }
+    log('='.repeat(70));
+    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${results.length} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 失败 ${results.length - ok - signed}`);
     for (const line of buildSummaryContent(results).split('\n')) {
         if (line) log(line);
     }
+    log('='.repeat(70));
+    // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    await flushNotify(
+        '丸丫甄选',
+        `账号 ${results.length} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 失败 ${results.length - ok - signed}`,
+        log,
+    );
 }
 
 !(async () => {
     const results = [];
     await $.checkEnv(ckName);
-    for (const openid of $.userList) {
+    for (let _i = 0; _i < $.userList.length; _i++) {
+        const openid = $.userList[_i];
+        accBanner(_i + 1, $.userList.length, `标识：${openid}`);
         const task = new Task(openid);
         await task.run();
         results.push(task);
+        accFooter(_i + 1, $.userList.length);
         await $.wait(800);
     }
-    printSummary(results);
+    await printSummary(results);
 })()
     .catch((e) => err('💥 ' + (e.message || e)));

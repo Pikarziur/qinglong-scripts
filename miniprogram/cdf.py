@@ -37,13 +37,147 @@ LOGIN_URL       = "https://" + HOST + "/api/session/wxSession/v2"
 SIGN_URL        = "https://" + HOST + "/api/user/sign"
 SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
 
+# ———————————— 错误通知（可选项，想用则用）————————————
+# 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
+# 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/notify.py，仓库内为同目录/上一级的 notify.py）——
+#   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
+# 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
+import os as _os
+import sys as _sys
+
+_QN_SITE = "中免会员"
+# 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
+_QN_ENVS = (
+    "PUSH_KEY", "BARK_PUSH", "TG_BOT_TOKEN", "DD_BOT_TOKEN", "QYWX_KEY", "QYWX_AM",
+    "IGOT_PUSH_KEY", "PUSH_PLUS_TOKEN", "WE_PLUS_BOT_TOKEN", "GOBOT_URL", "GOTIFY_URL",
+    "DEER_KEY", "CHAT_URL", "AIBOTK_KEY", "CHRONOCAT_URL", "SMTP_SERVER", "SMTP_EMAIL",
+    "PUSHME_KEY", "FSKEY", "QMSG_KEY", "NTFY_URL", "WXPUSHER_APP_TOKEN",
+    "WXPUSHER_SPT_LIST", "WEBHOOK_URL", "OPENILINK_APP_TOKEN", "WPUSH_APIKEY",
+)
+_qn_send = None
+_qn_load_err = ""
+_qn_dirs = ["/ql/data/scripts", "/ql/scripts"]
+try:
+    _qn_here = _os.path.dirname(_os.path.abspath(__file__))
+    _qn_dirs += [_qn_here, _os.path.dirname(_qn_here)]
+except NameError:
+    pass
+try:
+    for _p in _qn_dirs:
+        if _p and _os.path.isfile(_os.path.join(_p, "notify.py")):
+            if _p not in _sys.path:
+                _sys.path.insert(0, _p)
+            from notify import send as _qn_send
+            break
+except Exception as _qn_e:
+    _qn_send = None
+    _qn_load_err = str(_qn_e)
+_QN_NOMOD = (
+    "[QL] 青龙通知模块 notify.py 加载失败（%s），错误日志未推送" % _qn_load_err
+    if _qn_load_err else
+    "[QL] 未找到青龙通知模块 notify.py，错误日志未推送"
+)
+
+_qn_errors = []
+_qn_seen = set()
+_qn_flushed = False
+
+
+def collect_error(line):
+    """由日志出口调用：收集 ERROR 行（去重，最多 30 条）。"""
+    _s = str(line).strip()
+    if not _s or _s in _qn_seen:
+        return False
+    _qn_seen.add(_s)
+    if len(_qn_errors) < 30:
+        _qn_errors.append(_s)
+    return True
+
+
+def flush_notify(_site=None, summary="", logger=None, **_kw):
+    """收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 notify 时只提示一行。
+
+    前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    """
+    global _qn_flushed
+    if _qn_flushed or not _qn_errors:
+        return False
+    _qn_flushed = True
+    if _qn_send is None:
+        print(_QN_NOMOD, flush=True)
+        return False
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
+        return False
+    _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
+    try:
+        _qn_send("【%s】执行出错" % _QN_SITE, _body)
+        return True
+    except Exception as _e:
+        print("[QL] 错误日志推送失败：%s" % _e, flush=True)
+        return False
+
+import atexit as _atexit
+
+
+def _qn_atexit():
+    """兜底：脚本中途 return / sys.exit 时补一次（未配置则只提示一行）。"""
+    if _qn_flushed:
+        return
+    if _qn_send is None:
+        print(_QN_NOMOD, flush=True)
+        return
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
+        return
+    if _qn_errors:
+        flush_notify(_QN_SITE, "脚本提前结束，未走到收尾汇总")
+
+
+_atexit.register(_qn_atexit)
+
+
+def _qn_excepthook(exc_type, exc, tb):
+    """兜底：脚本顶层未捕获异常时，也把错误推一次。"""
+    if exc_type is KeyboardInterrupt:
+        _qn_sys_excepthook(exc_type, exc, tb)
+        return
+    try:
+        _qn_errors.append("[ERROR] [%s] %s: %s" % (_QN_SITE, exc_type.__name__, exc))
+    except Exception:
+        pass
+    if not _qn_flushed:
+        flush_notify(_QN_SITE, "脚本异常中断（未捕获异常）")
+    _qn_sys_excepthook(exc_type, exc, tb)
+
+
+_qn_sys_excepthook = _sys.excepthook
+_sys.excepthook = _qn_excepthook
+
 # ———————————— 统一日志 ————————————
 def _emit(level, msg):
-    print(f"[{level}] [CDF] {msg}", flush=True)
+    line = f"[{level}] [CDF] {msg}"
+    print(line, flush=True)
+    if level == "ERROR":
+        collect_error(line)
 
 def log(msg):   _emit("INFO", msg)
 def warn(msg):  _emit("WARN", msg)
 def err(msg):   _emit("ERROR", msg)
+
+# ———————————— 账号分隔标识 ————————————
+# 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+_ACC_RULE = "=" * 70
+
+def acc_banner(idx, total, ident=""):
+    """打印账号分隔标识（开始）。"""
+    log(_ACC_RULE)
+    log("👤 账号 %d/%d%s" % (idx, total, (" ｜ " + str(ident)) if ident else ""))
+    log(_ACC_RULE)
+
+def acc_footer(idx, total):
+    """打印账号分隔标识（结束）。"""
+    log("🔚 账号 %d/%d 处理结束" % (idx, total))
 
 def today_str():
     y, m, d = time.localtime()[:3]
@@ -223,7 +357,6 @@ def _status_emoji_and_tag(status):
     }.get(status, ("❔", status))
 
 def run_account(server, ref):
-    log("👤 账号  ref = " + str(ref))
     token, status_msg = ensure_token(server, ref)
     if not token:
         brief = " ".join(str(status_msg).split())[:80]
@@ -273,6 +406,7 @@ def main():
 
     success = 0
     for i, (server, ref, _) in enumerate(entries, start=1):
+        acc_banner(i, total, "标识：" + str(ref))
         try:
             ok, line = run_account(server, ref)
             if ok:
@@ -280,12 +414,20 @@ def main():
         except Exception as e:
             err("💥 账号异常: " + str(e))
             err(traceback.format_exc())
+        acc_footer(i, total)
         if i < total:
             wait = random.randint(3, 8)
             # 不打印休息，避免啰嗦；真卡住了用户能从执行计时看在等
             time.sleep(wait)
 
-    log(f"🏁 中免会员 执行汇总 · 账号 {total}｜成功 {success}｜失败 {total - success}")
+    log(_ACC_RULE)
+    log(f"📊 [执行汇总] 中免会员 · 账号 {total} ｜ 成功 {success} ｜ 失败 {total - success}")
+    log(_ACC_RULE)
+
+    # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    flush_notify("中免会员",
+                 f"账号 {total} ｜ 成功 {success} ｜ 失败 {total - success}",
+                 logger=log)
 
 if __name__ == "__main__":
     main()

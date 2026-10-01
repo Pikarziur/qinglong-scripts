@@ -18,8 +18,133 @@
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
+// 日志标签：必须在 new Env() 之前定义——Env 构造函数里会用到它（否则 TDZ 报错）
+const SRC = 'EXIJIU_JPH';
 const $ = new Env('君品荟签到');
 const axios = require('axios');
+
+// ———————————— 错误通知（可选项，想用则用）————————————
+// 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
+// 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/sendNotify.js，官方仓库内为 notify.js）——
+//   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
+// 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
+const _qfs = require('fs');
+const _qpath = require('path');
+
+const _QN_SITE = '君品荟';
+// 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
+const _QN_ENVS = [
+    'PUSH_KEY', 'BARK_PUSH', 'TG_BOT_TOKEN', 'DD_BOT_TOKEN', 'QYWX_KEY', 'QYWX_AM',
+    'IGOT_PUSH_KEY', 'PUSH_PLUS_TOKEN', 'WE_PLUS_BOT_TOKEN', 'GOBOT_URL', 'GOTIFY_URL',
+    'DEER_KEY', 'CHAT_URL', 'AIBOTK_KEY', 'CHRONOCAT_URL', 'SMTP_SERVER', 'SMTP_EMAIL',
+    'PUSHME_KEY', 'FSKEY', 'QMSG_KEY', 'NTFY_URL', 'WXPUSHER_APP_TOKEN',
+    'WXPUSHER_SPT_LIST', 'WEBHOOK_URL', 'OPENILINK_APP_TOKEN', 'WPUSH_APIKEY',
+];
+let _qnNotify = null;
+let _qnLoadErr = '';
+try {
+    for (const _d of ['/ql/data/scripts', '/ql/scripts', __dirname, _qpath.dirname(__dirname)]) {
+        for (const _n of ['sendNotify.js', 'notify.js']) {
+            const _f = _qpath.join(_d, _n);
+            if (_qfs.existsSync(_f)) { _qnNotify = require(_f).sendNotify; break; }
+        }
+        if (_qnNotify) break;
+    }
+} catch (_e) { _qnNotify = null; _qnLoadErr = _e && _e.message ? _e.message : String(_e); }
+const _QN_NOMOD = _qnLoadErr
+    ? ('[QL] 青龙通知模块加载失败（' + _qnLoadErr + '），错误日志未推送')
+    : '[QL] 未找到青龙通知模块（sendNotify.js 或 notify.js），错误日志未推送';
+
+const _qnErrors = [];
+const _qnSeen = new Set();
+let _qnFlushed = false;
+
+function collectError(line) {
+    const s = String(line == null ? '' : line).trim();
+    if (!s || _qnSeen.has(s)) return false;
+    _qnSeen.add(s);
+    if (_qnErrors.length < 30) _qnErrors.push(s);
+    return true;
+}
+
+async function flushNotify(_site, summary, _logger) {
+    // 收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 sendNotify 时只提示一行。
+    // 前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    if (_qnFlushed || !_qnErrors.length) return false;
+    _qnFlushed = true;
+    if (!_qnNotify) {
+        console.log(_QN_NOMOD);
+        return false;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return false;
+    }
+    try {
+        await _qnNotify('【' + _QN_SITE + '】执行出错', (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
+        return true;
+    } catch (e) {
+        console.log('[QL] 错误日志推送失败：' + (e && e.message ? e.message : e));
+        return false;
+    }
+}
+
+// 兜底：脚本中途 process.exit() 或未走到收尾汇总就结束时，补一次推送/提示。
+// Node 的 exit 事件里发不出异步请求，所以这里包装 process.exit，等推完再真退出。
+function _qnFallback(reason) {
+    if (_qnFlushed) return undefined;
+    if (!_qnNotify) {
+        _qnFlushed = true;
+        console.log(_QN_NOMOD);
+        return undefined;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        _qnFlushed = true;
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return undefined;
+    }
+    if (_qnErrors.length) return flushNotify(_QN_SITE, reason);
+    _qnFlushed = true;
+    return undefined;
+}
+
+if (!global.__qnExitHooked) {
+    global.__qnExitHooked = true;
+    const _qnOrigExit = process.exit;
+    let _qnExiting = false;
+    process.exit = function (code) {
+        // 已在退出流程中：忽略重复调用。若此处真退出，会截断第一次启动的异步推送。
+        if (_qnExiting) return undefined;
+        _qnExiting = true;
+        let _qnP = null;
+        try { _qnP = _qnFallback('脚本中途退出，未走到收尾汇总'); } catch (_e) { _qnP = null; }
+        if (_qnP && typeof _qnP.then === 'function') {
+            // 保险：推送卡住时最多等 25 秒，之后强制退出
+            const _qnT = setTimeout(() => { _qnOrigExit.call(process, code); }, 25000);
+            _qnP.catch(() => {}).then(() => { clearTimeout(_qnT); _qnOrigExit.call(process, code); });
+            return undefined;
+        }
+        return _qnOrigExit.call(process, code);
+    };
+    process.on('beforeExit', () => {
+        const _qnP = _qnFallback('脚本未走到收尾汇总');
+        if (_qnP && typeof _qnP.then === 'function') _qnP.catch(() => {});
+    });
+}
+
+// 兜底：脚本顶层未捕获异常（依赖缺失、运行时崩溃等）时，也把错误推一次。
+process.on('uncaughtException', (e) => {
+    try {
+        _qnErrors.push('[ERROR] ' + (e && e.stack ? String(e.stack).split('\n')[0] : String(e)));
+    } catch (_) { /* 忽略 */ }
+    const _qnP = _qnFallback('脚本异常中断（未捕获异常）');
+    if (_qnP && typeof _qnP.then === 'function') {
+        _qnP.catch(() => {}).then(() => { console.error(e); process.exit(1); });
+        return;
+    }
+    console.error(e);
+    process.exit(1);
+});
 
 const { setGlobalDispatcher, Agent } = require('undici');
 setGlobalDispatcher(new Agent({
@@ -34,7 +159,7 @@ request = request.defaults({
 });
 // 统一日志格式：[LEVEL] [EXIJIU_JPH] emoji message
 // 级别 INFO/WARN/ERROR；行首自带 emoji 时沿用，否则按级别补默认 emoji
-const SRC = 'EXIJIU_JPH';
+// （SRC 已在文件顶部定义，供 Env 构造函数使用）
 const _LEVEL_EMOJI = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌' };
 const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
 function _levelOfLine(line) {
@@ -48,12 +173,27 @@ function emit(level, text) {
         const line = raw.trim();
         if (!line) continue;
         const lv = level || _levelOfLine(line);
-        console.log(`[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`);
+        const _line = `[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`;
+        console.log(_line);
+        if (lv === 'ERROR') collectError(_line);
     }
 }
 function log(text) { emit(null, text); }
 function warn(text) { emit('WARN', text); }
 function err(text) { emit('ERROR', text); }
+
+// ==================== 账号分隔标识：便于多账号日志区分定位 ====================
+// 注意：本脚本 emit 会对非 emoji 开头行自动补 ℹ️，故分隔线以 ➖ 开头（宽度≈70 列，与其它脚本一致）
+// 仅走 log 输出，不写入 msg，避免污染汇总解析
+const ACC_RULE = '➖'.repeat(35);
+function accBanner(idx, total, ident = '') {
+    log(ACC_RULE);
+    log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
+    log(ACC_RULE);
+}
+function accFooter(idx, total) {
+    log(`🔚 账号 ${idx}/${total} 处理结束`);
+}
 const debug = 0; //0为关闭调试，1为打开调试,默认为0
 const WX_APPID = "wx8d41cdc44c8aeaab";
 const OCR_SERVER = (($.isNode() ? process.env.OCR_SERVER : $.getdata("OCR_SERVER")) || "http://ocr.fj.us.ci").replace(/\/$/, "");
@@ -102,8 +242,8 @@ function parseYybGoEntry(rawValue) {
 
         for (let index = 0; index < xjhdArr.length; index++) {
             let num = index + 1
-            addLog(`📌 开始【第 ${num} 个账号】`, true)
             xjhd = xjhdArr[index];
+            accBanner(num, xjhdArr.length, `标识：${xjhd}`);
             xj_code = '';
             xj_token = '';
             xj_cookie = '';
@@ -113,10 +253,12 @@ function parseYybGoEntry(rawValue) {
 
             if (!(await get_code(xjhd))) {
                 addLog(`❌ 第 ${num} 个账号获取微信 code 失败，跳过`, true);
+                accFooter(num, xjhdArr.length);
                 continue;
             }
             if (!(await wxMiniSilentLogin(xj_code))) {
                 addLog(`❌ 第 ${num} 个账号业务登录失败，跳过`, true);
+                accFooter(num, xjhdArr.length);
                 continue;
             }
             await get_setcookie(xj_token);
@@ -175,9 +317,11 @@ function parseYybGoEntry(rawValue) {
             }
             await getpoints(xj_token);
             await $await(10000)
+            accFooter(num, xjhdArr.length);
         }
         const okCount = (msg.match(/签到成功/g) || []).length;
-        log(`📊 执行汇总｜账号 ${xjhdArr.length}｜成功 ${okCount}｜失败 ${xjhdArr.length - okCount}`);
+        log('➖'.repeat(35));
+        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${xjhdArr.length - okCount}`);
         // 渲染分账号汇总（简洁精要；账号行含总积分，签到状态 ✔️/❌）
         const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
         const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);
@@ -198,9 +342,16 @@ function parseYybGoEntry(rawValue) {
                 summaryOut.push('✔️ 签到成功');
             }
             const totalMatch = blk.match(/总积分：(\d+)/);
-            if (totalMatch) summaryOut.push(`总积分${totalMatch[1]}`);
+            if (totalMatch) summaryOut.push(`💰 总积分${totalMatch[1]}`);
         }
         for (const line of summaryOut) log(line);
+        log('➖'.repeat(35));
+        // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+        await flushNotify(
+            '君品荟',
+            `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${xjhdArr.length - okCount}`,
+            log,
+        );
     }
 })()
     .catch((e) => err(e && e.stack ? e.stack : e))
@@ -831,7 +982,7 @@ function Env(t, e) {
         }
 
         msg(e = t, s = "", i = "", r) {
-            // 通知推送能力已移除，此处仅本地打印
+            // 此处仅本地打印；错误日志由青龙自带通知模块统一在收尾推送
             const parts = [e, s, i].filter(x => x !== undefined && x !== null && x !== '');
             console.log(`[INFO] [${SRC}] 📣 ${parts.join('｜')}`), this.logs = this.logs.concat(parts)
         }

@@ -15,6 +15,131 @@ const axios = require('axios');
 const fs = require('fs');
 const pathMod = require('path');
 
+// ———————————— 错误通知（可选项，想用则用）————————————
+// 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
+// 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/sendNotify.js，官方仓库内为 notify.js）——
+//   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
+// 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
+const _qfs = require('fs');
+const _qpath = require('path');
+
+const _QN_SITE = '红色火箭';
+// 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
+const _QN_ENVS = [
+    'PUSH_KEY', 'BARK_PUSH', 'TG_BOT_TOKEN', 'DD_BOT_TOKEN', 'QYWX_KEY', 'QYWX_AM',
+    'IGOT_PUSH_KEY', 'PUSH_PLUS_TOKEN', 'WE_PLUS_BOT_TOKEN', 'GOBOT_URL', 'GOTIFY_URL',
+    'DEER_KEY', 'CHAT_URL', 'AIBOTK_KEY', 'CHRONOCAT_URL', 'SMTP_SERVER', 'SMTP_EMAIL',
+    'PUSHME_KEY', 'FSKEY', 'QMSG_KEY', 'NTFY_URL', 'WXPUSHER_APP_TOKEN',
+    'WXPUSHER_SPT_LIST', 'WEBHOOK_URL', 'OPENILINK_APP_TOKEN', 'WPUSH_APIKEY',
+];
+let _qnNotify = null;
+let _qnLoadErr = '';
+try {
+    for (const _d of ['/ql/data/scripts', '/ql/scripts', __dirname, _qpath.dirname(__dirname)]) {
+        for (const _n of ['sendNotify.js', 'notify.js']) {
+            const _f = _qpath.join(_d, _n);
+            if (_qfs.existsSync(_f)) { _qnNotify = require(_f).sendNotify; break; }
+        }
+        if (_qnNotify) break;
+    }
+} catch (_e) { _qnNotify = null; _qnLoadErr = _e && _e.message ? _e.message : String(_e); }
+const _QN_NOMOD = _qnLoadErr
+    ? ('[QL] 青龙通知模块加载失败（' + _qnLoadErr + '），错误日志未推送')
+    : '[QL] 未找到青龙通知模块（sendNotify.js 或 notify.js），错误日志未推送';
+
+const _qnErrors = [];
+const _qnSeen = new Set();
+let _qnFlushed = false;
+
+function collectError(line) {
+    const s = String(line == null ? '' : line).trim();
+    if (!s || _qnSeen.has(s)) return false;
+    _qnSeen.add(s);
+    if (_qnErrors.length < 30) _qnErrors.push(s);
+    return true;
+}
+
+async function flushNotify(_site, summary, _logger) {
+    // 收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 sendNotify 时只提示一行。
+    // 前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    if (_qnFlushed || !_qnErrors.length) return false;
+    _qnFlushed = true;
+    if (!_qnNotify) {
+        console.log(_QN_NOMOD);
+        return false;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return false;
+    }
+    try {
+        await _qnNotify('【' + _QN_SITE + '】执行出错', (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
+        return true;
+    } catch (e) {
+        console.log('[QL] 错误日志推送失败：' + (e && e.message ? e.message : e));
+        return false;
+    }
+}
+
+// 兜底：脚本中途 process.exit() 或未走到收尾汇总就结束时，补一次推送/提示。
+// Node 的 exit 事件里发不出异步请求，所以这里包装 process.exit，等推完再真退出。
+function _qnFallback(reason) {
+    if (_qnFlushed) return undefined;
+    if (!_qnNotify) {
+        _qnFlushed = true;
+        console.log(_QN_NOMOD);
+        return undefined;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        _qnFlushed = true;
+        console.log('[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）');
+        return undefined;
+    }
+    if (_qnErrors.length) return flushNotify(_QN_SITE, reason);
+    _qnFlushed = true;
+    return undefined;
+}
+
+if (!global.__qnExitHooked) {
+    global.__qnExitHooked = true;
+    const _qnOrigExit = process.exit;
+    let _qnExiting = false;
+    process.exit = function (code) {
+        // 已在退出流程中：忽略重复调用。若此处真退出，会截断第一次启动的异步推送。
+        if (_qnExiting) return undefined;
+        _qnExiting = true;
+        let _qnP = null;
+        try { _qnP = _qnFallback('脚本中途退出，未走到收尾汇总'); } catch (_e) { _qnP = null; }
+        if (_qnP && typeof _qnP.then === 'function') {
+            // 保险：推送卡住时最多等 25 秒，之后强制退出
+            const _qnT = setTimeout(() => { _qnOrigExit.call(process, code); }, 25000);
+            _qnP.catch(() => {}).then(() => { clearTimeout(_qnT); _qnOrigExit.call(process, code); });
+            return undefined;
+        }
+        return _qnOrigExit.call(process, code);
+    };
+    process.on('beforeExit', () => {
+        const _qnP = _qnFallback('脚本未走到收尾汇总');
+        if (_qnP && typeof _qnP.then === 'function') _qnP.catch(() => {});
+    });
+}
+
+// 兜底：脚本顶层未捕获异常（依赖缺失、运行时崩溃等）时，也把错误推一次。
+process.on('uncaughtException', (e) => {
+    try {
+        _qnErrors.push('[ERROR] ' + (e && e.stack ? String(e.stack).split('\n')[0] : String(e)));
+    } catch (_) { /* 忽略 */ }
+    const _qnP = _qnFallback('脚本异常中断（未捕获异常）');
+    if (_qnP && typeof _qnP.then === 'function') {
+        _qnP.catch(() => {}).then(() => { console.error(e); process.exit(1); });
+        return;
+    }
+    console.error(e);
+    process.exit(1);
+});
+
+
+
 // ==================== 内置 YYB-Go-Enhanced 适配 ====================
 function getYybEntries() {
     return String(process.env.YYB_SERVER || '')
@@ -121,12 +246,26 @@ function emit(level, text) {
         const line = raw.trim();
         if (!line) continue;
         const lv = level || _levelOfLine(line);
-        console.log(`[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`);
+        const _line = `[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`;
+        console.log(_line);
+        if (lv === 'ERROR') collectError(_line);
     }
 }
 function log(text) { emit(null, text); }
 function warn(text) { emit('WARN', text); }
 function err(text) { emit('ERROR', text); }
+
+// ==================== 账号分隔标识：便于多账号日志区分定位 ====================
+// 注意：本脚本 emit 会对非 emoji 开头行自动补 ℹ️，故分隔线以 ➖ 开头（宽度≈70 列，与其它脚本一致）
+const ACC_RULE = '➖'.repeat(35);
+function accBanner(idx, total, ident = '') {
+    log(ACC_RULE);
+    log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
+    log(ACC_RULE);
+}
+function accFooter(idx, total) {
+    log(`🔚 账号 ${idx}/${total} 处理结束`);
+}
 
 // ==================== SM4 加密（从逆向代码移植） ====================
 const SM4_SBOX = [214,144,233,254,204,225,61,183,22,182,20,194,40,251,44,5,43,103,154,118,42,190,4,195,170,68,19,38,73,134,6,153,156,66,80,244,145,239,152,122,51,84,11,67,237,207,172,98,228,179,28,169,201,8,232,149,128,223,148,250,117,143,63,166,71,7,167,252,243,115,23,186,131,89,60,25,230,133,79,168,104,107,129,178,113,100,218,139,248,235,15,75,112,86,157,53,30,36,14,94,99,88,209,162,37,34,124,59,1,33,120,135,212,0,70,87,159,211,39,82,76,54,2,231,160,196,200,158,234,191,138,210,64,199,56,181,163,247,242,206,249,97,21,161,224,174,93,164,155,52,26,85,173,147,50,48,245,140,177,227,29,246,226,46,130,102,202,96,192,41,35,171,13,83,78,111,213,219,55,69,222,253,142,47,3,255,106,114,109,108,91,81,141,27,175,146,187,221,188,127,17,217,92,65,31,16,90,216,10,193,49,136,165,205,123,189,45,116,208,18,184,229,180,176,137,105,151,74,12,150,119,126,101,185,241,9,197,110,198,132,24,240,125,236,58,220,77,32,121,238,95,62,215,203,57,72];
@@ -1430,7 +1569,8 @@ async function main() {
 
     if (!taskVar.trim()) {
         err('环境变量未设置: ' + ckName);
-        process.exit(0);
+        await flushNotify(_QN_SITE, '环境变量未设置，脚本提前结束');
+        return;
     }
 
     // 解析账号：WX_ID 格式 wxid#备注，多账号换行或 & 分隔
@@ -1449,6 +1589,8 @@ async function main() {
 
     let successCount = 0;
     for (let i = 0; i < accounts.length; i++) {
+        const _acc = accounts[i] || {};
+        accBanner(i + 1, accounts.length, `备注：${_acc.note || _acc.wxid || ''}`);
         try {
             const result = await runTask(accounts[i]);
             if (result && result.success) {
@@ -1463,6 +1605,7 @@ async function main() {
         } catch (e) {
             log('❌ 账号 ' + (i + 1) + ' 异常: ' + e.message);
         }
+        accFooter(i + 1, accounts.length);
         if (i < accounts.length - 1) {
             log('⏳ 等待 ' + randomInt(3, 6) + ' 秒...');
             await sleep(randomInt(3000, 6000));
@@ -1470,10 +1613,10 @@ async function main() {
     }
 
     // 汇总输出
-    log('📊 执行完毕, 成功 ' + successCount + '/' + accounts.length);
+    log('➖'.repeat(35));
+    log(`📊 [执行汇总] 红色火箭 · 账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount}`);
 
     // 输出每个账号的汇总信息
-    log('📋 账号汇总:');
     let totalClaimed = 0;
     for (const account of accounts) {
         const display = account.note || account.wxid;
@@ -1481,11 +1624,18 @@ async function main() {
         const pendingRedPacketAmount = account.pendingRedPacketAmount || 0;
         const claimedAmount = account.claimedAmount || 0;
         totalClaimed += claimedAmount;
-        log('当前账号: ' + display + ' 当前积分: ' + currentPoint + ' 当前未领红包: ' + formatMoney(pendingRedPacketAmount) + '元 本次自动提现: ' + formatMoney(claimedAmount) + '元');
+        log('👤 ' + display + ' ｜ 积分 ' + currentPoint + ' ｜ 未领红包 ' + formatMoney(pendingRedPacketAmount) + '元 ｜ 本次提现 ' + formatMoney(claimedAmount) + '元');
     }
     if (totalClaimed > 0) {
         log('💰 全部账号本次自动提现合计: ' + formatMoney(totalClaimed) + '元');
     }
+    log('➖'.repeat(35));
+    // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    await flushNotify(
+        '红色火箭',
+        `账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount}`,
+        log,
+    );
 }
 
 main().catch(e => { err('脚本异常: ' + e.message); err(e.stack); });
