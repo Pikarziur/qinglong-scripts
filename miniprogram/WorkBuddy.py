@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: WorkBuddy
+# name: WorkBuddy 签到
 # cron: 31 7,12,23 * * *
 """
-
+name: WorkBuddy 签到
+cron: 31 7,12 * * *
 
 ════════════════════════════════════════════════════════════════
 该脚本引用自原作者：https://github.com/L0NE-6/WorkBuddy-Daily
 修改作者：lcmovie https://github.com/lcmovie/YYB-GO-Script-i
 修改后主要适配：https://github.com/525815266/YYB-Go-Enhanced，实现无感取码，自动打卡 + 全部成长任务！
 ════════════════════════════════════════════════════════════════
-🌱 WorkBuddy Daily - 全能签到脚本 v2.5（YYB 无感取码版）
+🌱 WorkBuddy Daily - 全能签到脚本 v2.8（YYB 无感取码版）
 ════════════════════════════════════════════════════════════════
 
 📌 这是什么
@@ -27,6 +28,7 @@
    🎮 8 项互动玩法   抽奖、盲盒、Buddy、派猫猫旅行、连签兑换、补签卡、礼包补偿、徽章
    💰 三类查询       积分套餐（剩余/总量/已用）、用量统计、成长数据（等级/连签/能量）
    🎁 自动领奖       扫描全部已完成任务自动领取；completed 未领的自动补领
+   📢 错误通知       只推错误：本次出现 ERROR 才推送一次；走青龙自带 notify.py（面板「通知设置」配一次全站通用）
    🧩 幂等安全       重复运行只补缺口，不会重复领取或重复操作
    🔄 API 重试       网络/5xx 自动指数退避重试，写动作间隔可调（--gap）
    🔗 稳定指纹       每账号 md5 派生固定 machineId，桌面/web/小程序三域对齐官方埋点
@@ -43,7 +45,11 @@
    --query           仅查询积分/用量/签到状态，不执行任务
    --no-school       跳过开学季活动
    --no-desktop      跳过桌面任务（非 Windows 默认走指纹上报）
+   --no-notify       本次不推送错误通知（默认只推错误，无错误本就静默）
    --gap 2.0         写动作间隔秒数（默认 1.5，最低 1.0）
+   --mp-gap 15       mp 对话事件间隔（默认 45，上游反作弊要求真人节奏）
+   --tasks checkin,travel        只跑白名单子任务
+   --skip-tasks lottery,redeem   跳过指定子任务
 
 🔑 环境变量
    YYB_SERVER           【必填】每行一个 "YYB地址@微信账号标识"
@@ -51,6 +57,14 @@
    WB_ACCOUNT_FILTER    【可选】等价 --only，逗号分隔账号编号
    YYB_ONLY_REFS        【可选】脚本内账号序号白名单（1 起），列表形式如 [1,3]；留空 [] 跑全部，非空时优先于 WB_ACCOUNT_FILTER / --only
    WB_CACHE_DIR         【可选】缓存目录，默认 /ql/data/config/workbuddy_yyb
+   WB_NO_NOTIFY         【可选】=1 关闭通知
+   WORKBUDDY_TASKS      【可选】白名单：只跑列出的子任务（逗号/空格分隔）
+   WORKBUDDY_SKIP_TASKS 【可选】黑名单：跳过列出的子任务
+     别名：checkin 签到 / travel 旅行 / lottery 抽奖 / redeem 连登兑换 / gift 礼包补偿
+           makeup 补签 / badges 徽章 / blindbox 盲盒 / buddy_info Buddy信息 / desktop 桌面 / school 开学季
+     例：只想每天做签到+旅行 → WORKBUDDY_TASKS=checkin,travel（其余任务以后想做时再放开）
+   WORKBUDDY_MP_GAP     【可选】mp 对话事件间隔秒数（默认 45，可调小提速）
+   WB_NO_NOTIFY / --no-notify   【可选】关闭错误推送（默认只推错误）
 
 📦 任务清单（同原版 WorkBuddy-Daily，共 40 项，38 项全自动）
    ☁️ 成长中心任务（18 项）：每日签到 · 设计创意模式 · 探索优秀灵感 · 桌面端对话 ·
@@ -70,6 +84,15 @@
    · 前置依赖：accept 报 prerequisite not met 时先补跑前置任务（如先领养首只 Buddy）再重试
    · 真实会话 id：专家/技能任务的 requestId/messageId 取自真实对话的服务端消息 id（cmb- 形态）
    · 签到读数：签到后读 /billing/meter/checkin-activity-status（连签天数/累计积分/连签奖励日）
+   · 子任务开关：WORKBUDDY_TASKS（白名单）/ WORKBUDDY_SKIP_TASKS（黑名单）——
+     可只留签到+旅行，其余任务以后再做时再放开（积分一个月有效期，不需一次领完）
+   · mp 真人节奏：Sequential 对话判据逐条 45s±10s 上报（上游有反作弊：连发会先计数、
+     后被整体回滚，claim 报 400）；--mp-gap / WORKBUDDY_MP_GAP 可调
+   · accept 后回读：mp 任务接受后重读真实 target，避免"少报→误判达标→claim 400"
+   · mp 指纹：按官方源码口径（ideVersion/extVersion=2.2.8、android 14/arm64、source=mini_program）
+   · locked 任务：任务行 locked=true（未到上线时间）直接跳过并给出解锁日，不空跑不误判
+   · mp 对话 id：conversationId / requestId / traceId 同值传递（源码同值）
+   · 瞬时错误重试：签到/余额/用量对网络与 5xx 做 2s/4s 有界重试，业务错误不重试
 
 📄 依赖：requests（pip3 install requests）
 
@@ -163,6 +186,8 @@ def flush_notify(_site=None, summary="", logger=None, **_kw):
     global _qn_flushed
     if _qn_flushed or not _qn_errors:
         return False
+    if _os.getenv("WB_NO_NOTIFY") == "1":
+        return False
     _qn_flushed = True
     if _qn_send is None:
         print(_QN_NOMOD, flush=True)
@@ -183,7 +208,7 @@ import atexit as _atexit
 
 def _qn_atexit():
     """兜底：脚本中途 return / sys.exit 时补一次（未配置则只提示一行）。"""
-    if _qn_flushed:
+    if _qn_flushed or _os.getenv("WB_NO_NOTIFY") == "1":
         return
     if _qn_send is None:
         print(_QN_NOMOD, flush=True)
@@ -292,7 +317,7 @@ def acc_footer(idx, total):
     """打印账号分隔标识（结束）。"""
     log("🔚 账号 %d/%d 处理结束" % (idx, total))
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
 LOGIN_URL = "https://www.codebuddy.cn/v2/plugin/login/token"
 PROFILE_URL = "https://www.codebuddy.cn/v2/as/wechatmp/user/profile"
@@ -466,6 +491,36 @@ LIGHTHOUSE_EXPERT = {"id": "ex_2cvvUZQhDyeJ", "name": "腾讯轻量云专家", "
 PLAYBOOK_CASE = {"id": "01-ProductDesign", "name": "产品设计", "type": "document"}
 
 WRITE_GAP = 1.5  # 写动作间隔秒数（--gap 可覆盖，最低 1.0）
+MP_CHAT_GAP = 45.0  # mp 对话事件“真人节奏”间隔秒数（上游实测 45s；--mp-gap / WORKBUDDY_MP_GAP 可覆盖）
+
+
+def _parse_task_filter(raw):
+    """解析子任务过滤串：逗号/顿号/空格分隔，大小写不敏感。"""
+    return {x.strip().lower() for x in re.split(r"[,\uff0c\u3001\s]+", raw or "") if x.strip()}
+
+
+TASK_ONLY = _parse_task_filter(os.environ.get("WORKBUDDY_TASKS") or os.environ.get("WORKBUDDY_ONLY_TASKS"))
+TASK_SKIP = _parse_task_filter(os.environ.get("WORKBUDDY_SKIP_TASKS"))
+
+
+def want(*codes):
+    """子任务开关：WORKBUDDY_TASKS（白名单）/ WORKBUDDY_SKIP_TASKS（黑名单）。
+
+    · 黑名单命中即跳过；白名单非空时未列出的也跳过（两者可叠加）
+    · 代号大小写不敏感；常用别名：checkin 每日签到 / travel 旅行 / lottery 抽奖 /
+      redeem 连登兑换 / gift 礼包补偿 / makeup 补签 / badges 徽章 / blindbox 盲盒 /
+      buddy_info Buddy 信息 / desktop 桌面任务 / school 开学季
+    · 只影响「主动执行」：accept、领奖、前置补救（first_buddy）不受影响，
+      因此被跳过的任务不会被完成，也就不会被领奖计入积分
+    """
+    if not TASK_ONLY and not TASK_SKIP:
+        return True
+    names = {str(c).strip().lower() for c in codes}
+    if names & TASK_SKIP:
+        return False
+    if TASK_ONLY and not (names & TASK_ONLY):
+        return False
+    return True
 
 
 # ============================================================================ #
@@ -980,7 +1035,9 @@ def chat_request_events(uid, nick, conv_id, prompt, txt, mode="craft"):
 # ---------- 查询 ----------
 def queryCredits(s):
     try:
-        r = s.post(BASE + "/billing/meter/get-user-resource-summary", json={}, timeout=20, verify=False).json()
+        # 瞬时错误（网络/5xx）有界重试：2s/4s 退避，业务错误不重试（上游 panel 同款口径）
+        r = api_retry(s, "POST", BASE + "/billing/meter/get-user-resource-summary", body={},
+                      retries=3, gap=2.0).json()
         pkgs = r.get("data", {}).get("Packages", [])
         paid = r.get("data", {}).get("IsPaidUser")
         out = []
@@ -1000,7 +1057,8 @@ def queryCredits(s):
 
 def queryUsage(s):
     try:
-        r = s.post(BASE + "/billing/meter/get-user-resource", json={}, timeout=20, verify=False).json()
+        r = api_retry(s, "POST", BASE + "/billing/meter/get-user-resource", body={},
+                      retries=3, gap=2.0).json()
         resp = r.get("data", {}).get("Response", {}).get("Data", {}) or {}
         return "共%d类资源，本月已使用%s次" % (resp.get("TotalCount", "?"), resp.get("TotalDosage", "?"))
     except Exception:
@@ -1713,25 +1771,33 @@ def mp_machine_id(uid):
 
 
 def mp_base(uid, nick):
+    """小程序埋点公共指纹（对齐官方源码 module 22015 的 wQ()+Ao()）。
+
+    源码常量（module 25439）：ideVersion/extVersion = 小程序包版本 2.2.8（恒定值，不是
+    SaaS 状态）；os/osVersion/arch 取 getDeviceInfo() 运行值——这里固定成一份真实安卓机
+    指纹（android 14 / arm64），与 mp_mini_expert_event、上游 task_runner 同口径。
+    """
     now = int(time.time() * 1000)
-    return {"timestamp": now, "ideType": "WorkBuddy_MP", "ideVersion": "2.4.0",
-            "extName": "workbuddy-mp", "extVersion": "2.4.0", "product": "SaaS",
+    return {"timestamp": now, "ideType": "WorkBuddy_MP", "ideVersion": "2.2.8",
+            "extName": "workbuddy-mp", "extVersion": "2.2.8", "product": "SaaS",
             "ideName": "wx_app_cloud", "platform": "mini_program",
-            "source": "mini_program",
-            "os": "windows", "osVersion": "11", "arch": "x64",
+            "source": "mini_program",   # 官方源码口径：mp 身份 = wx_app_cloud + WorkBuddy_MP + source
+            "os": "android", "osVersion": "14", "arch": "arm64",
             "machineId": mp_machine_id(uid), "timezone": "Asia/Shanghai",
             "userId": uid, "userNickname": nick}
 
 
 def mp_chat_event(uid, nick, conv_id, activity_id=None):
-    rid = "wb2api-" + str(uuid.uuid4())
-    ev = {"eventCode": "chat_request_send", "inputLength": 14, "isPlan": False,
+    """小程序 chat_request_send 事件（chat_3_times / school_season / Sequential_Tasks_1 判据）。"""
+    # 官方源码（growth 模块 86692）：conversationId / requestId / traceId 同值传递
+    rid = conv_id
+    ev = {"eventCode": "chat_request_send", "mode": "chat", "inputLength": 12, "isPlan": False,
           "isAutoExecuteTerminal": False, "isAutoModify": False, "codebaseEnable": False,
           "maxToken": 0, "maxSteps": 500, "temperature": 0, "maxRetries": 0,
           "mentionContexts": [], "knowledgeId": [], "knowledgeName": [],
           "codebaseId": "", "mentionContextCount": 0, "command": "",
           "recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
-          "traceId": rid, "rootRequestId": rid,
+          "requestId": rid, "traceId": rid, "rootRequestId": rid,
           "parentConversationId": conv_id, "conversationId": conv_id,
           "messageId": "msg-" + rid[-8:], "agentName": "mp", "agentType": "main",
           "codebuddy.session_id": conv_id,
@@ -1875,11 +1941,42 @@ def _mp_claim(s, code, log):
         return False
 
 
-def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1):
-    st, cur, tgt = _mp_prog(s, code)
-    if st is None:
+def _mp_task_row(s, code):
+    """mp 口径任务原始行（含 locked / valid_start / reward_* 等字段）；未下发返回 None。
+
+    服务端每个任务行都带 locked；locked=true 表示未到上线时间（accept 会报
+    "task locked until <日期>"），此时上报与领奖都无意义且会被判无效。
+    """
+    try:
+        r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False, headers=MP_HEADER)
+        for t in r.json().get("data", {}).get("tasks", []):
+            if t.get("task_code") == code:
+                return t
+    except Exception:
+        pass
+    return None
+
+
+def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False):
+    """小程序任务通用流程：mp 查询 → accept → 判据上报 → 回读 → claim。
+
+    target：任务的进度目标（未 accept 时 progress 为 null，调用方需提供兜底值）。
+    pace  ：对话类判据（chat_request_send）按“真人节奏”上报。上游对 Sequential 系列
+            有反作弊校验：数秒级连发先计入进度（回读满进度），随后被整体判无效回滚
+            （claim 返回 400 task not completed）。上游实测 45s 间隔逐条上报全存活 →
+            claim 成功，故每条前等 MP_CHAT_GAP(45s)+0~10s 抖动，首条也等（上一轮被
+            回滚的残留进度，立即重报同样无效）；--mp-gap / WORKBUDDY_MP_GAP 可调。
+    """
+    row = _mp_task_row(s, code)
+    if row is None:
         log("   %s: mp 口径未下发该任务，跳过" % label)
         return
+    if row.get("locked"):
+        log("   %s: 未到上线时间（解锁 %s），跳过" % (label, str(row.get("valid_start") or "见任务页")[:10]))
+        return
+    st = row.get("accept_status", "")
+    _pr = row.get("progress") or {}
+    cur, tgt = _pr.get("current"), _pr.get("target")
     if st in ("completed", "claimed"):
         if st == "completed":
             _mp_claim(s, code, log)
@@ -1894,16 +1991,30 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1):
                 log("   %s: accept 失败，跳过" % label)
             return
         time.sleep(WRITE_GAP)
+        # accept 后回读真实进度：accept 前 progress 为 null（target 下发 0），仅用
+        # 兜底 target 会少报 → 误判达标 → claim 400（上游 Tasks_6 首轮实测）
+        st, cur, tgt = _mp_prog(s, code)
+        if st in ("completed", "claimed"):
+            if st == "completed":
+                _mp_claim(s, code, log)
+            else:
+                log("   %s: 已领取，跳过" % label)
+            return
+    # 缺口计算：cur 可能为 None（未激活时 progress 全空）→ 用 target 兜底
     cur = cur or 0
     tgt = tgt or target
     need = max(1, tgt - cur)
     try:
         sent = 0
         for i in range(need):
+            if pace and MP_CHAT_GAP > 0:
+                import random
+                # 抖动：默认 45s 档对应 0~10s；小间隔时按比例缩小，便于自测/提速
+                time.sleep(MP_CHAT_GAP + random.uniform(0, min(10.0, MP_CHAT_GAP * 0.25)))
             evs = events_fn(i)
             st_code = mp_report(s, uid, nick, evs)
             sent += len(evs)
-            if i < need - 1:
+            if i < need - 1 and not pace:
                 time.sleep(WRITE_GAP)
         log("   %s: 判据已上报（%d 次 / %d 个事件，目标 %s）" % (label, need, sent, tgt))
         time.sleep(2.5)
@@ -1927,7 +2038,7 @@ def _mp_chat_evs(uid, nick, prefix, activity_id=None):
 
 def t_sequential_tasks(s, uid, nick, log):
     _mp_do_task(s, uid, nick, "Sequential_Tasks_1", log,
-                _mp_chat_evs(uid, nick, "wbmp"), "小程序对话任务", target=1)
+                _mp_chat_evs(uid, nick, "wbmp"), "小程序对话任务", target=1, pace=True)
 
 
 def t_sequential_tasks_2(s, uid, nick, log):
@@ -1941,70 +2052,50 @@ def t_sequential_tasks_2(s, uid, nick, log):
 
 def t_sequential_tasks_3(s, uid, nick, log):
     _mp_do_task(s, uid, nick, "Sequential_Tasks_3", log,
-                _mp_chat_evs(uid, nick, "wbmp3"), "小程序对话×5", target=5)
+                _mp_chat_evs(uid, nick, "wbmp3"), "小程序对话×5", target=5, pace=True)
 
 
 def t_sequential_tasks_4(s, uid, nick, log):
     def _evs(i):
+        # 官方源码形状（dynamic-common appservice TaskFormSheet 创建成功）：不带
+        # schedule/rrule 对象，也没有 modelId/connector/pushTo* 等桌面字段；
+        # scheduleType 取小程序表单频率枚举（daily/interval/once）
         return [{"eventCode": "automated_task_create_suc", "mode": "CLOUD",
-                 "name": "wb2mp 定时任务", "source": "manually",
-                 "modelId": "fast-model", "modelIsThinking": False,
-                 "connectorCount": 0, "skills": "", "skillCount": 0,
-                 "scheduleType": "once"}]
-    st, cur, tgt = _mp_prog(s, "Sequential_Tasks_4")
-    if st is None:
-        log("   小程序定时任务: mp 口径未下发该任务，跳过")
-        return
-    if st in ("completed", "claimed"):
-        if st == "completed":
-            _mp_claim(s, "Sequential_Tasks_4", log)
-        else:
-            log("   小程序定时任务: 已领取，跳过")
-        return
-    if st == "not_accepted":
-        ok, a_status, a_msg = _mp_accept_res(s, "Sequential_Tasks_4")
-        if not ok:
-            log("      ✗ accept Sequential_Tasks_4: %s %s" % (a_status or "无返回", a_msg[:50]))
-            if not _mp_locked_hint(log, "小程序定时任务", a_msg):
-                log("   小程序定时任务: accept 失败，跳过")
-            return
-        time.sleep(WRITE_GAP)
-    mp_report(s, uid, nick, _evs(0))
-    log("   小程序定时任务: mp 指纹 automation 事件已上报")
-    time.sleep(2.5)
+                 "name": "每日读书提醒", "source": "manually",
+                 "skills": "", "skillCount": 0,
+                 "scheduleType": "daily"}]
+    _mp_do_task(s, uid, nick, "Sequential_Tasks_4", log, _evs, "小程序定时任务", target=1)
     st2, cur2, tgt2 = _mp_prog(s, "Sequential_Tasks_4")
     if st2 in ("completed", "claimed"):
-        log("   小程序定时任务: ✅ 已完成 %s/%s" % (cur2, tgt2))
+        return
+    # 回落：桌面域 automation 事件（旧口径，实测同样能点亮）
+    try:
+        report_desktop_events(s, uid, nick, [{
+            "eventCode": "automated_task_create_suc", "name": "wb2api 定时任务",
+            "source": "manually", "modelId": "fast-model", "modelIsThinking": True,
+            "connectorCount": 0, "skills": "", "skillCount": 0,
+            "scheduleType": "once", "mode": "LOCAL"}])
+        time.sleep(2.5)
+        st2, cur2, tgt2 = _mp_prog(s, "Sequential_Tasks_4")
+    except Exception:
+        pass
+    if st2 in ("completed", "claimed"):
+        log("   小程序定时任务: ✅ 已完成（桌面域回落） %s/%s" % (cur2, tgt2))
         if st2 == "completed":
             _mp_claim(s, "Sequential_Tasks_4", log)
     else:
-        try:
-            report_desktop_events(s, uid, nick, [{
-                "eventCode": "automated_task_create_suc", "name": "wb2api 定时任务",
-                "source": "manually", "modelId": "fast-model", "modelIsThinking": True,
-                "connectorCount": 0, "skills": "", "skillCount": 0,
-                "scheduleType": "once", "mode": "LOCAL"}])
-            time.sleep(2.5)
-            st2, cur2, tgt2 = _mp_prog(s, "Sequential_Tasks_4")
-        except Exception:
-            pass
-        if st2 in ("completed", "claimed"):
-            log("   小程序定时任务: ✅ 已完成（桌面域回落） %s/%s" % (cur2, tgt2))
-            if st2 == "completed":
-                _mp_claim(s, "Sequential_Tasks_4", log)
-        else:
-            log("   小程序定时任务: %s %s/%s（服务端暂未关联）" % (st2, cur2, tgt2))
+        log("   小程序定时任务: %s %s/%s（服务端暂未关联）" % (st2, cur2, tgt2))
 
 
 def t_sequential_tasks_5(s, uid, nick, log):
     def _evs(i):
         return [mp_model_chat_event(uid, nick, "wbmp5-%s-%d" % (uuid.uuid4(), i))]
-    _mp_do_task(s, uid, nick, "Sequential_Tasks_5", log, _evs, "小程序GLM5.2", target=1)
+    _mp_do_task(s, uid, nick, "Sequential_Tasks_5", log, _evs, "小程序GLM5.2", target=1, pace=True)
 
 
 def t_sequential_tasks_6(s, uid, nick, log):
     _mp_do_task(s, uid, nick, "Sequential_Tasks_6", log,
-                _mp_chat_evs(uid, nick, "wbmp6"), "小程序对话×10", target=10)
+                _mp_chat_evs(uid, nick, "wbmp6"), "小程序对话×10", target=10, pace=True)
 
 
 def t_sequential_tasks_7(s, uid, nick, log):
@@ -2018,7 +2109,7 @@ def t_sequential_tasks_7(s, uid, nick, log):
 def t_school_season(s, uid, nick, log):
     _mp_do_task(s, uid, nick, "school_season", log,
                 _mp_chat_evs(uid, nick, "wbmps", activity_id=SCHOOL_ACTIVITY_ID),
-                "校园日活动", target=1)
+                "校园日活动", target=1, pace=True)
 
 
 def t_unknown_tasks(s, uid, nick, log):
@@ -2921,6 +3012,11 @@ def run_account(idx, client, account, do_desktop, no_school):
     # 桌面任务（非 Windows 自动降级为指纹上报）
     need_rich = prog(s, "RichMeow_Chat")[0] not in ("completed", "claimed")
     need_skill = prog(s, "skill_1")[0] not in ("completed", "claimed")
+    desktop_skipped = False
+    if (need_rich or need_skill) and not want("desktop", "RichMeow_Chat", "skill_1"):
+        log("  🖥️ 桌面任务: 按配置跳过（desktop）")
+        need_rich = need_skill = False
+        desktop_skipped = True
     if do_desktop and (need_rich or need_skill):
         log("  🖥️ ── 桌面任务（引导优先） ──")
         try:
@@ -2930,43 +3026,61 @@ def run_account(idx, client, account, do_desktop, no_school):
     elif need_rich or need_skill:
         log("── 桌面任务跳过(--no-desktop): RichMeow=%s skill_1=%s ──" % (need_rich, need_skill))
     else:
-        log("  🖥️ 桌面任务: 已完成（RichMeow/skill_1），跳过")
+        if not desktop_skipped:
+            log("  🖥️ 桌面任务: 已完成（RichMeow/skill_1），跳过")
 
     # 云端任务
     log("  ☁️ ── 云端任务 ──")
+    if TASK_ONLY or TASK_SKIP:
+        log("   ⚙️ 任务过滤生效：%s%s" % (
+            ("仅执行 " + ",".join(sorted(TASK_ONLY))) if TASK_ONLY else "",
+            (("；跳过 " + ",".join(sorted(TASK_SKIP))) if TASK_SKIP else "")))
+
+    def _run(label, codes, fn):
+        """子任务调度：按 TASK_ONLY / TASK_SKIP 决定是否执行，单项异常不拖垮整轮。"""
+        if not want(*codes):
+            log("   ⏭️ %s: 按配置跳过" % label)
+            return
+        try:
+            fn()
+        except Exception as e:
+            log("   ⚠️ %s 异常: %s" % (label, str(e)[:80]))
+
+    # 前置：无 Buddy 实例时，其余任务 accept 会被服务端拒绝（prerequisite not met: first_buddy）
     t_first_buddy(s, uid, nick, log)
     t_accept_all(s, uid, nick, log)
-    t_team_3(s, uid, nick, log)
-    t_buddy_apps(s, uid, nick, log)
-    t_theme(s, uid, nick, log)
-    t_library(s, uid, nick, log)
-    t_canvas_automation(s, uid, nick, log)
-    t_expert_5(s, uid, nick, log)
-    t_template_5(s, uid, nick, log)
-    t_glm52(s, uid, nick, log)
-    t_black_cat(s, uid, nick, log)
-    t_lighthouse(s, uid, nick, log)
-    t_sequential_tasks(s, uid, nick, log)
-    t_sequential_tasks_2(s, uid, nick, log)
-    t_sequential_tasks_3(s, uid, nick, log)
-    t_sequential_tasks_4(s, uid, nick, log)
-    t_sequential_tasks_5(s, uid, nick, log)
-    t_sequential_tasks_6(s, uid, nick, log)
-    t_sequential_tasks_7(s, uid, nick, log)
-    t_school_season(s, uid, nick, log)
-    t_badges(s, uid, nick, log)
-    t_lottery(s, uid, nick, log)
-    t_blindbox(s, uid, nick, log)
-    t_buddy_info(s, uid, nick, log)
-    t_travel(s, uid, nick, log)
-    t_redeem(s, uid, nick, log, streak.get("days"))
-    t_gift_compensation(s, uid, nick, log)
-    t_makeup(s, uid, nick, log)
-    t_workstation(s, uid, nick, log, tok)
-    t_unknown_tasks(s, uid, nick, log)
+    _run("召唤3次专家团", ["Expert_team_use_3"], lambda: t_team_3(s, uid, nick, log))
+    _run("发现应用/企鹅教师助手", ["Buddy_App", "Buddy_App_QQ"], lambda: t_buddy_apps(s, uid, nick, log))
+    _run("和平精英主题", ["Hp_Appearance"], lambda: t_theme(s, uid, nick, log))
+    _run("体验资料库", ["Library_read"], lambda: t_library(s, uid, nick, log))
+    _run("设计/自动化/灵感", ["create_canvas", "automation_1", "playbook_prompt"],
+         lambda: t_canvas_automation(s, uid, nick, log))
+    _run("召唤5次专家", ["expert_5"], lambda: t_expert_5(s, uid, nick, log))
+    _run("使用5个模板", ["template_5"], lambda: t_template_5(s, uid, nick, log))
+    _run("GLM-5.2/和AI聊天5次", ["Model_chat_GLM5.2", "chat_5"], lambda: t_glm52(s, uid, nick, log))
+    _run("夜猫子", ["black_cat"], lambda: t_black_cat(s, uid, nick, log))
+    _run("腾讯轻量云专家", ["Expert_lighthouse"], lambda: t_lighthouse(s, uid, nick, log))
+    _run("小程序对话", ["Sequential_Tasks_1"], lambda: t_sequential_tasks(s, uid, nick, log))
+    _run("小程序专家对话", ["Sequential_Tasks_2"], lambda: t_sequential_tasks_2(s, uid, nick, log))
+    _run("小程序对话5次", ["Sequential_Tasks_3"], lambda: t_sequential_tasks_3(s, uid, nick, log))
+    _run("小程序定时任务", ["Sequential_Tasks_4"], lambda: t_sequential_tasks_4(s, uid, nick, log))
+    _run("小程序GLM5.2", ["Sequential_Tasks_5"], lambda: t_sequential_tasks_5(s, uid, nick, log))
+    _run("小程序对话10次", ["Sequential_Tasks_6"], lambda: t_sequential_tasks_6(s, uid, nick, log))
+    _run("小程序灵感功能", ["Sequential_Tasks_7"], lambda: t_sequential_tasks_7(s, uid, nick, log))
+    _run("校园日活动", ["school_season", "school"], lambda: t_school_season(s, uid, nick, log))
+    _run("徽章", ["badges"], lambda: t_badges(s, uid, nick, log))
+    _run("抽奖", ["lottery"], lambda: t_lottery(s, uid, nick, log))
+    _run("盲盒", ["blindbox"], lambda: t_blindbox(s, uid, nick, log))
+    _run("Buddy 信息", ["buddy_info"], lambda: t_buddy_info(s, uid, nick, log))
+    _run("派猫猫旅行", ["travel"], lambda: t_travel(s, uid, nick, log))
+    _run("连登兑换", ["redeem"], lambda: t_redeem(s, uid, nick, log, streak.get("days")))
+    _run("礼包/补偿", ["gift"], lambda: t_gift_compensation(s, uid, nick, log))
+    _run("补签", ["makeup"], lambda: t_makeup(s, uid, nick, log))
+    _run("工作台搭建师", ["workstation_expert"], lambda: t_workstation(s, uid, nick, log, tok))
+    t_unknown_tasks(s, uid, nick, log)   # 未覆盖任务检测不受过滤影响
 
     # 开学季活动
-    if not no_school:
+    if not no_school and want("school", "school_season"):
         try:
             school_s = _school_session(tok)
             school_run_tasks(school_s, uid, nick, log)
@@ -3001,7 +3115,7 @@ def run_account(idx, client, account, do_desktop, no_school):
 
 
 # ============================================================================ #
-# 执行汇总
+# 推送摘要
 # ============================================================================ #
 def build_summary(summaries):
     summaries.sort(key=lambda x: x.get("idx", 0))
@@ -3070,11 +3184,28 @@ def main(argv=None):
     parser.add_argument("--query", action="store_true", help="仅查询积分/用量/签到状态，不执行任务")
     parser.add_argument("--no-school", action="store_true", help="跳过开学季活动")
     parser.add_argument("--no-desktop", action="store_true", help="跳过桌面任务")
+    parser.add_argument("--no-notify", action="store_true", help="不发送青龙通知")
     parser.add_argument("--gap", type=float, default=1.5, help="写动作间隔秒数")
+    parser.add_argument("--mp-gap", type=float, default=None, help="mp 对话事件间隔秒数（默认 45，真人节奏）")
+    parser.add_argument("--tasks", default="", metavar="checkin,travel", help="白名单：只跑列出的子任务")
+    parser.add_argument("--skip-tasks", default="", metavar="lottery,redeem", help="黑名单：跳过列出的子任务")
     args = parser.parse_args(argv)
 
-    global WRITE_GAP
+    global WRITE_GAP, MP_CHAT_GAP, TASK_ONLY, TASK_SKIP
     WRITE_GAP = max(1.0, args.gap)
+    if args.no_notify:
+        os.environ["WB_NO_NOTIFY"] = "1"
+    if args.mp_gap is not None:
+        MP_CHAT_GAP = max(0.0, args.mp_gap)
+    elif os.environ.get("WORKBUDDY_MP_GAP"):
+        try:
+            MP_CHAT_GAP = max(0.0, float(os.environ["WORKBUDDY_MP_GAP"]))
+        except ValueError:
+            pass
+    if args.tasks:
+        TASK_ONLY = _parse_task_filter(args.tasks)
+    if args.skip_tasks:
+        TASK_SKIP |= _parse_task_filter(args.skip_tasks)
 
     started = time.monotonic()
     reports = []
