@@ -1,7 +1,11 @@
 // YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 sendNotify。
 // ===== YYB-Go-Enhanced + QingLong standalone adapter =====
-// name: 拾绿旧衣回收
-// cron: 15 6,16 * * *
+/*=========================================================
+# name: 拾绿旧衣回收
+# cron: 15 6,16 * * *
+# 积分有效期：未知
+=========================================================*/
+
 function _yybRoutes() {
     const routes = String(process.env.YYB_SERVER || '').split(/\r?\n/)
         .map(v => v.trim()).filter(Boolean).map((line, index) => {

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # name: 京东快递
 # cron: 45 5,15 * * *
+# 积分有效期：京豆规则
+
 """
 青龙环境变量：
   YYB_SERVER  YYB-Go-Enhanced 地址@账号标识，多账号每行一条

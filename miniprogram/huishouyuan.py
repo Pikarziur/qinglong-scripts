@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: 回收猿
+# name: 回收猿旧衣服回收
 # cron: 40 5,15 * * *
-#
+# 积分有效期：未知
+
 # 环境变量：
 #   YYB_SERVER   每行：地址@账号标识（例如 http://yyb-go:8000@1）
 #   HSY_NOTIFY   0 关闭错误推送；默认 1
