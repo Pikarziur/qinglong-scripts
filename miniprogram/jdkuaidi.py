@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: 京东快递签到
-# cron: 5 6,16 * * *
+# name: 京东快递
+# cron: 45 5,15 * * *
 """
 青龙环境变量：
   YYB_SERVER  YYB-Go-Enhanced 地址@账号标识，多账号每行一条

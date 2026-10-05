@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # name: 塔斯汀会员签到
-# cron: 10 6,16 * * *
+# cron: 20 6,16 * * *
 """
 青龙环境变量：
   YYB_SERVER   必填。YYB-Go-Enhanced 地址@账号标识[#备注]，多账号换行 / 空格 / & 分隔

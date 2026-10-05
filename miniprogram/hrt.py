@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # name: 华润通
-# cron: 0 6,16 * * *
+# cron: 35 5,15 * * *
 """
 青龙环境变量：
   YYB_SERVER  必填，YYB-Go-Enhanced地址@微信账号标识，多账号每行一条

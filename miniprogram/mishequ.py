@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # name: 小米社区
-# cron: 40 5,15 * * *
+# cron: 5 6,16 * * *
 """小米社区微信小程序签到（YYB-Go-Enhanced）
 作者：lcmovie https://github.com/lcmovie
 环境变量：
