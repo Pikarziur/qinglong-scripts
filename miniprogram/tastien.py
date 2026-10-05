@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# name: 塔斯汀会员签到
+# name: 塔斯汀会员
 # cron: 20 6,16 * * *
 """
 青龙环境变量：
