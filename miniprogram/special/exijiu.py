@@ -333,6 +333,9 @@ class TokenInvalidError(BaseException):
 class AccountAuthorizationError(RuntimeError):
     """需要账号持有人在小程序完成手机号授权，重试 code 无法解决。"""
 
+class YybUnavailableError(Exception):
+    """YYB 协议服务本身不可达（连接失败/超时/5xx），重试无意义，应快速失败并回落备用通道。"""
+
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
@@ -382,10 +385,17 @@ class WxAdapter:
 
     def get_wx_code(self, wxid, appid):
         """获取微信code - 优先使用 getCode.py，回退到牛子API"""
+        yyb_unavailable = None
         if self._yyb_entry_for(wxid):
-            result = self._yyb_call('getCode', wxid, appid)
-            code = result.get('code')
-            return {'success': bool(code), 'code': code, 'error': 'YYB未返回有效code'}
+            try:
+                result = self._yyb_call('getCode', wxid, appid)
+                code = result.get('code')
+                return {'success': bool(code), 'code': code, 'error': 'YYB未返回有效code'}
+            except YybUnavailableError as e:
+                yyb_unavailable = e
+                log.warning(f"YYB 服务不可达，回退备用通道: {e}")
+            except Exception as e:
+                log.warning(f"YYB直连获取code失败，回退备用通道: {e}")
         if _HAS_GETCODE:
             try:
                 code = get_single_code(appid, wxid)
@@ -403,18 +413,25 @@ class WxAdapter:
                 if code:
                     return {"success": True, "code": code}
                 return {"success": False, "error": "YYB未返回有效code"}
+            except YybUnavailableError as e:
+                yyb_unavailable = yyb_unavailable or e
+                log.warning(f"YYB服务不可达，尝试牛子API: {e}")
             except Exception as e:
                 log.warning(f"YYB直连获取code失败，尝试牛子API: {e}")
 
         # 回退到牛子 API
+        fallback = None
         try:
             data = self.session.post(self.base + "app/get/code",
                 json={"wxid": wxid, "appid": appid}, timeout=15).json()
             if data.get("Code") == 0:
                 return {"success": True, "code": data["Data"]["code"]}
-            return {"success": False, "error": data.get("Message", "获取code失败")}
+            fallback = {"success": False, "error": data.get("Message", "获取code失败")}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            fallback = {"success": False, "error": str(e)}
+        if yyb_unavailable is not None:
+            raise yyb_unavailable
+        return fallback
 
     def _raw_id(self, wxid):
         return str(wxid).split("#")[0].strip()
@@ -503,15 +520,24 @@ class WxAdapter:
             headers["Authorization"] = api_key if " " in api_key else "Bearer " + api_key
         if not yyb_server:
             raise RuntimeError("未配置 YYB_SERVER")
+        try:
+            ref = entry["ref"] if entry else self._yyb_resolve_ref(wxid)
+        except requests.exceptions.RequestException as e:
+            raise YybUnavailableError("YYB 服务不可达（%s 解析账号）: %s" % (endpoint, e))
         body = {
-            "ref": entry["ref"] if entry else self._yyb_resolve_ref(wxid),
+            "ref": ref,
             "app_id": appid,
         }
         if payload is not None:
             body["payload"] = payload
-        resp = self.session.post(f"{yyb_server}/wxapp/{endpoint}", json=body, timeout=30, headers=headers)
+        try:
+            resp = self.session.post(f"{yyb_server}/wxapp/{endpoint}", json=body, timeout=30, headers=headers)
+        except requests.exceptions.RequestException as e:
+            raise YybUnavailableError("YYB 服务不可达（%s）: %s" % (endpoint, e))
         if resp.status_code == 409:
             raise RuntimeError("账号 login_buffer 已过期，需要重新扫码登录")
+        if resp.status_code >= 500:
+            raise YybUnavailableError("YYB 服务异常 HTTP %d（%s）" % (resp.status_code, endpoint))
         resp.raise_for_status()
         result = resp.json()
         if not isinstance(result, dict):
@@ -1729,6 +1755,9 @@ def auto_login_with_retry(client, wxid, wx_server, ocr_server=None,
             log.warning("   ⚠️  登录未返回 token（%d/%d），%ds 后重试..." % (attempt, max_retry, base_delay * attempt))
         except Exception as e:
             last_err = e
+            if isinstance(e, YybUnavailableError):
+                log.error("   ❌ YYB 服务不可达，跳过重试直接失败: %s" % e)
+                raise
             if isinstance(e, AccountAuthorizationError) or '[10001]' in str(e) or 'login_buffer' in str(e) or '重新扫码' in str(e):
                 raise
             log.warning("   ⚠️  登录失败（%d/%d）: %s，%ds 后重试..." % (attempt, max_retry, e, base_delay * attempt))
