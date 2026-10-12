@@ -41,6 +41,13 @@
 # 内部配置：直接改这里，省去去面板设环境变量
 # 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
 YYB_ONLY_REFS = [1,2]
+# YYB 协议服务调用重试：上游节点池是「概率性可用」（实测单次约五成成功），
+# 抽到死节点时立刻换一次就能救回，而成功一次即返回、不浪费。
+#   YYB_RETRY   = 1 关闭重试；3 次约可把成功率抬到 ~87%
+#   YYB_TIMEOUT = 单次 HTTP 超时（秒）。YYB 内部会逐个试节点、最坏 ~55s 才回 502，
+#                 设成 30 会在它出结果前就断开、白费一次机会，故留足余量
+YYB_RETRY = 3
+YYB_TIMEOUT = 70
 
 import os
 import sys
@@ -386,7 +393,9 @@ class WxAdapter:
     def get_wx_code(self, wxid, appid):
         """获取微信code - 优先使用 getCode.py，回退到牛子API"""
         yyb_unavailable = None
+        yyb_tried = False
         if self._yyb_entry_for(wxid):
+            yyb_tried = True
             try:
                 result = self._yyb_call('getCode', wxid, appid)
                 code = result.get('code')
@@ -406,7 +415,8 @@ class WxAdapter:
 
         # 单文件运行时可能无法导入同目录 getCode.py，直接使用
         # YYB_SERVER 中与当前 ref 对应的服务获取 wx.login code。
-        if self._can_use_yyb(wxid):
+        # 第一分支已对同一 YYB 服务请求过，此处不再重复（否则 YYB 挂时每账号白等 2×30s）
+        if not yyb_tried and self._can_use_yyb(wxid):
             try:
                 result = self._yyb_call("getCode", wxid, appid)
                 code = result.get("code")
@@ -430,6 +440,7 @@ class WxAdapter:
         except Exception as e:
             fallback = {"success": False, "error": str(e)}
         if yyb_unavailable is not None:
+            log.warning(f"牛子渠道亦未取得 code（{fallback['error']}），直接失败")
             raise yyb_unavailable
         return fallback
 
@@ -530,28 +541,41 @@ class WxAdapter:
         }
         if payload is not None:
             body["payload"] = payload
-        try:
-            resp = self.session.post(f"{yyb_server}/wxapp/{endpoint}", json=body, timeout=30, headers=headers)
-        except requests.exceptions.RequestException as e:
-            raise YybUnavailableError("YYB 服务不可达（%s）: %s" % (endpoint, e))
-        if resp.status_code == 409:
-            raise RuntimeError("账号 login_buffer 已过期，需要重新扫码登录")
-        if resp.status_code >= 500:
-            raise YybUnavailableError("YYB 服务异常 HTTP %d（%s）" % (resp.status_code, endpoint))
-        resp.raise_for_status()
-        result = resp.json()
-        if not isinstance(result, dict):
-            raise RuntimeError(f"YYB响应异常: {resp.text[:120]}")
-        if result.get("code") not in (0, "0"):
-            msg = result.get("error") or result.get("msg", resp.text[:120])
-            raise RuntimeError(msg)
-        inner = result.get("result")
-        if inner is None:
-            data = result.get("data", {})
-            inner = data.get("result", data) if isinstance(data, dict) else data
-        if not isinstance(inner, dict):
-            raise RuntimeError(f"YYB响应result异常: {str(inner)[:120]}")
-        return inner
+        url = f"{yyb_server}/wxapp/{endpoint}"
+        # 节点池「概率性可用」：单次失败多半是抽到了死节点，换一次就能救回，
+        # 而成功一次即返回、不浪费。只重试「不可达 / 5xx」；
+        # 409（login_buffer 过期）与其它业务错误按原样抛出，不重试。
+        last_err = None
+        for attempt in range(1, max(1, YYB_RETRY) + 1):
+            try:
+                resp = self.session.post(url, json=body, timeout=YYB_TIMEOUT, headers=headers)
+            except requests.exceptions.RequestException as e:
+                last_err = YybUnavailableError("YYB 服务不可达（%s）: %s" % (endpoint, e))
+            else:
+                if resp.status_code == 409:
+                    raise RuntimeError("账号 login_buffer 已过期，需要重新扫码登录")
+                if resp.status_code >= 500:
+                    last_err = YybUnavailableError("YYB 服务异常 HTTP %d（%s）" % (resp.status_code, endpoint))
+                else:
+                    resp.raise_for_status()
+                    result = resp.json()
+                    if not isinstance(result, dict):
+                        raise RuntimeError(f"YYB响应异常: {resp.text[:120]}")
+                    if result.get("code") not in (0, "0"):
+                        msg = result.get("error") or result.get("msg", resp.text[:120])
+                        raise RuntimeError(msg)
+                    inner = result.get("result")
+                    if inner is None:
+                        data = result.get("data", {})
+                        inner = data.get("result", data) if isinstance(data, dict) else data
+                    if not isinstance(inner, dict):
+                        raise RuntimeError(f"YYB响应result异常: {str(inner)[:120]}")
+                    return inner
+            if attempt < YYB_RETRY:
+                wait = random.randint(2, 5)
+                log.warning("   ⚠️  YYB %s 第 %d/%d 次失败：%s，%ds 后重试..." % (endpoint, attempt, YYB_RETRY, last_err, wait))
+                time.sleep(wait)
+        raise last_err if last_err else YybUnavailableError("YYB 调用失败（%s）" % endpoint)
 
     def _yyb_operate_wx_data(self, wxid, appid, payload):
         return self._yyb_call("operateWxData", wxid, appid, payload)
@@ -1756,7 +1780,7 @@ def auto_login_with_retry(client, wxid, wx_server, ocr_server=None,
         except Exception as e:
             last_err = e
             if isinstance(e, YybUnavailableError):
-                log.error("   ❌ YYB 服务不可达，跳过重试直接失败: %s" % e)
+                log.error("   ❌ YYB 服务不可达（内部已重试 %d 次），跳过登录重试: %s" % (YYB_RETRY, e))
                 raise
             if isinstance(e, AccountAuthorizationError) or '[10001]' in str(e) or 'login_buffer' in str(e) or '重新扫码' in str(e):
                 raise
