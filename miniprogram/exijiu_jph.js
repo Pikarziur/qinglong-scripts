@@ -14,6 +14,7 @@
 //   YYB_SERVER      必填。格式「地址@ref#备注」，换行分隔
 //   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 //   OCR_SERVER       可选。滑块识别服务，默认 http://ocr.fj.us.ci
+//   CAPTCHA_RETRY    可选。滑块验证最大尝试次数，默认 3（服务端强校验，未通过则签到必被拒）
 // ────────────────────────────────────────────
 
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
@@ -198,6 +199,10 @@ function accFooter(idx, total) {
 const debug = 0; //0为关闭调试，1为打开调试,默认为0
 const WX_APPID = "wx8d41cdc44c8aeaab";
 const OCR_SERVER = (($.isNode() ? process.env.OCR_SERVER : $.getdata("OCR_SERVER")) || "http://ocr.fj.us.ci").replace(/\/$/, "");
+// 滑块验证参数（服务端强校验：captcha/check 未通过时签到会被直接拒绝「未校验验证码」，故必须重试到位）
+const CAPTCHA_RETRY = 3;          // 单账号最多尝试次数（识别失败 / 校验未通过 都会重试）
+const CAPTCHA_RETRY_DELAY = 1500; // 两次尝试之间的等待毫秒数，避免连击触发风控
+const CAPTCHA_OCR_TIMEOUT = 8000; // 调用 OCR_SERVER 的单次超时毫秒数
 const YYB_SERVER = ($.isNode() ? process.env.YYB_SERVER : $.getdata("YYB_SERVER")) || "";
 let xjhd = '';
 let xjhdArr = [];
@@ -264,25 +269,47 @@ function parseYybGoEntry(rawValue) {
             }
             await get_setcookie(xj_token);
 
-            // 滑块验证
-            let captcha = await get_captcha(xj_token);
+            // 滑块验证（服务端强校验：captcha/check 未通过则签到必被拒「未校验验证码」，故必须重试到位）
             let captchaPassed = false;
             let captchaSamplePayload = null;
-            if (captcha && captcha.data && captcha.data.repData) {
+            for (let cTry = 1; cTry <= CAPTCHA_RETRY && !captchaPassed; cTry++) {
+                let captcha = await get_captcha(xj_token);
+                if (!captcha || !captcha.data || !captcha.data.repData) {
+                    addLog(`⚠️ 滑块第 ${cTry}/${CAPTCHA_RETRY} 次未获取到验证码`, true);
+                    if (cTry < CAPTCHA_RETRY) await $await(CAPTCHA_RETRY_DELAY);
+                    continue;
+                }
+                const repData = captcha.data.repData;
+                const sliderImage = repData.jigsawImageBase64;
+                const backImage = repData.originalImageBase64;
                 try {
-                    const sliderImage = captcha.data.repData.jigsawImageBase64;
-                    const backImage = captcha.data.repData.originalImageBase64;
-                    let getXpos = await slidePost({
+                    const getXpos = await slidePost({
                         'slidingImage': sliderImage,
                         'backImage': backImage
                     })
-                    const predictedX = getXpos?.result || 50
+                    const predictedX = Number(getXpos && getXpos.result);
+                    if (!Number.isFinite(predictedX) || predictedX <= 0) {
+                        // 识别服务没给出坐标时不要拿假值硬提交：旧实现的兜底值 50 几乎必错，还会白白消耗一次校验机会
+                        addLog(`⚠️ 滑块第 ${cTry}/${CAPTCHA_RETRY} 次识别失败${cTry < CAPTCHA_RETRY ? '，重试' : ''}`, true);
+                        captchaSamplePayload = {
+                            type: 'slide',
+                            success: false,
+                            prediction: { x: null, y: null },
+                            verify: null,
+                            images: {
+                                slidingImage: sliderImage,
+                                backImage: backImage
+                            }
+                        };
+                        if (cTry < CAPTCHA_RETRY) await $await(CAPTCHA_RETRY_DELAY);
+                        continue;
+                    }
                     const predictedY = 5
-                    let point = aesEncrypt({ "x": predictedX, "y": predictedY }, captcha.data.repData.secretKey)
+                    let point = aesEncrypt({ "x": predictedX, "y": predictedY }, repData.secretKey)
                     let check = await commonPost(`/api/captcha/check`, {
                         "captchaType": "blockPuzzle",
                         "pointJson": point,
-                        "token": captcha.data.repData.token
+                        "token": repData.token
                     }, xj_token)
                     captchaPassed = !!check?.data?.success;
                     captchaSamplePayload = {
@@ -296,17 +323,18 @@ function parseYybGoEntry(rawValue) {
                         }
                     }
                     if (captchaPassed) {
-                        addLog(`✅ 滑块验证通过`, true);
+                        addLog(`✅ 滑块验证通过（第 ${cTry}/${CAPTCHA_RETRY} 次）`, true);
+                    } else {
+                        addLog(`⚠️ 滑块第 ${cTry}/${CAPTCHA_RETRY} 次校验未通过`, true);
                     }
                 } catch (e) {
-                    addLog(`⚠️ 滑块验证异常：${e.message || e}`, true);
+                    addLog(`⚠️ 滑块第 ${cTry}/${CAPTCHA_RETRY} 次异常：${e.message || e}`, true);
                 }
-            } else {
-                addLog(`⚠️ 未获取到验证码，跳过滑块`, true);
+                if (!captchaPassed && cTry < CAPTCHA_RETRY) await $await(CAPTCHA_RETRY_DELAY);
             }
 
             if (!captchaPassed) {
-                addLog(`⚠️ 验证码未通过，继续尝试签到`, true);
+                addLog(`⚠️ 验证码 ${CAPTCHA_RETRY} 次均未通过，本次签到大概率被服务端拒绝`, true);
             }
 
             await fillSignIn(xj_cookie, xj_token, xj_code);
@@ -578,7 +606,8 @@ async function getpoints(token__) {
 async function slidePost(body) {
     return new Promise(resolve => {
         axios.post(`${OCR_SERVER}/capcode`, body, {
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json' },
+            timeout: CAPTCHA_OCR_TIMEOUT
         }).then(res => {
             resolve(res.data);
         }).catch(() => { resolve(null) })
