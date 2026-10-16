@@ -14,6 +14,9 @@
 // 可控参数：
 //   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 //   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
+//   YYB_TIMEOUT / YYB_RETRY
+//                  取 code 单次超时（毫秒）与最多尝试次数（含首次），默认 60000 / 3。
+//                  YYB 侧慢是常态，超时给的太紧会把整号判死；失败会打 WARN 并等 2~5 秒随机再试
 //   CHUANGW_APPID / APP_VERSION / SDK_VERSION / APP_PATH / APP_SYSTEM / APP_MODEL
 //                  可选。小程序设备指纹参数，不填用内置默认（iPhone 15 Pro Max / iOS 26.1）
 //   CHUANGW_RUN_TASKS  任务总开关，默认 1（开）；填 0 跳过所有任务只登录
@@ -151,6 +154,11 @@ process.on('uncaughtException', (e) => {
 
 
 const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
+
+// 取 code 的超时与重试：YYB 服务慢响应是常态（实测面板出一次 code 可到 56s），
+// 原 20s 硬上限会把整个账号直接判死，这里放宽到 60s 并允许整轮失败后重试。
+const YYB_TIMEOUT = 60000;  // 取 code 单次请求超时（毫秒）
+const YYB_RETRY = 3;        // 取 code 最多尝试次数（含首次）：即失败后再重试 2 次，单账号总上限 3 次
 
 const ENV_NAME = 'chuangw';
 const UC_API = 'https://uc-api.skyallhere.com/miniprogram/api';
@@ -425,15 +433,33 @@ async function httpText(url, { method = 'GET', headers = {}, body, timeout = 200
   }
 }
 
+// 取 code（带超时与重试）
+// YYB-Go-Enhanced 偶发慢响应 / i-o 超时是常态，单次 20s 上限会让整个账号直接判死；
+// 这里统一用 YYB_TIMEOUT 单次超时，失败后最多再试 YYB_RETRY-1 次（间隔 2~5 秒随机）。
 async function getWxCode(server, ref, appid = APPID) {
-  const ret = await httpJson(`${server}/wxapp/getCode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: { ref, app_id: appid },
-  });
-  const code = ret?.data?.result?.code || '';
-  if (Number(ret?.code) === 0 && code) return code;
-  throw new Error(`YYB-Go-Enhanced取code失败: ${brief(ret?.message || ret?.msg || ret, 160)}`);
+  const url = `${server}/wxapp/getCode`;
+  const attempts = Math.max(1, Number(YYB_RETRY) || 1);
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const ret = await httpJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { ref, app_id: appid },
+        timeout: YYB_TIMEOUT,
+      });
+      const code = ret?.data?.result?.code || '';
+      if (Number(ret?.code) === 0 && code) return code;
+      throw new Error(`YYB-Go-Enhanced取code失败: ${brief(ret?.message || ret?.msg || ret, 160)}`);
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= attempts) break;
+      const wait = 2000 + Math.floor(Math.random() * 3001);  // 2~5 秒随机，避免固定节奏
+      logWarn(`⚠️ 取code第 ${attempt}/${attempts} 次失败（${truncText(e.message || e, 60)}），${(wait / 1000).toFixed(1)}s 后重试`);
+      await sleep(wait);
+    }
+  }
+  throw new Error(`${url} 取code失败（已尝试 ${attempts} 次，单次超时 ${Math.round(YYB_TIMEOUT / 1000)}s）：${truncText(lastErr?.message || lastErr, 120)}`);
 }
 
 function scoreSnapshot(profile) {
