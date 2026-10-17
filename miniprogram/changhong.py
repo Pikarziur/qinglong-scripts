@@ -39,6 +39,8 @@ import urllib3.util.connection
 APP_ID = "wx36c3413e8fe39263"
 BASE = "https://hongke.changhong.com/gw/applet"
 TITLE = "长虹智慧家居签到"
+# YYB 取码用独立超时（连接 10 秒 / 读 60 秒）：取码经常要几十秒，与业务接口分开（统一 60 秒）
+YYB_TIMEOUT = (10, 60)
 
 
 # ────────────────────────────────────────────
@@ -198,9 +200,9 @@ class TaskError(Exception):
     pass
 
 
-def request(session, method, url, label, **kwargs):
+def request(session, method, url, label, timeout=(10, 35), **kwargs):
     try:
-        response = session.request(method, url, timeout=(10, 35),
+        response = session.request(method, url, timeout=timeout,
                                    allow_redirects=False, **kwargs)
         if response.status_code != 200:
             raise TaskError(f"{label}：HTTP {response.status_code}")
@@ -253,7 +255,7 @@ class Changhong:
 
     def yyb_call(self, endpoint, **extra):
         body = request(self.yyb, "POST", self.server + "/wxapp/" + endpoint,
-                       "YYB " + endpoint,
+                       "YYB " + endpoint, timeout=YYB_TIMEOUT,
                        json={"ref": self.ref, "app_id": APP_ID, **extra})
         result = (body.get("data") or {}).get("result")
         if body.get("code") != 0 or not isinstance(result, dict):

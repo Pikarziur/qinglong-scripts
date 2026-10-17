@@ -399,7 +399,7 @@ async function get_code(hd) {
             ref,
             app_id: WX_APPID
         }, {
-            timeout: 120000,
+            timeout: 60000,
             proxy: false,
             validateStatus: () => true
         });

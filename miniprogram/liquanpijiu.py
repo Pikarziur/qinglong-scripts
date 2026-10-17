@@ -229,7 +229,7 @@ def _yyb_call(endpoint, app_id, identifier):
     import requests as _requests
     route = _yyb_route(identifier)
     response = _requests.post(route["server"] + endpoint,
-                              json={"ref": route["ref"], "app_id": app_id}, timeout=30)
+                              json={"ref": route["ref"], "app_id": app_id}, timeout=60)
     response.raise_for_status()
     body = response.json()
     if not isinstance(body, dict) or int(body.get("code", -1)) != 0:

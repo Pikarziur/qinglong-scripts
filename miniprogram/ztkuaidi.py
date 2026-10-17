@@ -193,7 +193,7 @@ class AutoTask:
             response = requests.post(
                 f"{host}/wxapp/getCode",
                 json={"ref": ref, "app_id": self.wx_appid},
-                timeout=20,
+                timeout=60,
             )
             response.raise_for_status()
             body = response.json()

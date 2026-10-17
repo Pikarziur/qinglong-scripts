@@ -184,7 +184,7 @@ async function yybPost(identifier, appId, route, payload) {
     const body = { ref: item.ref, app_id: appId };
     if (payload !== undefined) body.payload = payload;
     const response = await axios.post(`${item.server}${route}`, body, {
-        timeout: 30000,
+        timeout: 60000,
         proxy: false,
         validateStatus: () => true,
         headers: { 'Content-Type': 'application/json' },

@@ -327,7 +327,7 @@ def get_code(server, ref):
     response = requests.post(
         f"{host}/wxapp/getCode",
         json={"ref": ref, "app_id": APPID},
-        timeout=20,
+        timeout=60,
     )
     response.raise_for_status()
     body = response.json()

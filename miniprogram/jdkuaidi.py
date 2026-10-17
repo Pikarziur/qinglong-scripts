@@ -59,6 +59,8 @@ JD_PT_RETURN_URL = "https://my.m.jd.com/account/index.html"
 JD_LOGIN_APP_ID = "wx91d27dbf599dff74"
 API_BASE = "https://lop-proxy.jd.com"
 TIMEOUT = 20
+# YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
+YYB_TIMEOUT = 60
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
@@ -245,7 +247,7 @@ def get_wx_code(server: str, ref: str, app_id: str = APP_ID) -> str:
     response = requests.post(
         f"{server}/wxapp/getCode",
         json={"ref": ref, "app_id": app_id},
-        timeout=TIMEOUT,
+        timeout=YYB_TIMEOUT,
     )
     response.raise_for_status()
     payload = response.json()

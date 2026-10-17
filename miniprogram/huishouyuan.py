@@ -34,6 +34,8 @@ SECRET = "UppwYkfBlk"
 MERCHANT_ID = "2"
 APP = "hsywx"
 TIMEOUT = 30
+# YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
+YYB_TIMEOUT = 60
 
 # 内部配置：直接改这里，省去去面板设环境变量
 # 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
@@ -246,7 +248,7 @@ def api(session, php, params, method="GET", data=None, signed=True):
 
 
 def yyb_code(server, ref):
-    response = requests.post(f"{server}/wxapp/getCode", json={"ref": ref, "app_id": APP_ID}, timeout=TIMEOUT)
+    response = requests.post(f"{server}/wxapp/getCode", json={"ref": ref, "app_id": APP_ID}, timeout=YYB_TIMEOUT)
     response.raise_for_status()
     body = response.json()
     if int(body.get("code", -1)) != 0:

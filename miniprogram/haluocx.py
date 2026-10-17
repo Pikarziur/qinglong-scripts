@@ -215,7 +215,7 @@ DEBUG = os.getenv("HL_DEBUG", "").strip() == "1"
 RANDOM_HEADERS = os.getenv("HL_RANDOM_HEADERS", "1").strip() != "0"
 UA_MODE = (os.getenv("HL_UA_MODE", "run").strip() or "run").lower()
 LOGIN_RETRY = max(1, int(os.getenv("HL_LOGIN_RETRY", "3") or 3))
-YYB_TIMEOUT = float(os.getenv("YYB_REQUEST_TIMEOUT", "40") or 40)
+YYB_TIMEOUT = float(os.getenv("YYB_REQUEST_TIMEOUT", "60") or 60)
 HTTP_TIMEOUT = float(os.getenv("HL_HTTP_TIMEOUT", "25") or 25)
 
 # --------------------------------------------------------------------------- #

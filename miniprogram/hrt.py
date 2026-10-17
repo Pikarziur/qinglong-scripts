@@ -69,6 +69,8 @@ H5_APP_ID = "API_AUTH_H5"
 H5_AUTH_SECRET = "1c6120fd-5ad3-4c2d-8cb7-b87a707f416d"
 SUCCESS = "S0A00000"
 TIMEOUT = 25
+# YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
+YYB_TIMEOUT = 60
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
@@ -329,7 +331,7 @@ class HRT:
         body: Dict[str, Any] = {"ref": self.account.ref, "app_id": APP_ID}
         if extra:
             body.update(extra)
-        response = self.session.post(self.account.server + endpoint, json=body, timeout=TIMEOUT)
+        response = self.session.post(self.account.server + endpoint, json=body, timeout=YYB_TIMEOUT)
         response.raise_for_status()
         outer = response.json()
         if int(outer.get("code", -1)) != 0:

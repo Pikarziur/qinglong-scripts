@@ -255,7 +255,7 @@ class YYBClient:
             s = requests.Session()
             s.trust_env = False
             r = s.post(server + "/wxapp/getCode",
-                       json={"ref": ref, "app_id": self.appid}, timeout=(10, 90))
+                       json={"ref": ref, "app_id": self.appid}, timeout=(10, 60))
             r.raise_for_status()
             body = r.json()
             code_field = body.get("code")

@@ -700,11 +700,11 @@ class Client:
         self.reauthenticated = False
         self.report = {}
 
-    def request(self, method, url, payload=None, headers=None):
+    def request(self, method, url, payload=None, headers=None, timeout=(10, 25)):
         try:
             response = self.session.request(
                 method, url, json=payload, headers=headers or HEADERS,
-                timeout=(10, 25), allow_redirects=False,
+                timeout=timeout, allow_redirects=False,
             )
         except requests.RequestException:
             raise SafeError("网络请求失败或超时") from None
@@ -721,7 +721,8 @@ class Client:
         payload = {"ref": self.account.ref, "app_id": APP_ID}
         if extra:
             payload.update(extra)
-        reply = self.request("POST", self.account.server + route, payload)
+        # 取码用独立超时（连接 10 秒 / 读 60 秒）：取码经常要几十秒，与业务接口分开
+        reply = self.request("POST", self.account.server + route, payload, timeout=(10, 60))
         result = reply.data.get("result", {})
         code = result.get("code") if isinstance(result, dict) else None
         if not reply.ok or not isinstance(code, str) or len(code) < 8:

@@ -223,6 +223,10 @@ const ACC_RULE = '='.repeat(70);
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];
 
+// 取 code 单次请求超时（毫秒）。取码经常要几十秒，全仓统一 60 秒；
+// 裸 fetch 不设上限时受 undici 默认管（headersTimeout/bodyTimeout 各 300 秒），最坏能卡 5 分钟。
+const YYB_TIMEOUT = 60000;
+
 // ============ 纯 JS AES（零依赖，逐字节等同 crypto-js；支持任意「4 的倍数」字节 key） ============
 // 与小程序(模块200 c.c)一致：key = Utf8(degradeToken)，iv = Utf8("123456789aasdfgh")，
 // AES-CBC + Pkcs7。crypto-js 按 key 字节数/4 选轮数(AES-128/192/256/...)，此处精确复刻。
@@ -473,17 +477,25 @@ function tokensMap(){
 }
 
 // 单账号单次取码：直接调用 YYB-Go-Enhanced /wxapp/getCode。
+// 上限 YYB_TIMEOUT（60 秒），超时抛出的错误文案就是 `timeout`，方便日志 grep。
 async function yybGetCode(account){
-  const resp = await fetch(`${account.server}/wxapp/getCode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ref: account.ref, app_id: APPID }),
-  });
-  const j = await resp.json().catch(() => ({}));
-  const code = j && j.data && j.data.result && j.data.result.code;
-  if (!resp.ok || Number(j.code) !== 0 || !code) throw new Error('YYB-Go-Enhanced取code失败: ' + String(j.message || j.msg || `HTTP ${resp.status}`).slice(0, 160));
-  dbg('YYB getCode ok', mask(account.ref));
-  return code;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), YYB_TIMEOUT);
+  try {
+    const resp = await fetch(`${account.server}/wxapp/getCode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: account.ref, app_id: APPID }),
+      signal: ctrl.signal,
+    });
+    const j = await resp.json().catch(() => ({}));
+    const code = j && j.data && j.data.result && j.data.result.code;
+    if (!resp.ok || Number(j.code) !== 0 || !code) throw new Error('YYB-Go-Enhanced取code失败: ' + String(j.message || j.msg || `HTTP ${resp.status}`).slice(0, 160));
+    dbg('YYB getCode ok', mask(account.ref));
+    return code;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseLogin(resp, randomKey){

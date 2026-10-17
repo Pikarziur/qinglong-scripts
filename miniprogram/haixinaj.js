@@ -1495,7 +1495,7 @@ async function yybRequest(entry, endpoint) {
   const { data } = await request('POST', `${entry.server}${endpoint}`, {
     headers: { 'content-type': 'application/json' },
     data: { ref: entry.ref, app_id: CONSTS.WX_APP_ID },
-    timeout: 25000,
+    timeout: 60000,
   });
   const result = data?.data?.result;
   if (Number(data?.code ?? -1) !== 0 || !result || typeof result !== 'object') {

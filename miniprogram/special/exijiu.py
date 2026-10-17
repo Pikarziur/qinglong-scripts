@@ -47,7 +47,7 @@ YYB_ONLY_REFS = [1,2]
 #   YYB_TIMEOUT = 单次 HTTP 超时（秒）。YYB 内部会逐个试节点、最坏 ~55s 才回 502，
 #                 设成 30 会在它出结果前就断开、白费一次机会，故留足余量
 YYB_RETRY = 3
-YYB_TIMEOUT = 70
+YYB_TIMEOUT = 60
 
 import os
 import sys

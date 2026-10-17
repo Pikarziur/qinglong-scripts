@@ -303,7 +303,7 @@ def get_wx_code(server, ref):
         response = yyb_session.post(
             f"{server}/wxapp/getCode",
             json={"ref": ref, "app_id": JLC_MINI_APPID},
-            timeout=30,
+            timeout=60,
         )
         try:
             data = response.json()
