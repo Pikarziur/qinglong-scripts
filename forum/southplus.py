@@ -18,18 +18,30 @@
    人眼都难读），**无法自动化**。本站的 WAP 模块 /wap/index.php?prog=login 无验证码，
    故账号密码自动登录走 WAP 通道；登录后拿到的 Cookie 与主站共用（同一 domain/path=/）。
 
-基于用户提供的 HAR 逆向，关键请求：
+基于用户提供的 HAR 逆向（2026-10-20 新版全量抓包），关键请求：
 
   1. 任务页  GET  /plugin.php?H_name-tasks.html
-             -> 页面 JS 含 var verifyhash = '82511105';（任务接口所需的 verify）
+             -> 页面 JS 含 var verifyhash = 'b663b01e';（任务接口所需的 verify）
              -> 已登录标记：页面含 action-quit（退出链接）
-  2. 领任务  GET  /plugin.php?H_name=tasks&action=ajax&actions=job&cid=15
+             -> 「新任务选择」区块列出全部待处理任务，cid 就在按钮里：
+                  <b>周常</b> ... <span id="p_14"><a onclick="startjob('14');">
+                  <b>日常</b> ... <span id="p_15"><a onclick="startjob('15');">
+                任务被申请并领奖后，该行从本区块消失（移入「已完成任务」）
+  2. 领任务  GET  /plugin.php?H_name=tasks&action=ajax&actions=job&cid=<cid>
                    &nowtime=<ms>&verify=<verifyhash>
-  3. 领奖励  GET  /plugin.php?H_name=tasks&action=ajax&actions=job2&cid=15
+  3. 领奖励  GET  /plugin.php?H_name=tasks&action=ajax&actions=job2&cid=<cid>
                    &nowtime=<ms>&verify=<verifyhash>
 
-注：日常任务 cid 在 HAR 中实证为 15（"已申请[日常]"），如需适配其他任务改 CID 即可。
-    日常任务为"每日登录"类，登录即完成，故 job 之后可直接 job2。
+⚠️ 2026-10-20 修复（旧版之殇）：旧版只硬编码 cid=15（日常），**漏掉 cid=14（周常）**，
+   于是日志年年显示「🎉 日常任务：申请 + 领奖 成功」，周常任务却从来没做过 ——
+   「日志正常完成、实际没完成任务」就是这么来的。
+   现改为**从任务页动态解析任务清单**（正则抓 startjob('cid')），逐个执行 job → job2。
+
+HAR 实证的任务清单（2026-10-20）：
+    15 = 日常  ｜奖励 SP币 2 G｜每日SP+2的日常，每日登录类，登录即 100% 完成
+    14 = 周常  ｜奖励 SP币 7 G｜无所事事的周常
+  这类任务都是「申请即完成」，故 job 之后可直接 job2。
+  解析不到任务时回退兜底清单 DEFAULT_TASK_CIDS（见下方常量区）。
 
 凭证获取顺序：本地缓存（主） → 账号密码登录（辅） → SOUTHPLUS_COOKIE（最后兜底）
 
@@ -203,14 +215,17 @@ def err(msg):  _emit("ERROR", msg)
 # ========== 版本标识 ==========
 # 每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 # （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-SCRIPT_VER = "2026-10-01a"
+SCRIPT_VER = "2026-10-20a"
 
 # ========== 常量 ==========
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 DUMP_LIMIT = 64 * 1024          # 响应原文打印上限
-CID = 15                        # 日常任务 cid（HAR 实证）
+# 任务兜底清单（HAR 2026-10-20 实证：15=日常 SP币2G / 14=周常 SP币7G）。
+# 正常会从任务页「新任务选择」区块的 startjob('cid') 动态解析；
+# 仅当页面结构异常、解析不到任务时使用，避免"解析失败=静默无任务"的假完成。
+DEFAULT_TASK_CIDS = ["15", "14"]
 TASKS_PATH = "/plugin.php?H_name-tasks.html"
 WAP_LOGIN_PATH = "/wap/index.php?prog=login"
 
@@ -742,6 +757,30 @@ def extract_verifyhash(html):
     return html[q1 + 1:q2]
 
 
+def extract_tasks(html):
+    """从任务页解析「新任务选择」区块中待处理的任务 -> [(cid, name), ...]
+
+    页面结构（HAR 2026-10-20 实证）：
+        <td ><b>周常</b>&nbsp;(人气 : 27354400)&nbsp; ... 奖励 : SP币 7 G</td>
+        <span id="p_14"><a style="cursor:pointer" onclick="startjob('14');" title="按这申请此任务">
+    任务被申请并领奖后，该行会从本区块消失（移入「已完成任务」），
+    因此「解析不到 startjob」通常意味着今日已全部完成。
+    名称取 startjob 之前最近的 <b>NAME</b>，仅用于日志展示。
+    """
+    h = str(html or "")
+    tasks, seen = [], set()
+    for m in re.finditer(r"startjob\('(\d+)'\)", h):
+        cid = m.group(1)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        seg = h[max(0, m.start() - 900):m.start()]
+        names = re.findall(r"<b>([^<]{1,20})</b>", seg)
+        name = names[-1].strip() if names else ("cid" + cid)
+        tasks.append((cid, name))
+    return tasks
+
+
 # ========== 凭证解析：缓存（主） → 账号密码登录（辅） → SOUTHPLUS_COOKIE（最后兜底）==========
 # ⚠️ 这个顺序是**有意**排的：环境变量 Cookie 放在账号密码**之后**。
 #    它只在「缓存和登录都拿不到」时救场（典型场景：站点临时上验证码/风控，登录走不通，
@@ -795,10 +834,10 @@ def resolve_cookie(user, pwd):
 
 
 # ========== 领任务 / 领奖励 ==========
-def call_task_api(c, action, verify):
+def call_task_api(c, action, verify, cid):
     url = (SITE + "/plugin.php?H_name=tasks&action=ajax"
-           "&actions=%s&cid=%d&nowtime=%d&verify=%s"
-           % (action, CID, int(time.time() * 1000), verify))
+           "&actions=%s&cid=%s&nowtime=%d&verify=%s"
+           % (action, cid, int(time.time() * 1000), verify))
     return c.request(url, headers={"Referer": TASK_PAGE})
 
 
@@ -837,46 +876,46 @@ def classify_job(txt):
     return "unknown"
 
 
-def do_job(c, verify):
-    log("🔧 申请日常任务...")
+def do_job(c, verify, cid, name):
+    log("🔧 申请%s任务（cid=%s）..." % (name, cid))
     try:
-        r = call_task_api(c, "job", verify)
+        r = call_task_api(c, "job", verify, cid)
     except Exception as e:
-        dump_err("job 接口", e)
+        dump_err("job 接口(cid=%s)" % cid, e)
         raise
     kind = classify_job(r)
     if kind == "success":
-        log("✅ 申请成功")
+        log("✅ %s申请成功" % name)
         return "ok", r
     if kind == "done":
-        log("♻️ 日常任务今日已完成（冷却期内，无需重复申请）")
+        log("♻️ %s今日已完成（冷却期内，无需重复申请）" % name)
         return "done", r
     if kind == "expired":
         warn("🍪 任务接口提示未登录：%s" % short_resp(r))
         return "expired", r
-    warn("⚠️ 申请未成功: %s" % short_resp(r))
+    warn("⚠️ %s申请未成功: %s" % (name, short_resp(r)))
     return "fail", r
 
 
-def do_job2(c, verify, job_status):
-    log("🎁 领取日常任务奖励...")
+def do_job2(c, verify, cid, name, job_status):
+    log("🎁 领取%s任务奖励..." % name)
     try:
-        r = call_task_api(c, "job2", verify)
+        r = call_task_api(c, "job2", verify, cid)
     except Exception as e:
-        dump_err("job2 接口", e)
+        dump_err("job2 接口(cid=%s)" % cid, e)
         raise
     kind = classify_job(r)
     if kind == "success":
-        log("🎉 领奖成功")
+        log("🎉 %s领奖成功" % name)
         return "ok", r
     if kind == "expired":
         warn("🍪 领奖接口提示未登录：%s" % short_resp(r))
         return "expired", r
     # 若申请已是冷却/已完成态，则领奖返回"未申请任务"属预期（已领过），不算失败
     if job_status == "done" and "未申请任务" in text_of(r):
-        log("✅ 奖励今日已领取（无需重复领取）")
+        log("✅ %s奖励今日已领取（无需重复领取）" % name)
         return "done", r
-    warn("⚠️ 领奖未成功: %s" % short_resp(r))
+    warn("⚠️ %s领奖未成功: %s" % (name, short_resp(r)))
     return "fail", r
 
 
@@ -977,7 +1016,7 @@ def check_cookie_expire(expire_str):
 
 # ========== 主流程 ==========
 def main():
-    log("🚀 南+论坛 日常任务开始（脚本 v%s）" % SCRIPT_VER)
+    log("🚀 南+论坛 任务开始（脚本 v%s）" % SCRIPT_VER)
 
     if _http is None:
         err("📦 缺少 HTTP 依赖：请执行 pip install curl_cffi（推荐，用于过 Cloudflare）或 pip install requests")
@@ -1038,68 +1077,112 @@ def main():
             sys.exit(1)
         log("🔑 verifyhash = %s" % verify)
 
-        try:
-            j1, r1 = do_job(c, verify)
-        except Exception as e:
-            err("❌ 申请任务请求失败: %s" % e)
-            sys.exit(1)
+        # ── 解析今日待处理任务（HAR 2026-10-20：日常 cid=15 + 周常 cid=14，两个都要做）──
+        tasks = extract_tasks(html)
+        if not tasks:
+            if "社区论坛任务" in html:
+                log("✅ 今日任务已全部完成（任务页无可申请项目）")
+                _res = "今日已全部完成"
+                log("=" * 70)
+                log("📊 [执行汇总] 南+ ｜ %s" % _res)
+                log("=" * 70)
+                # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+                flush_notify("南+", "任务 %s" % _res, logger=log)
+                return
+            # 页面既无任务又无任务表表头 ⇒ 结构异常（或 CF 挑战页），不能静默当成"无任务"
+            warn("⚠️ 未能从任务页解析出任务列表（页面结构可能已变），回退兜底清单 %s"
+                 % DEFAULT_TASK_CIDS)
+            tasks = [(cid, "cid" + cid) for cid in DEFAULT_TASK_CIDS]
+        log("📋 待处理任务 %d 个：%s"
+            % (len(tasks), "、".join("%s(cid=%s)" % (n, cid) for cid, n in tasks)))
 
-        if j1 == "expired":
-            if attempt == 0 and (user and pwd) and not FORCE_LOGIN:
-                warn("🍪 登录态已失效，自动重登后续做一次...")
-                fresh = login_and_get_cookie(user, pwd)
-                if fresh:
-                    c.jar = fresh
-                    write_cache(cookie_str_of(fresh), "login-relogin")
-                    continue
-                warn("⚠️ 重登失败，无法续做")
-            err("🚫 登录态失效：请检查 SOUTHPLUS_ACCOUNT 或更新 SOUTHPLUS_COOKIE")
-            dump_resp("job 接口", r1)
-            sys.exit(1)
+        results = []
+        need_relogin = False
+        for cid, name in tasks:
+            try:
+                j1, r1 = do_job(c, verify, cid, name)
+            except Exception as e:
+                err("❌ %s申请任务请求失败: %s" % (name, e))
+                sys.exit(1)
 
-        time.sleep(random.uniform(1.0, 2.5))
-        try:
-            j2, r2 = do_job2(c, verify, j1)
-        except Exception as e:
-            err("❌ 领奖请求失败: %s" % e)
-            sys.exit(1)
+            if j1 == "expired":
+                if attempt == 0 and (user and pwd) and not FORCE_LOGIN:
+                    warn("🍪 登录态已失效，自动重登后续做一次...")
+                    fresh = login_and_get_cookie(user, pwd)
+                    if fresh:
+                        c.jar = fresh
+                        write_cache(cookie_str_of(fresh), "login-relogin")
+                        need_relogin = True
+                        break
+                    warn("⚠️ 重登失败，无法续做")
+                err("🚫 登录态失效：请检查 SOUTHPLUS_ACCOUNT 或更新 SOUTHPLUS_COOKIE")
+                dump_resp("job 接口(cid=%s)" % cid, r1)
+                sys.exit(1)
 
-        if j2 == "expired":
-            if attempt == 0 and (user and pwd) and not FORCE_LOGIN:
-                warn("🍪 领奖时登录态失效，自动重登后续做一次...")
-                fresh = login_and_get_cookie(user, pwd)
-                if fresh:
-                    c.jar = fresh
-                    write_cache(cookie_str_of(fresh), "login-relogin")
-                    continue
-                warn("⚠️ 重登失败，无法续做")
-            err("🚫 登录态失效：请检查 SOUTHPLUS_ACCOUNT 或更新 SOUTHPLUS_COOKIE")
-            dump_resp("job2 接口", r2)
-            sys.exit(1)
+            time.sleep(random.uniform(1.0, 2.5))
+            try:
+                j2, r2 = do_job2(c, verify, cid, name, j1)
+            except Exception as e:
+                err("❌ %s领奖请求失败: %s" % (name, e))
+                sys.exit(1)
 
-        if DUMP_SIGN:
-            if j1 in ("ok", "done"):
-                dump_resp("job", r1)
-            if j2 in ("ok", "done"):
-                dump_resp("job2", r2)
+            if j2 == "expired":
+                if attempt == 0 and (user and pwd) and not FORCE_LOGIN:
+                    warn("🍪 领奖时登录态失效，自动重登后续做一次...")
+                    fresh = login_and_get_cookie(user, pwd)
+                    if fresh:
+                        c.jar = fresh
+                        write_cache(cookie_str_of(fresh), "login-relogin")
+                        need_relogin = True
+                        break
+                    warn("⚠️ 重登失败，无法续做")
+                err("🚫 登录态失效：请检查 SOUTHPLUS_ACCOUNT 或更新 SOUTHPLUS_COOKIE")
+                dump_resp("job2 接口(cid=%s)" % cid, r2)
+                sys.exit(1)
 
-        if j1 == "done":
-            # 申请已是冷却/已完成态 → 今日任务确定已完成，领奖失败也属预期
-            log("✅ 日常任务：今日已完成（无需重复操作）")
-        elif j1 == "ok" and j2 in ("ok", "done"):
-            log("🎉 日常任务：申请 + 领奖 成功")
-        elif j1 == "ok" and j2 == "fail":
-            warn("⚠️ 任务已申请，但领奖未成功（可能任务尚未完成）")
-        elif j1 == "fail":
-            err("❌ 日常任务申请失败，请查看上方响应")
-        else:
-            err("❌ 日常任务执行未完全成功，请查看上方响应")
+            if DUMP_SIGN:
+                if j1 in ("ok", "done"):
+                    dump_resp("job(cid=%s)" % cid, r1)
+                if j2 in ("ok", "done"):
+                    dump_resp("job2(cid=%s)" % cid, r2)
 
-        # ── [执行汇总] ──
-        _res = {"done": "今日已完成", "ok": "申请+领奖成功", "fail": "申请失败"}.get(j1, str(j1))
+            if j1 == "done":
+                # 申请已是冷却/已完成态 → 该任务今日确定已完成，领奖失败也属预期
+                log("✅ %s：今日已完成（无需重复操作）" % name)
+            elif j1 == "ok" and j2 in ("ok", "done"):
+                log("🎉 %s：申请 + 领奖 成功" % name)
+            elif j1 == "ok" and j2 == "fail":
+                warn("⚠️ %s：任务已申请，但领奖未成功（可能任务尚未完成）" % name)
+            elif j1 == "fail":
+                err("❌ %s：申请失败，请查看上方响应" % name)
+            else:
+                err("❌ %s：执行未完全成功，请查看上方响应" % name)
+
+            results.append((name, j1, j2))
+            # 任务间额外节流（站点要求刷新不快于 1 秒，Client 内已有全局 _pace）
+            time.sleep(random.uniform(0.8, 1.5))
+
+        if need_relogin:
+            continue  # 外层 attempt 循环：重新访问任务页再跑一遍
+
+        # ── [执行汇总] ── 逐任务列结果，杜绝"只报日常、漏报周常"的假完成
+        parts = []
+        for n, a, b in results:
+            if a == "done":
+                st = "今日已完成"
+            elif a == "ok" and b in ("ok", "done"):
+                st = "申请+领奖成功"
+            elif a == "ok" and b == "fail":
+                st = "已申请/领奖未成功"
+            elif a == "fail":
+                st = "申请失败"
+            else:
+                st = "未完全成功"
+            parts.append("%s:%s" % (n, st))
+        _res = " ｜ ".join(parts) or "无任务"
         log("=" * 70)
-        log("📊 [执行汇总] 南+ ｜ 任务 %s" % _res)
-        log("=" * 70)        
+        log("📊 [执行汇总] 南+ ｜ %s" % _res)
+        log("=" * 70)
         # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
         flush_notify(
             "南+",
