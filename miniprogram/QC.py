@@ -118,15 +118,19 @@ except ImportError:
     print("❌ 缺少依赖库，请执行：pip install httpx[http2] httpx-socks python-dotenv")
     sys.exit(1)
 
-from yyb_account_guard import filter_accounts, update_from_result
-
 # ===================== 配置项 =====================
+# 内部配置：直接改这里，省得去面板设环境变量
+# 账号序号白名单（1 起，按 YYB_SERVER 里的书写顺序编号）；留空 [] = 全部运行
+# 例：[1] 只跑第 1 个账号；[1, 3] 跑第 1 和第 3 个
+YYB_ONLY_REFS = []
+
 # 从环境变量 YYB_SERVER 读取内网wxcode服务地址，多条换行分隔
 SERVERS = []
 env_YYB_SERVER = os.getenv("YYB_SERVER", "")
 if env_YYB_SERVER:
     raw_lines = env_YYB_SERVER.splitlines()
     SERVERS = [line.strip() for line in raw_lines if line.strip()]
+_all_servers = list(SERVERS)
 
 # 无有效地址直接退出并提示
 if len(SERVERS) == 0:
@@ -137,7 +141,16 @@ if len(SERVERS) == 0:
     sys.exit(1)
 
 print(f"✅ 读取到 {len(SERVERS)} 个 YYB Go 账号")
-SERVERS = filter_accounts(SERVERS, app_id="wxc5db704249c9bb31", log=print)
+
+# 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+if YYB_ONLY_REFS:
+    _wanted = {int(r) for r in YYB_ONLY_REFS}
+    SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+    if not SERVERS:
+        print(f"❌ YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_all_servers)} 个）")
+        sys.exit(1)
+    print(f"✅ 按 YYB_ONLY_REFS={YYB_ONLY_REFS} 筛选后剩 {len(SERVERS)} 个账号")
+
 print("-" * 60 + "\n")
 
 def parse_yyb_go_entry(raw_value: str) -> Tuple[str, str]:
@@ -661,7 +674,6 @@ async def main():
 
         bot = QueChaoBot(server, proxy_info)
         result = await bot.run()
-        update_from_result(server, result, app_id="wxc5db704249c9bb31")
         results.append(result)
 
         if index < len(SERVERS) - 1:
