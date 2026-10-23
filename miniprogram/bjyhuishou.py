@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# YYB-Go-Enhanced 适配说明：配置多行 YYB_SERVER=地址@账号标识；通知使用青龙 notify.py。
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  白鲸鱼旧衣服回收

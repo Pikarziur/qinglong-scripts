@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 # =========================================================
-# name: Oclean签到
+# name:  Oclean签到
 # cron: 5 7,16 * * *
+# 积分有效期：
+# =========================================================
 #
 # 任务流程：
 #   1. 读取 OCLEAN_COOKIE（或回退 OCLEAN_SHOP_MEMBER）中的 Shop-Member 值
