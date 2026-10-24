@@ -386,6 +386,23 @@ def _awards(task):
     return out
 
 
+def _user_info(task_json):
+    """从 task/list_v2/ 结果里取账号等级与 H币余额。
+
+    字段位置：result.user.level_info → coin(H币余额) / level / exp / max_exp
+    """
+    try:
+        li = ((task_json.get("result") or {}).get("user") or {}).get("level_info") or {}
+        return {
+            "coin": li.get("coin"),
+            "level": li.get("level"),
+            "exp": li.get("exp"),
+            "max_exp": li.get("max_exp"),
+        }
+    except Exception:
+        return {}
+
+
 def run_account(idx, total, user_pkey, heybox_id=""):
     """处理单个账号，返回一行结果描述。"""
     ident = "user_pkey=%s…" % user_pkey[:12]
@@ -440,12 +457,18 @@ def run_account(idx, total, user_pkey, heybox_id=""):
         return "版本过低，无奖励"
     log("📋 签到任务：state=%s 奖励=%s %s" % (state, awards, ("｜" + desc) if desc else ""))
 
+    ui = _user_info(js)
+    if ui.get("coin") is not None:
+        log("💰 H币余额 %s｜Lv.%s｜经验 %s/%s"
+            % (ui["coin"], ui.get("level"), ui.get("exp"), ui.get("max_exp")))
+
     # 3) 未签到则执行签到
     if state == "finish":
         streak = task.get("sign_in_streak", "?")
         log("⏭️ 今日已签到，无需重复签到（连续签到 %s 天）｜奖励 %s"
             % (streak, "/".join(awards) if awards else "?"))
-        return "今日已签到｜连签 %s｜奖励 %s" % (streak, "/".join(awards) if awards else "?")
+        return "今日已签到｜连签 %s｜奖励 %s｜余额 %s" % (
+            streak, "/".join(awards) if awards else "?", ui.get("coin", "?"))
 
     log("🔔 今日未签到（state=%s），开始签到…" % state)
     code, js = api_get("/task/sign_v3/sign", user_pkey, heybox_id)
@@ -471,11 +494,17 @@ def run_account(idx, total, user_pkey, heybox_id=""):
         aw2 = _awards(task2)
         streak = task2.get("sign_in_streak", "?")
         reward = "/".join(aw2) if aw2 else "?"
+        ui2 = _user_info(js)
+        coin2 = ui2.get("coin")
+        delta = ""
+        if ui.get("coin") is not None and coin2 is not None:
+            d = coin2 - ui["coin"]
+            delta = "｜本次到账 +%d H币" % d if d > 0 else ("｜余额 %d" % coin2)
         if signed_now:
-            log("🎉 签到成功｜奖励 %s｜连续签到 %s 天" % (reward, streak))
-            return "签到成功｜连签 %s｜奖励 %s" % (streak, reward)
-        log("⏭️ 今日已签到（本次未新增）｜奖励 %s｜连续签到 %s 天" % (reward, streak))
-        return "今日已签到｜连签 %s｜奖励 %s" % (streak, reward)
+            log("🎉 签到成功｜奖励 %s｜连续签到 %s 天%s" % (reward, streak, delta))
+            return "签到成功｜连签 %s｜奖励 %s｜余额 %s" % (streak, reward, coin2)
+        log("⏭️ 今日已签到（本次未新增）｜奖励 %s｜连续签到 %s 天%s" % (reward, streak, delta))
+        return "今日已签到｜连签 %s｜奖励 %s｜余额 %s" % (streak, reward, coin2)
 
     warn("签到后复查：state=%s，未确认成功" % state2)
     return "签到未确认"
