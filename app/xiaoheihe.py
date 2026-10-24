@@ -2,29 +2,35 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小黑盒
-# cron: 20 7 * * *
+# cron: 20 5 * * *
 # 积分有效期：永久有效
 # =========================================================
 #
 # 任务流程：
-#   1. 读取 XHH_USER_PKEY（浏览器登录 www.xiaoheihe.cn 后的 user_pkey Cookie）
+#   1. 读取凭据（两条支线，可只配一条或两条都配）
+#      · token 支线：XHH_USER_PKEY —— 浏览器登录 www.xiaoheihe.cn 后的 user_pkey Cookie
+#      · 密码支线：XHH_ACCOUNTS  —— 手机号 + 密码，脚本自动登录换 user_pkey
 #   2. GET /account/restore_login/ 验证登录态并取回昵称
 #   3. GET /task/list_v2/ 读取「签到」任务状态与奖励
 #   4. 未签到则 GET /task/sign_v3/sign 完成签到
 #   5. 复查签到状态，输出执行汇总
 # 可控参数：
-#   XHH_USER_PKEY  必填。一行一个 user_pkey 值，多账号换行；留空则用下方 ACCOUNTS
-#   ACCOUNTS       顶部常量，格式同上（环境变量优先）
+#   XHH_USER_PKEY   token 支线。一行一个 user_pkey，多账号换行；留空则用下方 ACCOUNTS
+#   XHH_ACCOUNTS    密码支线。一行一个「手机号,密码」；留空则用下方 PWD_ACCOUNTS
+#   XHH_HEYBOX_ID   可选。heybox_id 一般能从 user_pkey 自动解析，解析不出时按顺序补
+#   ACCOUNTS / PWD_ACCOUNTS / HEYBOX_IDS   顶部常量，格式同上（环境变量优先）
 #
 # 说明：
 #   · 接口走 web 端（xiaoheihe.cn），hkey 签名算法由前端 JS 逆向还原
-#   · user_pkey 由服务端签发，有效期约 7 天；失效会明确提示重新获取
-#   · 依赖：仅 Python 标准库，无需 pip 安装
+#   · token 支线的 user_pkey 由服务端签发，有效期约 7 天；失效会明确提示重新获取
+#   · 密码支线每次运行现登录换凭据，user_pkey 过期也不用管
+#   · 依赖：cryptography（密码支线要 RSA 加密 + 设备指纹）；token 支线只用标准库
 #
 # 日志规范：[LEVEL] [XHH] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -33,7 +39,339 @@ import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 from urllib.parse import urlencode
+
+
+# ────────────────────────────────────────────
+# 设备指纹 dId（创蓝/数美反爬）——用于生成登录所需的 x_xhh_tokenid
+#   森空岛登录接口要求请求头带 x_xhh_tokenid（89 字符设备指纹，B 开头）；
+#   小黑盒 web 登录同样要求，且服务端会校验 dId 真伪（编造的会返回「设备信息无效」）。
+#   这里直接复用同一套创蓝 deviceprofile 算法，只是 organization/appId/公钥换成小黑盒的。
+# ────────────────────────────────────────────
+SM_CONFIG = {
+    "organization": "0yD85BjYvGFAvHaSQ1mc",
+    "appId": "heybox_website",
+    "publicKey": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCXj9exmI4nQjmT52iwr+yf7hAQ06bfSZHTAHUfRBYiagCf/whhd8es0R79wBigpiHLd28TKA8b8mGR8OiiI1hV+qfynCWihvp3mdj8MiiH6SU3lhro2hkfYzImZB0RmWr2zE4Xt1+A6Oyp6bf+W7JSxYUXHw3nNv7Td4jw4jEFKQIDAQAB",
+    "protocol": "https",
+    "apiHost": "fp-it.portal101.cn"
+}
+
+# cryptography / requests 全部延迟导入 —— 只用 token 支线时无需安装任何第三方依赖
+
+# 查询 dId 的接口
+devices_info_url = "https://fp-it.portal101.cn/deviceprofile/v4"
+
+DES_RULE = {
+    "appId": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "uy7mzc4h",
+        "obfuscated_name": "xx"
+    },
+    "box": {
+        "is_encrypt": 0,
+        "obfuscated_name": "jf"
+    },
+    "canvas": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "snrn887t",
+        "obfuscated_name": "yk"
+    },
+    "clientSize": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "cpmjjgsu",
+        "obfuscated_name": "zx"
+    },
+    "organization": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "78moqjfc",
+        "obfuscated_name": "dp"
+    },
+    "os": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "je6vk6t4",
+        "obfuscated_name": "pj"
+    },
+    "platform": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "pakxhcd2",
+        "obfuscated_name": "gm"
+    },
+    "plugins": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "v51m3pzl",
+        "obfuscated_name": "kq"
+    },
+    "pmf": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "2mdeslu3",
+        "obfuscated_name": "vw"
+    },
+    "protocol": {
+        "is_encrypt": 0,
+        "obfuscated_name": "protocol"
+    },
+    "referer": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "y7bmrjlc",
+        "obfuscated_name": "ab"
+    },
+    "res": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "whxqm2a7",
+        "obfuscated_name": "hf"
+    },
+    "rtype": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "x8o2h2bl",
+        "obfuscated_name": "lo"
+    },
+    "sdkver": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "9q3dcxp2",
+        "obfuscated_name": "sc"
+    },
+    "status": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "2jbrxxw4",
+        "obfuscated_name": "an"
+    },
+    "subVersion": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "eo3i2puh",
+        "obfuscated_name": "ns"
+    },
+    "svm": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "fzj3kaeh",
+        "obfuscated_name": "qr"
+    },
+    "time": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "q2t3odsk",
+        "obfuscated_name": "nb"
+    },
+    "timezone": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "1uv05lj5",
+        "obfuscated_name": "as"
+    },
+    "tn": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "x9nzj1bp",
+        "obfuscated_name": "py"
+    },
+    "trees": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "acfs0xo4",
+        "obfuscated_name": "pi"
+    },
+    "ua": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "k92crp1t",
+        "obfuscated_name": "bj"
+    },
+    "url": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "y95hjkoo",
+        "obfuscated_name": "cf"
+    },
+    "version": {
+        "is_encrypt": 0,
+        "obfuscated_name": "version"
+    },
+    "vpw": {
+        "cipher": "DES",
+        "is_encrypt": 1,
+        "key": "r9924ab5",
+        "obfuscated_name": "ca"
+    }
+}
+
+BROWSER_ENV = {
+    'plugins': 'MicrosoftEdgePDFPluginPortableDocumentFormatinternal-pdf-viewer1,MicrosoftEdgePDFViewermhjfbmdgcfjbbpaeojofohoefgiehjai1',
+    'ua': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0',
+    'canvas': '259ffe69',  # 基于浏览器的canvas获得的值，不知道复用行不行
+    'timezone': -480,  # 时区，应该是固定值吧
+    'platform': 'Win32',
+    'url': 'https://www.skland.com/',  # 固定值
+    'referer': '',
+    'res': '1920_1080_24_1.25',  # 屏幕宽度_高度_色深_window.devicePixelRatio
+    'clientSize': '0_0_1080_1920_1920_1080_1920_1080',
+    'status': '0011',  # 不知道在干啥
+}
+
+
+# // 将浏览器环境对象的key全部排序，然后对其所有的值及其子对象的值加入数字并字符串相加。若值为数字，则乘以10000(0x2710)再将其转成字符串存入数组,最后再做md5,存入tn变量（tn变量要做加密）
+# //把这个对象用加密规则进行加密，然后对结果做GZIP压缩（结果是对象，应该有序列化），最后做AES加密（加密细节目前不清除），密钥为变量priId
+# //加密规则：新对象的key使用相对应加解密规则的obfuscated_name值，value为字符串化后进行进行DES加密，再进行btoa加密
+
+# 通过测试
+def _DES(o: dict):
+    import warnings
+    from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+    from cryptography.hazmat.primitives.ciphers.base import Cipher
+    from cryptography.hazmat.primitives.ciphers.modes import ECB
+    # 单密钥 TripleDES 的弃用警告会污染青龙日志，这里静音（功能不受影响）
+    try:
+        from cryptography.utils import CryptographyDeprecationWarning
+        warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+    except Exception:
+        pass
+    result = {}
+    for i in o.keys():
+        if i in DES_RULE.keys():
+            rule = DES_RULE[i]
+            res = o[i]
+            if rule['is_encrypt'] == 1:
+                c = Cipher(TripleDES(rule['key'].encode('utf-8')), ECB())
+                data = str(res).encode('utf-8')
+                # 补足字节
+                data += b'\x00' * 8
+                res = base64.b64encode(c.encryptor().update(data)).decode('utf-8')
+            result[rule['obfuscated_name']] = res
+        else:
+            result[i] = o[i]
+    return result
+
+
+# 通过测试
+def _AES(v: bytes, k: bytes):
+    from cryptography.hazmat.primitives.ciphers.algorithms import AES
+    from cryptography.hazmat.primitives.ciphers.base import Cipher
+    from cryptography.hazmat.primitives.ciphers.modes import CBC
+    iv = '0102030405060708'
+    key = AES(k)
+    c = Cipher(key, CBC(iv.encode('utf-8')))
+    c.encryptor()
+    # 填充明文
+    v += b'\x00'
+    while len(v) % 16 != 0:
+        v += b'\x00'
+    return c.encryptor().update(v).hex()
+
+
+def GZIP(o: dict):
+    # 这个压缩结果似乎和前台不太一样,不清楚是否会影响
+    json_str = json.dumps(o, ensure_ascii=False)
+    stream = gzip.compress(json_str.encode('utf-8'), 2, mtime=0)
+    return base64.b64encode(stream)
+
+
+# 获得tn的值,后续做DES加密用
+# 通过测试
+def get_tn(o: dict):
+    sorted_keys = sorted(o.keys())
+
+    result_list = []
+
+    for i in sorted_keys:
+        v = o[i]
+        if isinstance(v, (int, float)):
+            v = str(v * 10000)
+        elif isinstance(v, dict):
+            v = get_tn(v)
+        result_list.append(v)
+    return ''.join(result_list)
+
+
+def get_smid():
+    t = time.localtime()
+    _time = '{}{:0>2d}{:0>2d}{:0>2d}{:0>2d}{:0>2d}'.format(t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min,
+                                                           t.tm_sec)
+    uid = str(uuid.uuid4())
+    v = _time + hashlib.md5(uid.encode('utf-8')).hexdigest() + '00'
+    smsk_web = hashlib.md5(('smsk_web_' + v).encode('utf-8')).hexdigest()[0:14]
+    return v + smsk_web + '0'
+
+
+def get_d_id():
+    # storageName = '.thumbcache_' + md5(SM_CONFIG['organization']) // 用于从本地存储获得值
+    # uid = uuid()
+    # priId=md5(uid)[0:16]
+    # ep=rsa(uid,publicKey)
+    # SMID = localStorage.get(storageName);// 获得本地存储存的值
+    # _0x30b2eb为递归md5
+    import requests
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    pk = serialization.load_der_public_key(base64.b64decode(SM_CONFIG['publicKey']))
+
+    uid = str(uuid.uuid4()).encode('utf-8')
+    priId = hashlib.md5(uid).hexdigest()[0:16]
+    # ep不一定对，先走走看
+    ep = pk.encrypt(uid, padding.PKCS1v15())
+    ep = base64.b64encode(ep).decode('utf-8')
+
+    browser = BROWSER_ENV.copy()
+    current_time = int(time.time() * 1000)
+    browser.update({
+        'vpw': str(uuid.uuid4()),
+        'svm': current_time,
+        'trees': str(uuid.uuid4()),
+        'pmf': current_time
+    })
+
+    des_target = {
+        **browser,
+        'protocol': 102,
+        'organization': SM_CONFIG['organization'],
+        'appId': SM_CONFIG['appId'],
+        'os': 'web',
+        'version': '3.0.0',
+        'sdkver': '3.0.0',
+        'box': '',  # 似乎是个SMID，但是第一次的时候是空,不过不影响结果
+        'rtype': 'all',
+        'smid': get_smid(),
+        'subVersion': '1.0.0',
+        'time': 0
+    }
+    des_target['tn'] = hashlib.md5(get_tn(des_target).encode()).hexdigest()
+
+    des_result = _AES(GZIP(_DES(des_target)), priId.encode('utf-8'))
+
+    response = requests.post(devices_info_url, json={
+        'appId': 'heybox_website',
+        'compress': 2,
+        'data': des_result,
+        'encode': 5,
+        'ep': ep,
+        'organization': SM_CONFIG['organization'],
+        'os': 'web'  # 固定值
+    })
+
+    resp = response.json()
+    if resp['code'] != 1100:
+        raise Exception("did计算失败，请联系作者")
+    # 开头必须是B
+    return 'B' + resp['detail']['deviceId']
+
+
+def get_xhh_tokenid():
+    """生成小黑盒登录所需的 x_xhh_tokenid（89 字符，B 开头）。"""
+    return get_d_id()
 
 # ────────────────────────────────────────────
 # 内部配置：直接改这里，省得去面板设环境变量
@@ -41,6 +379,13 @@ from urllib.parse import urlencode
 ACCOUNTS = [
     # "<在此粘贴 user_pkey>",
     # 多账号就多写几行，每个一行
+]
+
+# 账号密码登录（可选）：每行一个「手机号,密码」。填了就多一条支线：
+#   脚本自动用手机号+密码登录小黑盒，拿到 user_pkey 后照常签到，user_pkey 过期也不用管。
+#   手机号格式：+8613800138000（含国际区号）；也支持直接写 13800138000，脚本会自动补 +86。
+PWD_ACCOUNTS = [
+    # ("+8613800138000", "你的小黑盒密码"),
 ]
 
 # 可选：heybox_id 一般能从 user_pkey 自动解析出来。
@@ -73,6 +418,45 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
 
 TIMEOUT = 25
+
+# ────────────────────────────────────────────
+# 账号密码登录（可选支线）
+#   web 前端登录流程：
+#     POST /account/login/  body={}，query 带 phone_num + pwd（都用 RSA 加密）
+#     请求头需带 x_xhh_tokenid（设备指纹）+ forbidden_auto_tologin:true
+#   登录成功后服务端返回 pkey，前端把它写成 user_pkey cookie —— 直接拿来当凭据用。
+# ────────────────────────────────────────────
+# 登录接口的 version 必须用 App 版本（填 999.0.4 会报「验证参数错误」）
+LOGIN_VERSION = CLIENT_VERSION
+
+# 登录密码的 RSA 公钥（取自 web 前端 index-BcnLlQNw.js 的 Oc() 函数，jsencrypt/PKCS1v15）
+LOGIN_RSA_PUBKEY = (
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDZgjVwAiKTjZ55nG+mW6r3TSU4"
+    "ECvNYqDMIS/bhCj2QaH5GI/KZb2TBp+CBvUj9SLFnmJQ0kzHzHoGZCQ88VevCffF7JePGF9cmK"
+    "QqotlfTKbV4oxV5iLz7JSG6b/Vg7AXtrTolNtWsa8HiB0tI0YClYaQlOXm4UxLeSxQwSFETwIDAQAB"
+)
+
+
+def rsa_encrypt(text):
+    """按前端 jsencrypt 的方式 RSA/PKCS1v15 加密，返回原始 base64。"""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+    except ImportError:
+        raise Exception("缺少依赖 cryptography，请青龙「依赖管理 → Python3」添加：cryptography")
+    pk = serialization.load_der_public_key(base64.b64decode(LOGIN_RSA_PUBKEY))
+    return base64.b64encode(
+        pk.encrypt(text.encode("utf-8"), padding.PKCS1v15())).decode("ascii")
+
+
+def normalize_phone(phone):
+    """手机号统一成国际格式 +8613800138000。"""
+    p = str(phone or "").strip().replace(" ", "")
+    if p.startswith("+"):
+        return p
+    if p.startswith("86") and len(p) == 13:
+        return "+" + p
+    return "+86" + p
 
 # ────────────────────────────────────────────
 # 统一日志
@@ -327,11 +711,19 @@ def parse_heybox_id(user_pkey):
     return ""
 
 
-def api_get(path, user_pkey, heybox_id="", extra=None):
-    """带签名地请求一个接口，返回 (http状态码, 解析后的dict或原文)。"""
+def api_call(path, user_pkey="", heybox_id="", extra=None, headers=None,
+             method="GET", body=None, base_over=None):
+    """带签名地请求一个接口，返回 (http状态码, 解析后的dict或原文)。
+
+    user_pkey  —— 会话凭据，写在 Cookie: user_pkey=...
+    headers   —— 额外请求头（如登录接口要的 x_xhh_tokenid / forbidden_auto_tologin）
+    base_over —— 覆盖 BASE_PARAMS 里的某些参数（如登录接口的 version）
+    """
     t = int(time.time())
     nonce = gen_nonce()
     params = dict(BASE_PARAMS)
+    if base_over:
+        params.update(base_over)
     params["_time"] = str(t)
     params["nonce"] = nonce
     params["hkey"] = gen_hkey(path, t, nonce)
@@ -340,25 +732,82 @@ def api_get(path, user_pkey, heybox_id="", extra=None):
     if extra:
         params.update(extra)
     url = API + path + "?" + urlencode(params)
-    req = urllib.request.Request(url, headers={
+    h = {
         "User-Agent": UA,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Cookie": "user_pkey=%s" % user_pkey,
         "Referer": "https://xiaoheihe.cn/",
         "Origin": "https://xiaoheihe.cn",
-    })
+    }
+    if user_pkey:
+        h["Cookie"] = "user_pkey=%s" % user_pkey
+    if headers:
+        h.update(headers)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        h["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
         resp = urllib.request.urlopen(req, timeout=TIMEOUT)
-        code, body = resp.status, resp.read().decode("utf-8", "replace")
+        code, raw = resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        code, body = e.code, e.read().decode("utf-8", "replace")
+        code, raw = e.code, e.read().decode("utf-8", "replace")
     except Exception as e:
         return 0, {"_exc": str(e)}
     try:
-        return code, json.loads(body)
+        return code, json.loads(raw)
     except Exception:
-        return code, {"_raw": body[:300]}
+        return code, {"_raw": raw[:300]}
+
+
+def api_get(path, user_pkey, heybox_id="", extra=None):
+    """GET 请求的便捷封装。"""
+    return api_call(path, user_pkey, heybox_id, extra)
+
+
+def login_by_password(phone, pwd):
+    """账号密码登录，返回 (user_pkey, heybox_id)。
+
+    流程：生成设备指纹 x_xhh_tokenid → RSA 加密手机号与密码 → POST /account/login/
+    → 成功时响应里带 pkey（即 user_pkey）。
+    """
+    phone = normalize_phone(phone)
+    tokenid = get_xhh_tokenid()
+    headers = {
+        "Cookie": "x_xhh_tokenid=%s" % tokenid,
+        "x_xhh_tokenid": tokenid,
+        "forbidden_auto_tologin": "true",
+    }
+    code, js = api_call(
+        "/account/login/",
+        user_pkey="",
+        extra={"phone_num": rsa_encrypt(phone), "pwd": rsa_encrypt(pwd)},
+        headers=headers,
+        method="POST",
+        body={},
+        base_over={"version": LOGIN_VERSION},
+    )
+    if code != 200 or not isinstance(js, dict):
+        raise Exception("登录请求失败（HTTP %s）：%s"
+                        % (code, (js.get("_exc") or js.get("_raw") or js)))
+    status = js.get("status")
+    msg = js.get("msg") or ""
+    if status != "ok":
+        raise Exception("登录失败：%s%s" % (
+            msg or "未知错误",
+            "（若提示用户名格式错误，多半是手机号格式不对，"
+            "请用 +国际区号 的格式，如 +8613800138000）" if "格式" in msg else ""))
+    res = js.get("result") or {}
+    # 登录成功后前端把 session.pkey 写成 user_pkey cookie
+    pkey = (res.get("pkey") or res.get("user_pkey")
+            or (res.get("session") or {}).get("pkey") or "")
+    hid = (res.get("heybox_id") or res.get("userid")
+           or (res.get("profile") or {}).get("heybox_id")
+           or (res.get("account_detail") or {}).get("userid") or "")
+    if not pkey:
+        raise Exception("登录返回里没找到 pkey：%s" % str(js)[:200])
+    return pkey, hid
 
 # ────────────────────────────────────────────
 # 业务逻辑
@@ -403,10 +852,30 @@ def _user_info(task_json):
         return {}
 
 
-def run_account(idx, total, user_pkey, heybox_id=""):
-    """处理单个账号，返回一行结果描述。"""
-    ident = "user_pkey=%s…" % user_pkey[:12]
+def run_account(idx, total, user_pkey="", heybox_id="", pwd_pair=None):
+    """处理单个账号，返回一行结果描述。
+
+    user_pkey —— 已有的会话凭据（token 支线）
+    pwd_pair  —— (手机号, 密码)；没有 user_pkey 时用它登录换凭据（账号密码支线）
+    """
+    ident = ("user_pkey=%s…" % user_pkey[:12]) if user_pkey else "账号密码登录"
     acc_banner(idx, total, ident)
+
+    # 账号密码支线：先登录换 user_pkey
+    if not user_pkey and pwd_pair:
+        phone, pwd = pwd_pair
+        try:
+            log("🔑 用账号密码登录：%s" % phone)
+            user_pkey, hid = login_by_password(phone, pwd)
+            heybox_id = heybox_id or hid
+            log("🔑 登录成功（user_pkey=%s…）" % user_pkey[:12])
+        except Exception as e:
+            err("账号密码登录失败：%s" % e)
+            return "登录失败：%s" % e
+
+    if not user_pkey:
+        err("没有可用的凭据")
+        return "缺少凭据"
 
     if not heybox_id:
         heybox_id = parse_heybox_id(user_pkey)
@@ -513,7 +982,7 @@ def run_account(idx, total, user_pkey, heybox_id=""):
 # 主流程
 # ────────────────────────────────────────────
 def load_accounts():
-    """读取账号列表：环境变量 XHH_USER_PKEY 优先，其次顶部 ACCOUNTS。
+    """读取 token 支线账号：环境变量 XHH_USER_PKEY 优先，其次顶部 ACCOUNTS。
 
     返回 [(user_pkey, heybox_id), ...]；heybox_id 优先用 HEYBOX_IDS 里按顺序配的，
     没有配置则由 user_pkey 自动解析。
@@ -541,31 +1010,82 @@ def load_accounts():
     return out
 
 
+def load_pwd_accounts():
+    """读取账号密码支线：环境变量 XHH_ACCOUNTS 优先，其次顶部 PWD_ACCOUNTS。
+
+    每行格式：手机号,密码（也支持 # 或 | 分隔）。
+    返回 [(手机号, 密码), ...]
+    """
+    raw = os.getenv("XHH_ACCOUNTS", "") or ""
+    items = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for sep in (",", "#", "|"):
+            if sep in line:
+                parts = line.split(sep, 1)
+                items.append((parts[0].strip(), parts[1].strip()))
+                break
+    if not items:
+        for x in PWD_ACCOUNTS:
+            try:
+                phone, pwd = x
+            except Exception:
+                continue
+            phone, pwd = str(phone).strip(), str(pwd).strip()
+            if phone and pwd:
+                items.append((phone, pwd))
+    return items
+
+
 def main():
     accounts = load_accounts()
-    log("🚀 小黑盒签到开始｜账号 %d 个" % len(accounts))
-    if not accounts:
-        err("没有配置账号：请在脚本顶部 ACCOUNTS 填入 user_pkey，"
-            "或设置环境变量 XHH_USER_PKEY（一行一个）")
+    pwds = load_pwd_accounts()
+    total = len(accounts) + len(pwds)
+    log("🚀 小黑盒签到开始｜token 账号 %d ｜ 密码账号 %d" % (len(accounts), len(pwds)))
+    if not total:
+        err("没有配置账号：二选一 —— ① 脚本顶部 ACCOUNTS 填 user_pkey"
+            "（环境变量 XHH_USER_PKEY）；② 脚本顶部 PWD_ACCOUNTS 填 (\"手机号\",\"密码\")"
+            "（环境变量 XHH_ACCOUNTS）")
         flush_notify(_QN_SITE, "未配置账号")
         return 1
 
     results = []
     ok = 0
     failed = 0
-    for i, (pkey, hid) in enumerate(accounts, 1):
+    idx = 0
+    for pkey, hid in accounts:
+        idx += 1
+        ident = "user_pkey=%s…" % pkey[:12]
         try:
-            r = run_account(i, len(accounts), pkey, hid)
+            r = run_account(idx, total, pkey, hid)
         except Exception as e:
-            err("账号 %d 处理异常：%s" % (i, e))
+            err("账号 %d 处理异常：%s" % (idx, e))
             r = "异常：%s" % e
-        results.append((i, r))
+        results.append((idx, r))
         if r.startswith("签到成功") or r.startswith("今日已签到"):
             ok += 1
         else:
             failed += 1
-        acc_footer(i, len(accounts), "user_pkey=%s…" % pkey[:12])
-        if i < len(accounts):
+        acc_footer(idx, total, ident)
+        if idx < total:
+            time.sleep(2)
+
+    for phone, pwd in pwds:
+        idx += 1
+        try:
+            r = run_account(idx, total, "", "", pwd_pair=(phone, pwd))
+        except Exception as e:
+            err("账号 %d 处理异常：%s" % (idx, e))
+            r = "异常：%s" % e
+        results.append((idx, r))
+        if r.startswith("签到成功") or r.startswith("今日已签到"):
+            ok += 1
+        else:
+            failed += 1
+        acc_footer(idx, total, "手机号 %s" % phone)
+        if idx < total:
             time.sleep(2)
 
     log("=" * 70)
