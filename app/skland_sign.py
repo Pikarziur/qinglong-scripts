@@ -10,7 +10,8 @@
 #   1. 读取 SKYLAND_TOKEN（或下方 TOKENS 常量）里的森空岛通行证 token
 #   2. token → grant code → cred + 签名密钥（走鹰角 OAuth 换会话）
 #   3. 拉取绑定角色列表，对每个角色调用对应游戏的签到接口
-#   4. 解析奖励明细，区分「签到成功 / 今日已签 / 失败」，输出执行汇总
+#   4. 签到前先 GET 签到状态，取「今天能领什么」，签到后展示奖励明细
+#   5. 解析奖励明细，区分「签到成功 / 今日已签 / 失败」，输出执行汇总
 # 可控参数（环境变量名统一 SKYLAND_ 前缀 + 全大写；环境变量优先于下方常量）
 #   SKYLAND_TOKEN      首选。森空岛 token，一行一个；也支持 ; 或 , 分隔（兼容社区习惯）
 #   SKYLAND_ACCOUNTS   兜底。账号密码，一行一个「手机号,密码」；也支持 # 或 | 分隔
@@ -393,6 +394,11 @@ ACCOUNTS = [
     # ("13800138000", "你的鹰角通行证密码"),
 ]
 
+# 每日补给箱领取（toolId=9）：App 每次打开签到页都会顺手点一下，属于同一批每日福利。
+# 接口幂等（重复点返回 code=0），但响应不返回奖励明细，所以只能提示「已领取」。
+# 不想要就改成 False。
+CLAIM_TOOLBOX = True
+
 # ────────────────────────────────────────────
 # 接口常量
 # ────────────────────────────────────────────
@@ -403,6 +409,8 @@ SIGN_URL = {
     "endfield": SKYLAND_WEB + "/web/v1/game/endfield/attendance",
 }
 BINDING_URL = SKYLAND_WEB + "/api/v1/game/player/binding"
+TOOLBOX_CLICK_URL = SKYLAND_WEB + "/api/v1/game/toolbox/tool/click"
+TOOLBOX_TOOL_ID = 9                            # 每日补给箱
 GRANT_CODE_URL = "https://as.hypergryph.com/user/oauth2/v2/grant"
 CRED_CODE_URL = SKYLAND_WEB + "/web/v1/user/auth/generate_cred_by_code"
 TOKEN_PASSWORD_URL = "https://as.hypergryph.com/user/auth/v1/token_by_phone_password"
@@ -789,8 +797,61 @@ def _fmt_awards(awards):
     return "、".join(parts) if parts else "（无明细）"
 
 
+def _fmt_calendar_today(data):
+    """从 GET 签到状态里取出「今天这一格」的奖励文案。
+
+    data 结构：
+      calendar        —— 未来一个月的奖励预览，每天一格 {resourceId, count, available, done}
+      resourceInfoMap —— resourceId → {name: "初级作战记录", ...}
+    今天那一格：available=true（还没领）或 done=true（已领）。
+    """
+    cal = data.get("calendar") or []
+    if not cal:
+        return "", False
+    rim = data.get("resourceInfoMap") or {}
+
+    cell = None
+    for c in cal:
+        if c.get("done") or c.get("available"):
+            cell = c
+            break
+    if cell is None:
+        cell = cal[0]
+
+    rid = str(cell.get("resourceId") or "")
+    item = rim.get(rid) or {}
+    name = item.get("name") or ""
+    cnt = cell.get("count") or 1
+    text = ("%s×%s" % (name, cnt)) if name else ""
+    return text, bool(cell.get("done"))
+
+
+def get_attendance_state(role, token, cred, did):
+    """GET 签到状态。返回 (今日奖励文案, 是否已签) ；失败返回 ("", False)。"""
+    params = {"gameId": role.get("gameId"), "uid": role.get("uid")}
+    query = parse.urlencode(sorted(params.items()))
+    url = SIGN_URL["arknights"] + "?" + query
+    h = sign_header(url, "get", None, token, cred, did)
+    try:
+        r = requests.get(url, headers=h, timeout=TIMEOUT)
+        resp = r.json()
+    except Exception as e:
+        return "", False, "读取签到状态失败：%s" % e
+    if resp.get("code") != 0:
+        return "", False, "读取签到状态失败：%s" % (resp.get("message") or resp)
+    data = resp.get("data") or {}
+    text, done = _fmt_calendar_today(data)
+    return text, done, ""
+
+
 def sign_arknights(role, token, cred, did):
     """明日方舟签到。返回 (状态, 说明) —— 状态 ∈ success/already/fail"""
+    # 1) 先读签到状态，拿到「今天能领什么」（已签到时 POST 只回一句话，没有礼物明细）
+    today_text, today_done, state_err = get_attendance_state(role, token, cred, did)
+    if state_err:
+        warn("⚠️ %s" % state_err)
+
+    # 2) 执行签到
     body = {"gameId": role.get("gameId"), "uid": role.get("uid")}
     url = SIGN_URL["arknights"]
     h = sign_header(url, "post", body, token, cred, did)
@@ -802,10 +863,28 @@ def sign_arknights(role, token, cred, did):
     if resp.get("code") != 0:
         msg = resp.get("message") or ""
         if "已签到" in msg or "重复" in msg:
-            return "already", msg
+            # 已签到：用 calendar 里的今日奖励兜底展示
+            return "already", today_text or msg
         return "fail", msg or "未知错误"
     data = resp.get("data") or {}
-    return "success", _fmt_awards(data.get("awards"))
+    detail = _fmt_awards(data.get("awards"))
+    if detail == "（无明细）" and today_text:
+        detail = today_text
+    return "success", detail
+
+
+def claim_toolbox(role, token, cred, did):
+    """领取每日补给箱（toolId=9）。返回 (状态, 说明) —— 状态 ∈ success/fail"""
+    body = {"gameId": role.get("gameId"), "toolId": TOOLBOX_TOOL_ID}
+    h = sign_header(TOOLBOX_CLICK_URL, "post", body, token, cred, did)
+    try:
+        resp = requests.post(TOOLBOX_CLICK_URL, headers=h, json=body,
+                             timeout=TIMEOUT).json()
+    except Exception as e:
+        return "fail", "请求失败：%s" % e
+    if resp.get("code") != 0:
+        return "fail", resp.get("message") or "未知错误"
+    return "success", "已领取（接口不返回明细）"
 
 
 def sign_endfield(role, token, cred, did):
@@ -940,15 +1019,27 @@ def run_account(idx, total, ident, token=None, pwd_account=None):
                 if state == "success":
                     ok += 1
                     log("🎉 %s 签到成功｜获得 %s" % (tag, detail))
-                    lines.append("%s 签到成功｜%s" % (tag, detail))
+                    lines.append("%s 签到成功｜获得 %s" % (tag, detail))
                 elif state == "already":
                     ok += 1
-                    log("⏭️ %s 今日已签到｜%s" % (tag, detail))
-                    lines.append("%s 今日已签到" % tag)
+                    if detail:
+                        log("⏭️ %s 今日已签到｜今日奖励 %s" % (tag, detail))
+                        lines.append("%s 今日已签到｜今日奖励 %s" % (tag, detail))
+                    else:
+                        log("⏭️ %s 今日已签到" % tag)
+                        lines.append("%s 今日已签到" % tag)
                 else:
                     fail += 1
                     err("%s 签到失败：%s" % (tag, detail))
                     lines.append("%s 签到失败：%s" % (tag, detail))
+                # 每日补给箱（App 打开签到页时顺手领的那一下）
+                if CLAIM_TOOLBOX:
+                    tstate, tdetail = claim_toolbox(role, sign_key, cred, did)
+                    if tstate == "success":
+                        log("🎁 %s 每日补给箱 %s" % (tag, tdetail))
+                        lines.append("%s 每日补给箱 %s" % (tag, tdetail))
+                    else:
+                        warn("⚠️ %s 每日补给箱领取失败：%s" % (tag, tdetail))
             elif role.get("appCode") == "endfield":
                 if not role.get("roles"):
                     log("ℹ️ %s 终末地没有可签到的角色，跳过" % tag)

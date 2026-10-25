@@ -16,7 +16,8 @@
 #   5. 复查签到状态，输出执行汇总
 # 可控参数：
 #   XHH_USER_PKEY   token 支线。一行一个 user_pkey，多账号换行；留空则用下方 ACCOUNTS
-#   XHH_ACCOUNTS    密码支线。一行一个「手机号,密码」；留空则用下方 PWD_ACCOUNTS
+#   XHH_ACCOUNTS    密码支线。一行一个「手机号#密码」（先账号后密码）；
+#                   多账号换行；也兼容逗号/竖线分隔，但 # 优先
 #   XHH_HEYBOX_ID   可选。heybox_id 一般能从 user_pkey 自动解析，解析不出时按顺序补
 #   ACCOUNTS / PWD_ACCOUNTS / HEYBOX_IDS   顶部常量，格式同上（环境变量优先）
 #
@@ -381,9 +382,10 @@ ACCOUNTS = [
     # 多账号就多写几行，每个一行
 ]
 
-# 账号密码登录（可选）：每行一个「手机号,密码」。填了就多一条支线：
+# 账号密码登录（可选）：每行一个「手机号#密码」（先账号后密码）。填了就多一条支线：
 #   脚本自动用手机号+密码登录小黑盒，拿到 user_pkey 后照常签到，user_pkey 过期也不用管。
 #   手机号格式：+8613800138000（含国际区号）；也支持直接写 13800138000，脚本会自动补 +86。
+#   环境变量 XHH_ACCOUNTS 用同样格式：一行一个「手机号#密码」。
 PWD_ACCOUNTS = [
     # ("+8613800138000", "你的小黑盒密码"),
 ]
@@ -1013,7 +1015,8 @@ def load_accounts():
 def load_pwd_accounts():
     """读取账号密码支线：环境变量 XHH_ACCOUNTS 优先，其次顶部 PWD_ACCOUNTS。
 
-    每行格式：手机号,密码（也支持 # 或 | 分隔）。
+    每行格式：手机号#密码（先账号后密码）。
+    也兼容逗号和竖线分隔，但 # 优先 —— 密码里含逗号时不会被截断。
     返回 [(手机号, 密码), ...]
     """
     raw = os.getenv("XHH_ACCOUNTS", "") or ""
@@ -1022,7 +1025,7 @@ def load_pwd_accounts():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        for sep in (",", "#", "|"):
+        for sep in ("#", ",", "|"):
             if sep in line:
                 parts = line.split(sep, 1)
                 items.append((parts[0].strip(), parts[1].strip()))
@@ -1047,6 +1050,7 @@ def main():
     if not total:
         err("没有配置账号：二选一 —— ① 脚本顶部 ACCOUNTS 填 user_pkey"
             "（环境变量 XHH_USER_PKEY）；② 脚本顶部 PWD_ACCOUNTS 填 (\"手机号\",\"密码\")"
+            "（环境变量 XHH_ACCOUNTS，格式 手机号#密码）"
             "（环境变量 XHH_ACCOUNTS）")
         flush_notify(_QN_SITE, "未配置账号")
         return 1
