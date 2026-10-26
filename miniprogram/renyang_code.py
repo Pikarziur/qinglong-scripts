@@ -433,18 +433,32 @@ def extract_token(data: Any) -> str | None:
 
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
+    payload = {
+        "encryptedData": "",
+        "offset": "",
+        "wxCode": code,
+        "code": "",
+    }
+
+    # YYB 账号：minilogin 必须同时带手机号授权三件套（encryptedData / offset=iv / phoneCode），
+    # 只给 wxCode 会被服务端静默丢弃（HTTP 200 + 空响应体），换不到 token。
+    if "@" in str(server):
+        try:
+            pkg = _yyb_phone_package(server)
+            payload["encryptedData"] = pkg["encryptPhoneNumber"]
+            payload["offset"] = pkg["initVector"]
+            payload["code"] = pkg["authCode"]
+            print("✅ [登录] 已获取手机号授权数据（encryptedData/offset/code）")
+        except Exception as exc:
+            print(f"⚠️ [登录] 手机号授权数据获取失败，将以空授权数据尝试: {exc}")
+
     try:
         print("🔐 [登录] 使用 code 换 token")
         response = request_with_proxy(
             "POST",
             LOGIN_URL,
             headers=common_headers(),
-            json={
-                "encryptedData": "",
-                "offset": "",
-                "wxCode": code,
-                "code": "",
-            },
+            json=payload,
             proxies=proxies,
             server=server,
         )
@@ -1040,6 +1054,72 @@ def _yyb_phone(server, *args, **kwargs):
     return body.get("result") or body.get("data") or body
 
 
+def _yyb_extract_phone_fields(body: Any) -> Dict[str, str]:
+    """从 YYB 返回体中提取手机号授权三件套。
+
+    实测 YYB HTTP 接口返回层级为 {"code":0,"data":{"account":..,"openid":..,"result":{..}}}，
+    三件套在 data.result 内；WebUI 结构则是顶层 result。这里把两层都兼容掉。
+    """
+    candidates: List[Dict[str, Any]] = []
+
+    def add(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        candidates.append(node)
+        for key in ("result", "raw"):
+            add(node.get(key))
+        raw = node.get("data")
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                candidates.append(parsed)
+
+    add(body.get("data") if isinstance(body, dict) else None)
+    add(body.get("result") if isinstance(body, dict) else None)
+    add(body)
+
+    encrypted = ""
+    iv = ""
+    phone_code = ""
+    for node in candidates:
+        if not encrypted and node.get("encryptedData"):
+            encrypted = str(node.get("encryptedData"))
+        if not iv and node.get("iv"):
+            iv = str(node.get("iv"))
+        if not phone_code and node.get("code"):
+            phone_code = str(node.get("code"))
+
+    return {"authCode": phone_code, "encryptPhoneNumber": encrypted, "initVector": iv}
+
+
+def _yyb_phone_package(server, *args, **kwargs) -> Dict[str, str]:
+    """取微信手机号授权三件套。
+
+    minilogin 需要：encryptedData（手机号密文）、offset（=iv）、code（phoneCode）。
+    实测 /wxapp/getPhoneNumber 与 /wx/getphonenumber 两个能力路径都可用。
+    """
+    appid = _yyb_appid(args, kwargs)
+    errors: List[str] = []
+
+    for path in ("/wxapp/getPhoneNumber", "/wx/getphonenumber"):
+        try:
+            body = _yyb_json_request(server, path, appid)
+        except Exception as exc:
+            errors.append("%s -> %s" % (path, exc))
+            continue
+
+        fields = _yyb_extract_phone_fields(body)
+        if fields["encryptPhoneNumber"] and fields["initVector"]:
+            return fields
+
+        errors.append("%s -> 返回缺少 encryptedData/iv" % path)
+
+    raise RuntimeError("YYB 手机号授权数据获取失败（%s）" % "；".join(errors))
+
+
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
 
@@ -1088,19 +1168,9 @@ if "get_phone_package" in globals():
     def get_phone_package(server, *args, **kwargs):
         if "@" not in str(server):
             return _yyb_original_get_phone_package(server, *args, **kwargs)
-        body = _yyb_phone(server, *args, **kwargs)
-        # YYB keeps the upstream response shape. Do not invent encryptedData/iv.
-        if isinstance(body, dict):
-            result = body.get("result") if isinstance(body.get("result"), dict) else body
-            data = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), dict) else result
-            raw = data.get("raw") if isinstance(data, dict) and isinstance(data.get("raw"), dict) else data
-            if isinstance(raw, dict):
-                return {
-                    "authCode": str(raw.get("code") or data.get("code") or ""),
-                    "encryptPhoneNumber": str(raw.get("encryptedData") or ""),
-                    "initVector": str(raw.get("iv") or ""),
-                }
-        return {"authCode": "", "encryptPhoneNumber": "", "initVector": ""}
+        body = _yyb_json_request(server, "/wxapp/getPhoneNumber", _yyb_appid(args, kwargs))
+        # 三件套必须来自服务端真实下发，不做任何伪造或补值。
+        return _yyb_extract_phone_fields(body)
 if "get_userinfo_blob" in globals():
     _yyb_original_get_userinfo_blob = get_userinfo_blob
 
