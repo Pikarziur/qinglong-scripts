@@ -403,7 +403,10 @@ API = "https://api.xiaoheihe.cn"
 # 填太低会返回「当前版本过低，无法获得任务奖励」。
 CLIENT_VERSION = "1.3.398"
 
-# web 端固定参数（x_app 必须是 heybox，填 heybox_website 服务端会走 web 分支判定版本）
+# ── 两套参数，各管各的接口 ──────────────────────────────
+# ① BASE_PARAMS：业务接口（签到/任务/积分）
+#    x_app 必须是 heybox —— 填 heybox_website 服务端会走 web 分支，
+#    判定「当前版本过低，无法获得任务奖励」。
 BASE_PARAMS = {
     "app": "heybox",
     "client_type": "web",
@@ -414,6 +417,22 @@ BASE_PARAMS = {
     "x_app": "heybox",
     "x_os_type": "Windows",
     "x_client_version": CLIENT_VERSION,
+}
+
+# ② WEB_PARAMS：登录类接口（/account/login/、/account/get_login_code/、扫码）
+#    实测差异（2026-10-26）：
+#      用 BASE_PARAMS（x_app=heybox，App 伪装）→ 报「错误的登录方式」
+#      用 WEB_PARAMS（x_app=heybox_website）→ 报「用户名格式错误」（能到业务层）
+#    也就是说登录接口只认 web 身份，签到接口才需要 App 伪装。
+WEB_PARAMS = {
+    "app": "heybox",
+    "client_type": "web",
+    "os_type": "web",
+    "version": "999.0.4",
+    "web_version": "3.0",
+    "x_client_type": "web",
+    "x_app": "heybox_website",
+    "x_os_type": "Windows",
 }
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -427,9 +446,13 @@ TIMEOUT = 25
 #     POST /account/login/  body={}，query 带 phone_num + pwd（都用 RSA 加密）
 #     请求头需带 x_xhh_tokenid（设备指纹）+ forbidden_auto_tologin:true
 #   登录成功后服务端返回 pkey，前端把它写成 user_pkey cookie —— 直接拿来当凭据用。
+#
+#   ⚠️ 实测状态（2026-10-26）：
+#     用前端自己的 jsencrypt 库加密，结果与本脚本完全一致 → RSA 实现无误；
+#     但服务端仍拒绝 → 当前服务端已不接受 web 端这套密码登录公钥。
+#     官方 App 登录则报「本次登录存在风险」（风控层拦截）。
+#     结论：密码登录这条路当前走不通，请改用 app/xiaoheihe_qrlogin.py 扫码登录。
 # ────────────────────────────────────────────
-# 登录接口的 version 必须用 App 版本（填 999.0.4 会报「验证参数错误」）
-LOGIN_VERSION = CLIENT_VERSION
 
 # 登录密码的 RSA 公钥（取自 web 前端 index-BcnLlQNw.js 的 Oc() 函数，jsencrypt/PKCS1v15）
 LOGIN_RSA_PUBKEY = (
@@ -506,6 +529,15 @@ _QN_NOMOD = (
 _qn_errors = []
 _qn_seen = set()
 _qn_flushed = False
+_qn_need_relogin = False       # 登录态失效 → 通知里给出「去扫码」的指引
+
+# 重新登录的操作指引（会拼进推送正文）
+RELOGIN_HINT = (
+    "👉 下一步：运行扫码登录脚本换新的登录凭据\n"
+    "   青龙 → 定时任务 → 新建 → 命令填 task app/xiaoheihe_qrlogin.py → 手动运行\n"
+    "   日志里会显示二维码，用「小黑盒」App 扫一下（120 秒内），"
+    "把输出的 user_pkey 填回环境变量 XHH_USER_PKEY"
+)
 
 
 def collect_error(line):
@@ -532,6 +564,8 @@ def flush_notify(_site=None, summary="", logger=None, **_kw):
         print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
         return False
     _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
+    if _qn_need_relogin:
+        _body += "\n\n" + RELOGIN_HINT
     try:
         _qn_send("【%s】执行出错" % _QN_SITE, _body)
         return True
@@ -714,16 +748,17 @@ def parse_heybox_id(user_pkey):
 
 
 def api_call(path, user_pkey="", heybox_id="", extra=None, headers=None,
-             method="GET", body=None, base_over=None):
+             method="GET", body=None, base_over=None, base_set=None):
     """带签名地请求一个接口，返回 (http状态码, 解析后的dict或原文)。
 
     user_pkey  —— 会话凭据，写在 Cookie: user_pkey=...
     headers   —— 额外请求头（如登录接口要的 x_xhh_tokenid / forbidden_auto_tologin）
     base_over —— 覆盖 BASE_PARAMS 里的某些参数（如登录接口的 version）
+    base_set  —— 整体换掉参数集（登录类接口用 WEB_PARAMS，业务接口用 BASE_PARAMS）
     """
     t = int(time.time())
     nonce = gen_nonce()
-    params = dict(BASE_PARAMS)
+    params = dict(base_set if base_set is not None else BASE_PARAMS)
     if base_over:
         params.update(base_over)
     params["_time"] = str(t)
@@ -788,18 +823,22 @@ def login_by_password(phone, pwd):
         headers=headers,
         method="POST",
         body={},
-        base_over={"version": LOGIN_VERSION},
+        base_set=WEB_PARAMS,
     )
     if code != 200 or not isinstance(js, dict):
         raise Exception("登录请求失败（HTTP %s）：%s"
                         % (code, (js.get("_exc") or js.get("_raw") or js)))
     status = js.get("status")
-    msg = js.get("msg") or ""
+    msg = js.get("message") or js.get("msg") or ""
     if status != "ok":
-        raise Exception("登录失败：%s%s" % (
-            msg or "未知错误",
-            "（若提示用户名格式错误，多半是手机号格式不对，"
-            "请用 +国际区号 的格式，如 +8613800138000）" if "格式" in msg else ""))
+        hint = ""
+        if "格式" in msg:
+            hint = "（手机号要带国际区号，如 +8613800138000）"
+        elif "登录方式" in msg or "风险" in msg:
+            hint = ("（服务端拒绝 web 端密码登录：实测用前端自带的 jsencrypt 加密结果一致，"
+                    "且官方 App 登录报「本次登录存在风险」—— 这是风控，不是密码错。"
+                    "请改用 app/xiaoheihe_qrlogin.py 扫码登录）")
+        raise Exception("登录失败：%s%s" % (msg or "未知错误", hint))
     res = js.get("result") or {}
     # 登录成功后前端把 session.pkey 写成 user_pkey cookie
     pkey = (res.get("pkey") or res.get("user_pkey")
@@ -897,9 +936,12 @@ def run_account(idx, total, user_pkey="", heybox_id="", pwd_pair=None):
             err("服务端校验不通过（msg=%s）：请确认 user_pkey 复制完整、"
                 "heybox_id 正确（当前 %s）" % (msg, heybox_id))
         else:
-            err("登录态已失效（status=%s，msg=%s）：user_pkey 有效期约 7 天，请重新登录 "
-                "www.xiaoheihe.cn 后从浏览器 DevTools → Application → Cookies 复制 user_pkey"
-                % (status, msg))
+            global _qn_need_relogin
+            _qn_need_relogin = True
+            err("登录态已失效（status=%s，msg=%s）：user_pkey 有效期约 7 天，"
+                "且改密码会立刻吊销旧凭据" % (status, msg))
+            err("👉 需要重新扫码获取凭据：运行 task app/xiaoheihe_qrlogin.py"
+                "（详细步骤见推送通知）")
         return "登录态失效"
     res = js.get("result") or {}
     profile = res.get("profile") or {}
@@ -1099,6 +1141,12 @@ def main():
         % (ok, failed, new_signed, already))
     for i, r in results:
         log("  · 账号%d：%s" % (i, r))
+    if _qn_need_relogin:
+        log("")
+        log("⚠️ 登录凭据已失效，本次没有签到成功。")
+        log("   重新获取：青龙 → 定时任务 → 新建 → 命令 task app/xiaoheihe_qrlogin.py")
+        log("   手动运行 → 日志里显示二维码 → 用「小黑盒」App 扫一下（120 秒内）")
+        log("   脚本会把新 user_pkey 自动写回环境变量 XHH_USER_PKEY（无需手动填）")
     flush_notify(_QN_SITE, "成功 %d ｜ 失败 %d" % (ok, failed))
     return 0 if failed == 0 else 1
 
