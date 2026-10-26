@@ -37,6 +37,8 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
   CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
+  YYB_SERVER        YYB 账号基座，格式「地址@账号ID」，每行一个
+  YYB_ONLY_REFS     账号序号白名单（1 起，按 YYB_SERVER 行序），见脚本顶部硬编码常量，留空跑全部
 
 ⚠️ 登录限制：源脚本为“手机号一键授权登录”，/mall/xhr/minilogin 正常需要
    encryptedData/offset(iv)/phoneCode（手机号授权数据，本地 code 服务无法提供），
@@ -96,6 +98,11 @@ COMMUNITY_RECOMMEND_URL = f"{BASE_URL}/mall/xhr/community/home/recommend/item"
 COMMUNITY_PUSH_URL = f"{BASE_URL}/mall/xhr/community/posts/push"
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryytncookie.json")
+QUIZ_CACHE_NAME = "ryytn_quiz_cache.json"
+QUIZ_CACHE_MAX = 500
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+YYB_ONLY_REFS = []
 
 USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 "
@@ -619,6 +626,75 @@ def check_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> Di
     return api_post(server, CHECKIN_SAVE_URL, token, proxies, {})
 
 
+def quiz_cache_path() -> str:
+    """答题缓存路径：优先放青龙数据目录，避免污染仓库目录。"""
+    for base in ("/ql/data", "/ql/data/scripts"):
+        if os.path.isdir(base):
+            return os.path.join(base, QUIZ_CACHE_NAME)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), QUIZ_CACHE_NAME)
+
+
+def load_quiz_cache() -> Dict[str, Any]:
+    try:
+        path = quiz_cache_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        print(f"⚠️ [答题缓存] 读取失败: {exc}")
+    return {}
+
+
+def save_quiz_cache(cache: Dict[str, Any]) -> None:
+    try:
+        items = list(cache.items())
+        if len(items) > QUIZ_CACHE_MAX:
+            items = items[-QUIZ_CACHE_MAX:]
+        with open(quiz_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(dict(items), f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ [答题缓存] 保存失败: {exc}")
+
+
+def quiz_cache_get(title: str) -> str:
+    """按题干取缓存的正确答案文本。"""
+    if not title:
+        return ""
+    entry = load_quiz_cache().get(title)
+    if isinstance(entry, dict):
+        return str(entry.get("correctValue") or "")
+    return str(entry or "")
+
+
+def quiz_cache_put(title: str, correct_value: str, correct_key: str = "") -> None:
+    if not title or not correct_value:
+        return
+    cache = load_quiz_cache()
+    cache[title] = {
+        "correctValue": correct_value,
+        "correctKey": correct_key,
+        "updateTime": now_text(),
+    }
+    save_quiz_cache(cache)
+    print(f"💾 [答题缓存] 已记录本题正确答案")
+
+
+def resolve_correct_value(answer: Any, options: List[Dict[str, Any]]) -> str:
+    """把服务端回显的正确答案（可能是选项 key，也可能是选项文本）统一归一成选项文本。"""
+    if answer in (None, ""):
+        return ""
+    text = str(answer).strip()
+    for opt in options:
+        if str(opt.get("key") or "").strip() == text:
+            return str(opt.get("value") or "")
+    for opt in options:
+        if str(opt.get("value") or "").strip() == text:
+            return text
+    return ""
+
+
 def run_quiz(server: str, token: str, proxies: Dict[str, str] | None) -> str:
     quiz_resp = api_get(server, QUIZ_ACTIVITIES_URL, token, proxies)
     if quiz_resp.get("code") != 200:
@@ -642,9 +718,24 @@ def run_quiz(server: str, token: str, proxies: Dict[str, str] | None) -> str:
         print("⚠️ [答题] 未获取到题目选项，跳过答题")
         return "无选项"
 
-    selected = random.choice(options)
+    question_title = str(today_quiz.get("questionTitle") or "")
+    selected = None
+
+    cached_value = quiz_cache_get(question_title)
+    if cached_value:
+        for opt in options:
+            if str(opt.get("value") or "").strip() == cached_value:
+                selected = opt
+                break
+        if selected is not None:
+            print(f"♻️ [答题] 命中历史答案: {cached_value}")
+
+    if selected is None:
+        selected = random.choice(options)
+        print("🎲 [答题] 无历史答案，随机作答")
+
     selected_key = selected.get("key")
-    print(f"📝 [答题] 准备随机提交答案{selected_key}: {selected.get('value')}")
+    print(f"📝 [答题] 准备提交答案{selected_key}: {selected.get('value')}")
 
     wait_time = 6 + random.random() * 2
     print(f"⏳ [答题] 提交前等待 {wait_time:.0f}s")
@@ -664,9 +755,13 @@ def run_quiz(server: str, token: str, proxies: Dict[str, str] | None) -> str:
     data = submit_resp.get("data") or {}
     actual_correct_key = data.get("correctAnswer") or (selected_key if data.get("isCorrect") == 1 else "")
     if data.get("isCorrect") == 1:
+        quiz_cache_put(question_title, str(selected.get("value") or ""), str(selected_key or ""))
         msg = f"回答正确，获得{data.get('point', 0)}积分"
         print(f"✅ [答题] {msg}")
     else:
+        correct_value = resolve_correct_value(actual_correct_key, options)
+        if correct_value:
+            quiz_cache_put(question_title, correct_value, str(actual_correct_key or ""))
         suffix = f"，正确答案是{actual_correct_key}" if actual_correct_key else ""
         msg = f"答案错误{suffix}，今日未获得积分"
         print(f"⚠️ [答题] {msg}")
@@ -923,6 +1018,10 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 def main() -> None:
     log_title()
 
+    if not SERVERS:
+        print("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
+        return 1
+
     results: List[Dict[str, Any]] = []
 
     for index, server in enumerate(SERVERS, 1):
@@ -1122,6 +1221,18 @@ def _yyb_phone_package(server, *args, **kwargs) -> Dict[str, str]:
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+if YYB_ONLY_REFS:
+    _before = len(SERVERS)
+    _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
+    if _wanted:
+        SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+        print(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
+    else:
+        print(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
+    if not SERVERS:
+        print(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code

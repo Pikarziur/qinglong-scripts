@@ -25,8 +25,8 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   2. 复刻小程序的阿里云账号 OAuth 静默登录
      （/weixin/authLogin.html → GetLoginTokenByAuthCode 拿 LoginToken/SessionId）
   3. RefreshLoginToken 自动续期缓存会话
-  4. 运行时定位「每日签到」活动（DescribeUserBenefitActivities / DescribeOperationActivities）
-  5. 每日签到（AttendUserBenefitActivity，幂等）
+  4. 签到活动配置与签到日历（DescribeCheckInActivity / DescribeUserCheckInInfo，Activity=check-in）
+  5. 每日签到（CreateUserCheckIn，按日历状态幂等：已签则不再提交）
   6. PushPlus 推送
   7. 品赞代理，业务请求优先代理，失败直连兜底
 
@@ -42,6 +42,8 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
   CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
+  YYB_SERVER        YYB 账号基座，格式「地址@账号ID」，每行一个
+  YYB_ONLY_REFS     账号序号白名单（1 起，按 YYB_SERVER 行序），见脚本顶部硬编码常量，留空跑全部
   wuying_token      手动会话逃生口，多账号按账号顺序用换行或 & 分割
 
 依赖：
@@ -57,7 +59,7 @@ import random
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlencode
 
@@ -77,6 +79,9 @@ if os.getenv("CODE_SERVER"):
 PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
 PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+YYB_ONLY_REFS = []
 
 PROXY_RETRY_TIMES = 3
 PROXY_VALIDATE_URL = "http://httpbin.org/ip"
@@ -99,6 +104,8 @@ FROM_CLIENT = "miniapp_weixin"
 BIZ_OK = "success"
 # 会话失效 -> 需重新登录
 SESSION_INVALID = ("User.LoginInvalid", "InvalidLoginToken.Missing", "NOT_LOGIN")
+# 签到活动标识 (HAR 实测: DescribeCheckInActivity / DescribeUserCheckInInfo / CreateUserCheckIn 均用 Activity=check-in)
+CHECKIN_ACTIVITY = "check-in"
 
 # 手动会话逃生口: wuying_token = "LoginToken#SessionId", 按账号顺序换行/& 分割
 _manual_session_lines = [
@@ -425,7 +432,10 @@ def open_api(
     url = f"{endpoint}?{urlencode(sorted(q.items()))}"
     headers = common_headers()
     if method.upper() == "POST":
-        response = request_with_proxy("POST", url, headers=headers, data={}, proxies=proxies, server=server)
+        # 小程序真实 POST 会把同一组参数再放进 JSON body (HAR 实测), 这里 query + body 双写
+        post_headers = dict(headers)
+        post_headers["Content-Type"] = "application/json"
+        response = request_with_proxy("POST", url, headers=post_headers, json=q, proxies=proxies, server=server)
     else:
         response = request_with_proxy("GET", url, headers=headers, proxies=proxies, server=server)
     try:
@@ -513,102 +523,52 @@ def refresh_login_token(server: str, login_token: str, session_id: str, proxies:
         return None
 
 
-def describe_benefit_activities(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
-    return open_api(server, DESKTOP_EP, "DescribeUserBenefitActivities", DESKTOP_VER, {
+# ====================== 签到（HAR 实测接口） ======================
+# 签到页是独立的 check-in 活动，不出现在 DescribeUserBenefitActivities /
+# DescribeOperationActivities 的活动列表里 —— 旧版「从活动列表找 ActivityId」的思路
+# 永远定位不到，这就是日志里「未能定位每日签到活动」的根因。
+# 正确链路：DescribeCheckInActivity(活动配置) → DescribeUserCheckInInfo(签到日历) → CreateUserCheckIn(执行)
+
+
+def describe_checkin_activity(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+    """GET DescribeCheckInActivity: 签到活动配置（每日/额外奖励规则）。"""
+    return open_api(server, DESKTOP_EP, "DescribeCheckInActivity", DESKTOP_VER, {
         "LoginToken": lt,
         "SessionId": sid,
-        "Scene": "weixin",
-        "ClientType": FROM_CLIENT,
+        "Activity": CHECKIN_ACTIVITY,
     }, proxies)
 
 
-def describe_operation_activities(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
-    return open_api(server, DESKTOP_EP, "DescribeOperationActivities", DESKTOP_VER, {
+def describe_user_checkin_info(server: str, lt: str, sid: str, proxies: Dict[str, str] | None,
+                              days_before: int = 3, days_after: int = 3) -> Dict[str, Any]:
+    """GET DescribeUserCheckInInfo: 签到日历（每天 Available / Finished / Missed / Pending）。"""
+    return open_api(server, DESKTOP_EP, "DescribeUserCheckInInfo", DESKTOP_VER, {
         "LoginToken": lt,
         "SessionId": sid,
-        "Scene": "weixin",
-        "ActivityDisplayType": "Banner",
-        "ClientType": FROM_CLIENT,
+        "Activity": CHECKIN_ACTIVITY,
+        "DaysBefore": days_before,
+        "DaysAfter": days_after,
     }, proxies)
 
 
-SIGNIN_HINT = ("signin", "sign_in", "attend", "checkin", "check_in", "dailycheck",
-               "clockin", "签到", "打卡", "每日")
-
-
-def looks_like_signin(obj: Any) -> bool:
-    """在活动卡片对象里判断是否为签到活动 (按类型/名称关键字启发式)。"""
-    blob = json.dumps(obj, ensure_ascii=False).lower()
-    return any(h in blob for h in SIGNIN_HINT)
-
-
-def iter_activities(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """从活动列表响应里迭代活动对象。"""
-    node = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    data = node.get("Data") if isinstance(node, dict) and isinstance(node.get("Data"), dict) else node
-    result: List[Dict[str, Any]] = []
-    for key in ("OperationCards", "Activities", "ActivityList", "List", "Cards"):
-        arr = data.get(key) if isinstance(data, dict) else None
-        if isinstance(arr, list):
-            for item in arr:
-                if isinstance(item, dict):
-                    result.append(item)
-    return result
-
-
-def find_signin_activity_id(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None, bool]:
-    """运行时定位「每日签到」活动的 ActivityId（签到页在分包内为空壳）。
-    返回 (activity_id, act, session_bad)。"""
-    session_bad = False
-    for fetch in (describe_benefit_activities, describe_operation_activities):
-        try:
-            resp = fetch(server, lt, sid, proxies)
-        except Exception as exc:
-            print(f"⚠️ [签到] 活动列表获取失败({fetch.__name__}): {exc}")
-            continue
-        if is_session_invalid(resp):
-            session_bad = True
-            break
-        if not biz_ok(resp):
-            print(f"⚠️ [签到] 活动列表返回 Code={biz_code(resp)}")
-            continue
-        for act in iter_activities(resp):
-            if looks_like_signin(act):
-                aid = (act.get("ActivityId") or act.get("activityId")
-                       or act.get("Id") or act.get("id"))
-                if aid:
-                    return str(aid), act, session_bad
-    return None, None, session_bad
-
-
-def attendance_count(server: str, lt: str, sid: str, activity_id: str, proxies: Dict[str, str] | None) -> Dict[str, Any] | None:
-    try:
-        resp = open_api(server, DESKTOP_EP, "DescribeUserActivityAttendanceCount", DESKTOP_VER, {
-            "LoginToken": lt,
-            "SessionId": sid,
-            "ActivityId": activity_id,
-        }, proxies)
-        return inner_node(resp)
-    except Exception:
-        return None
-
-
-def attend_activity(server: str, lt: str, sid: str, activity_id: str, proxies: Dict[str, str] | None) -> Tuple[bool, str]:
-    """AttendUserBenefitActivity (POST): 完成一次签到。返回 (成功?, 文案)。"""
-    resp = open_api(server, DESKTOP_EP, "AttendUserBenefitActivity", DESKTOP_VER, {
+def create_user_checkin(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+    """POST CreateUserCheckIn: 执行一次签到。"""
+    return open_api(server, DESKTOP_EP, "CreateUserCheckIn", DESKTOP_VER, {
         "LoginToken": lt,
         "SessionId": sid,
-        "ActivityId": activity_id,
+        "Activity": CHECKIN_ACTIVITY,
     }, proxies, method="POST")
-    node = inner_node(resp)
-    code = str(node.get("Code"))
-    msg = node.get("Message") or ""
-    if code == BIZ_OK:
-        return True, "签到成功"
-    # 服务端对重复签到通常返回可识别的 Code/Message, 视为幂等成功
-    if any(k in (code + msg).lower() for k in ("already", "repeat", "duplicate", "已签", "已参与", "重复")):
-        return True, "今日已签到"
-    return False, f"签到失败: {code} {msg}".strip()
+
+
+def checkin_data(resp: Dict[str, Any]) -> Dict[str, Any]:
+    """阿里云 OpenAPI 的业务数据块在 Data 字段。"""
+    data = resp.get("Data") if isinstance(resp, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def beijing_today() -> str:
+    """服务端签到日历按北京时间。"""
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, str | None]:
@@ -772,9 +732,10 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     result["token"] = mask(lt)
 
     try:
-        # 定位签到活动 (ActivityId 需运行时从活动列表发现)
-        activity_id, act, session_bad = find_signin_activity_id(server, lt, sid, proxies)
-        if session_bad:  # 会话失效 -> 强制重登重试一次
+        # 签到: DescribeCheckInActivity(规则) → DescribeUserCheckInInfo(日历) → CreateUserCheckIn(执行)
+        today = beijing_today()
+        info = describe_user_checkin_info(server, lt, sid, proxies)
+        if is_session_invalid(info):  # 会话失效 -> 强制重登重试一次
             print("⚠️ [签到] 会话失效, 重新登录...")
             lt, sid, state = login_with_cache(server, proxies, force=True)
             if not lt:
@@ -782,34 +743,60 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
                 print(f"⚠️ [账号] {result['error']}")
                 return result
             result["token"] = mask(lt)
-            activity_id, act, session_bad = find_signin_activity_id(server, lt, sid, proxies)
+            info = describe_user_checkin_info(server, lt, sid, proxies)
 
-        if not activity_id:
-            msg = ("未能定位「每日签到」活动 (活动列表中无签到活动, 可能活动未上线, "
-                   "或需在小程序内进入签到页抓取 ActivityId)")
+        if not biz_ok(info):
+            msg = f"签到状态查询失败: {biz_code(info)}"
             result["signMsg"] = msg
             print(f"⚠️ [签到] {msg}")
             return result
 
-        print(f"✅ [签到] 定位到签到活动 ActivityId={activity_id}")
+        act = checkin_data(describe_checkin_activity(server, lt, sid, proxies))
+        if act.get("Title"):
+            print(f"ℹ️ [签到] 活动: {act.get('Title')} · {act.get('SubTitle')}")
 
-        # 幂等信号 (best-effort): 参与次数
-        cnt = attendance_count(server, lt, sid, activity_id, proxies)
-        if isinstance(cnt, dict) and cnt.get("Count") is not None:
-            print(f"📊 [签到] 当前参与次数: {cnt.get('Count')}")
+        node = checkin_data(info)
+        records = node.get("CheckinRecord") or []
+        today_rec = next((r for r in records if str(r.get("Date")) == today), None)
+        status = str((today_rec or {}).get("Status") or "")
+        summary = node.get("CheckinSummary") or {}
 
-        # 执行一次签到
+        # 幂等: 今天已签过就不再提交
+        if status == "Finished":
+            msg = (f"今日已签到 (累计 {summary.get('Duration', 0)} 天, "
+                   f"共得 {summary.get('TotalRewardCoreHour', 0)} 核时)")
+            result["signMsg"] = msg
+            print(f"✅ [签到] {msg}")
+            result["success"] = True
+            return result
+
+        if status != "Available":
+            msg = f"今日签到状态为 {status or '未知'}, 未执行签到"
+            result["signMsg"] = msg
+            print(f"⚠️ [签到] {msg}")
+            return result
+
         wait_time = random.randint(2, 5)
         print(f"⏳ [签到] 提交前等待 {wait_time}s")
         sleep(wait_time)
 
-        ok, msg = attend_activity(server, lt, sid, activity_id, proxies)
-        result["signMsg"] = msg
-        if ok:
-            print(f"🎉 [签到] {msg}")
+        resp = create_user_checkin(server, lt, sid, proxies)
+        data = checkin_data(resp)
+        code = str(resp.get("Code"))
+        err_msg = resp.get("Message") or ""
+        if code == BIZ_OK:
+            hours = data.get("RewardCoreHour")
+            title = data.get("Title") or "签到成功"
+            result["signMsg"] = f"{title}" + (f"，获得 {hours} 核时" if hours is not None else "")
+            print(f"🎉 [签到] {result['signMsg']}")
+            result["success"] = True
+        elif any(k in (code + err_msg).lower() for k in ("already", "repeat", "duplicate", "已签", "已参与", "重复")):
+            result["signMsg"] = "今日已签到"
+            print(f"✅ [签到] {result['signMsg']}")
             result["success"] = True
         else:
-            print(f"❌ [签到] {msg}")
+            result["signMsg"] = f"签到失败: {code} {err_msg}".strip()
+            print(f"❌ [签到] {result['signMsg']}")
 
         return result
 
@@ -850,6 +837,10 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
 def main() -> None:
     log_title()
+
+    if not SERVERS:
+        print("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
+        return 1
 
     results: List[Dict[str, Any]] = []
 
@@ -979,6 +970,21 @@ def _yyb_phone(server, *args, **kwargs):
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
+    # 手动会话是按账号顺序绑定的, 必须等 SERVERS 换成 YYB 账号之后再重建映射,
+    # 否则 MANUAL_SESSIONS 的 key 仍是默认的本地 code 地址, 逃生口永远匹配不上。
+    MANUAL_SESSIONS = {server: value for server, value in zip(SERVERS, _manual_session_lines)}
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+if YYB_ONLY_REFS:
+    _before = len(SERVERS)
+    _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
+    if _wanted:
+        SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+        print(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
+    else:
+        print(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
+    if not SERVERS:
+        print(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code

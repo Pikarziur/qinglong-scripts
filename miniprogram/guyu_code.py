@@ -36,9 +36,12 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
   CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
+  YYB_SERVER        YYB 账号基座，格式「地址@账号ID」，每行一个
+  YYB_ONLY_REFS     账号序号白名单（1 起，按 YYB_SERVER 行序），见脚本顶部硬编码常量，留空跑全部
 
 依赖：
   pip install requests
+  pip install curl_cffi      # 必需: 服务端按 TLS 指纹识别客户端, 缺它登录会被判异常(996)
   socks5 代理需：
   pip install requests[socks]
 """
@@ -58,6 +61,16 @@ from urllib.parse import quote
 
 import requests
 
+# TLS 指纹伪装: 服务端按 TLS 指纹识别客户端, requests 的原生指纹会被判为异常请求,
+# 登录接口直接返回 996「当前请求异常，请刷新重试」。用 curl_cffi 模拟浏览器指纹即可通过。
+# 未安装 curl_cffi 时回落 requests(登录必然失败, 需 pip install curl_cffi)。
+try:
+    from curl_cffi import requests as _cf_requests
+except Exception:
+    _cf_requests = None
+
+TLS_IMPERSONATE = "chrome"
+
 
 APP_NAME = "谷雨小程序"
 APPID = "wxda948f3be0afc375"
@@ -72,6 +85,9 @@ if os.getenv("CODE_SERVER"):
 PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
 PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+YYB_ONLY_REFS = []
 
 PROXY_RETRY_TIMES = 3
 PROXY_VALIDATE_URL = "http://httpbin.org/ip"
@@ -291,8 +307,16 @@ def request_with_proxy(
 ) -> requests.Response:
     kwargs.setdefault("timeout", REQUEST_TIMEOUT)
 
+    # 服务端按 TLS 指纹识别客户端: requests 的指纹会被判为异常请求, 登录接口直接返回
+    # 996「当前请求异常，请刷新重试」(与请求体/签名/UA 都无关)。用 curl_cffi 模拟浏览器
+    # 指纹即可通过; 未安装 curl_cffi 时回落 requests(登录会失败)。
+    if _cf_requests is not None:
+        kwargs.setdefault("impersonate", TLS_IMPERSONATE)
+
     if proxies:
         try:
+            if _cf_requests is not None:
+                return _cf_requests.request(method, url, proxies=proxies, **kwargs)
             return requests.request(method, url, proxies=proxies, **kwargs)
         except Exception as exc:
             print(f"⚠️ [代理] {server} 代理请求失败: {exc}")
@@ -300,6 +324,8 @@ def request_with_proxy(
                 raise
             print("🔁 [兜底] 切换直连重试")
 
+    if _cf_requests is not None:
+        return _cf_requests.request(method, url, **kwargs)
     session = direct_session()
     return session.request(method, url, **kwargs)
 
@@ -465,7 +491,14 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
             print(f"✅ [登录] token 获取成功: {mask(token)}")
             return token, data
 
-        print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
+        biz_code = str(data.get("code")) if isinstance(data, dict) else ""
+        if biz_code == "996":
+            print("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」")
+            print("   根因: 服务端按 TLS 指纹识别客户端。本脚本已用 curl_cffi 模拟浏览器指纹,")
+            print("   若仍失败, 多半是 curl_cffi 未安装 —— 请在青龙执行: pip install curl_cffi")
+            print(f"   本次发送的请求体: {json_preview(payload, 400)}")
+        else:
+            print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
         return None, data
     except Exception as exc:
         print(f"❌ [登录] 请求异常: {exc}")
@@ -550,41 +583,54 @@ def get_cached_shop_id(server: str) -> str:
     return DEFAULT_SHOP_ID
 
 
-def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "") -> None:
+def get_cached_user_id(server: str) -> str:
     cache = load_token_cache()
-    cache[server] = {"token": token, "shopId": shop_id, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
+    data = cache.get(server)
+    if data and data.get("userId"):
+        return str(data["userId"])
+    return ""
+
+
+def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "", user_id: str = "") -> None:
+    cache = load_token_cache()
+    cache[server] = {"token": token, "shopId": shop_id, "userId": user_id,
+                     "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
     save_token_cache(cache)
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, Dict[str, Any] | None]:
-    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, raw_login)"""
+def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, str, Dict[str, Any] | None]:
+    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, userId, raw_login)"""
     cache_token = get_cached_token(server)
     shop_id = get_cached_shop_id(server)
+    user_id = get_cached_user_id(server)
     if cache_token:
         print("🔍 [缓存] 验证 token")
         try:
             point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
             if point_resp.get("success"):
                 print("✅ [缓存] token 有效")
-                return cache_token, shop_id, None
+                return cache_token, shop_id, user_id, None
         except Exception as exc:
             print(f"⚠️ [缓存] 验证异常: {exc}")
         print("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
-        return None, shop_id, None
+        return None, shop_id, user_id, None
 
     token, raw_login = login_by_code(server, code, proxies)
     if not token:
-        return None, shop_id, raw_login
+        return None, shop_id, user_id, raw_login
 
     shop_id = DEFAULT_SHOP_ID
     if raw_login and isinstance(raw_login, dict):
         info = raw_login.get("result")
-        if isinstance(info, dict) and info.get("shopId"):
-            shop_id = str(info["shopId"])
-            print(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
+        if isinstance(info, dict):
+            if info.get("shopId"):
+                shop_id = str(info["shopId"])
+                print(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
+            if info.get("userId"):
+                user_id = str(info["userId"])
 
     expire_time = None
     if raw_login and isinstance(raw_login, dict):
@@ -598,8 +644,8 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, shop_id)
-    return token, shop_id, raw_login
+    set_cached_token(server, token, expire_time, shop_id, user_id)
+    return token, shop_id, user_id, raw_login
 
 
 def is_already_signed(text: Any) -> bool:
@@ -653,7 +699,7 @@ def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str,
     return activity_id, activity_title
 
 
-def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None) -> str:
+def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None, user_id: str = "") -> str:
     if not activity_id:
         print("⚠️ [签到] 跳过签到: 没有可用的签到活动")
         return "没有可用的签到活动"
@@ -684,6 +730,9 @@ def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Di
         "shopId": shop_id,
         "signDate": today_text,
     }
+    # 签到接口必须带 userId, 否则返回「用户id不能为空」
+    if user_id:
+        payload["userId"] = user_id
     sign_resp = api_post(server, SIGN_URL, token, proxies, payload)
     if sign_resp.get("success"):
         print("✅ [签到] 签到成功")
@@ -736,7 +785,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     print(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, shop_id, raw_login = login_with_cache(server, proxies)
+    token, shop_id, user_id, raw_login = login_with_cache(server, proxies)
     if not token:
         result["error"] = f"登录失败: {json_preview(raw_login)}"
         return result
@@ -745,10 +794,13 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     try:
         activity_id, _ = find_sign_activity(server, token, shop_id, proxies)
-        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies)
+        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies, user_id)
         result["points"] = get_user_points(server, token, shop_id, proxies)
 
-        result["success"] = True
+        # 签到失败要如实标记失败, 否则青龙会误判为成功
+        result["success"] = not result["signMsg"].startswith("签到失败")
+        if not result["success"]:
+            result["error"] = result["signMsg"]
         return result
 
     except Exception as exc:
@@ -789,6 +841,10 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
 def main() -> None:
     log_title()
+
+    if not SERVERS:
+        print("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
+        return 1
 
     results: List[Dict[str, Any]] = []
 
@@ -919,6 +975,18 @@ def _yyb_phone(server, *args, **kwargs):
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+if YYB_ONLY_REFS:
+    _before = len(SERVERS)
+    _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
+    if _wanted:
+        SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+        print(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
+    else:
+        print(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
+    if not SERVERS:
+        print(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code
