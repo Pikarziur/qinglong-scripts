@@ -45,6 +45,7 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   pip install requests[socks]
 """
 
+import sys
 import json
 import os
 import random
@@ -879,6 +880,7 @@ def main() -> None:
     print("╚" + "═" * 50 + "╝")
 
     send_pushplus("🎬 影视飓风任务完成", build_notify(results))
+    return fail_count
 
 
 # --- YYB compatibility layer (managed) ---
@@ -1047,4 +1049,4 @@ if "get_userinfo_blob" in globals():
 # --- end YYB compatibility layer ---
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -48,6 +48,7 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   pip install requests[socks]
 """
 
+import sys
 import json
 import os
 import random
@@ -462,6 +463,16 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
         if token:
             print(f"✅ [登录] token 获取成功: {mask(token)}")
             return str(token), data
+
+        # 空响应体 = 服务端在 encryptedData/offset 为空时直接不回内容（实测 200 + Content-Length: 0）
+        if not (response.text or "").strip():
+            print("❌ [登录] 服务端返回空响应（HTTP %s，Content-Length: %s）"
+                  % (response.status_code, response.headers.get("Content-Length")))
+            print("   原因：/mall/xhr/minilogin 要求同时带 encryptedData + offset"
+                  "（小程序用户信息授权数据），只给 wxCode 会被服务端静默丢弃")
+            print("   → 纯 code 换 token 走不通。可改用 /mall/xhr/login（手机号+验证码），"
+                  "或抓包补一次授权数据")
+            return None, data
 
         print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
         return None, data
@@ -937,6 +948,7 @@ def main() -> None:
     print("╚" + "═" * 50 + "╝")
 
     send_pushplus("🥛 人本（认养一头牛）任务完成", build_notify(results))
+    return fail_count
 
 
 # --- YYB compatibility layer (managed) ---
@@ -1105,4 +1117,4 @@ if "get_userinfo_blob" in globals():
 # --- end YYB compatibility layer ---
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
