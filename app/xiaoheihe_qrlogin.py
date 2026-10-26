@@ -111,7 +111,11 @@ def flush_notify(site=None, summary="", logger=None, **_kw):
 # hkey 签名（web 端，直接复用主脚本 xiaoheihe.py 的实现）
 # ────────────────────────────────────────────
 def api_get(path, params=None):
-    """带签名地 GET 一个接口，返回 (http状态码, dict)。"""
+    """带签名地 GET 一个接口。
+
+    返回 (http状态码, dict, cookie字典)
+    —— cookie 用来兜底取 pkey（服务端有时只在 Set-Cookie 里下发，不放在 JSON 里）
+    """
     t = int(time.time())
     nonce = gen_nonce()
     q = dict(BASE_PARAMS)
@@ -128,52 +132,77 @@ def api_get(path, params=None):
         "Referer": "https://xiaoheihe.cn/",
         "Origin": "https://xiaoheihe.cn",
     })
+    hdrs = None
     try:
         resp = urllib.request.urlopen(req, timeout=TIMEOUT)
-        code, body = resp.status, resp.read().decode("utf-8", "replace")
+        code, body, hdrs = resp.status, resp.read().decode("utf-8", "replace"), resp.headers
     except urllib.error.HTTPError as e:
-        code, body = e.code, e.read().decode("utf-8", "replace")
+        code, body, hdrs = e.code, e.read().decode("utf-8", "replace"), e.headers
     except Exception as e:
-        return 0, {"_exc": str(e)}
+        return 0, {"_exc": str(e)}, {}
+    cookies = {}
+    if hdrs is not None:
+        try:
+            raw_list = hdrs.get_all("Set-Cookie") or []
+        except Exception:
+            raw_list = []
+        for raw in raw_list:
+            for part in raw.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    cookies[k.strip()] = v.strip()
     try:
-        return code, json.loads(body)
+        return code, json.loads(body), cookies
     except Exception:
-        return code, {"_raw": body[:300]}
+        return code, {"_raw": body[:300]}, cookies
 
 
 # ────────────────────────────────────────────
-# 二维码渲染（segno 可选）
+# 二维码渲染
 # ────────────────────────────────────────────
-def print_qr_ascii(text):
-    """用 segno 在终端渲染二维码（Unicode 块字符）。失败则只提示 URL。"""
+def ensure_segno():
+    """确保 segno 可用。缺了就现场装一次（纯 Python 包，几秒）。"""
     try:
-        import segno
+        import segno  # noqa: F401
+        return True
     except ImportError:
+        pass
+    log("缺少 segno 依赖，正在自动安装…")
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "segno"],
+            check=False, timeout=120,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        import segno  # noqa: F401
+        log("✅ segno 安装完成")
+        return True
+    except Exception as e:
+        err("segno 安装失败（%s）：请到青龙「依赖管理 → Python3」手动添加 segno" % e)
+        return False
+
+
+def print_qr_ascii(text):
+    """在终端渲染二维码（Unicode 块字符）。失败返回 False。"""
+    if not ensure_segno():
         return False
     try:
+        import segno
         qr = segno.make(text, error="m")
         print()
-        # compact=True 用 █ ▀ 块字符画，日志里最清晰
+        # compact=True 用 █ ▀ ▄ 块字符画，日志里最清晰
         qr.terminal(out=sys.stdout, border=2, compact=True)
         print()
         return True
-    except Exception:
+    except Exception as e:
+        err("二维码渲染失败：%s" % e)
         return False
 
 
 def save_qr_png(text):
-    """把二维码存成 PNG（segno 可选），返回路径。"""
-    try:
-        import segno
-    except ImportError:
-        return ""
-    try:
-        base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, "xhh_login_qr.png")
-        segno.make(text, error="m").save(path, scale=6, border=2)
-        return path
-    except Exception:
-        return ""
+    """已废弃：不再往磁盘落 PNG 文件（二维码只画在日志里，不留垃圾）。"""
+    return ""
 
 
 # ────────────────────────────────────────────
@@ -183,7 +212,7 @@ def main():
     log("🚀 小黑盒扫码登录开始")
 
     # 1) 拿二维码
-    code, js = api_get("/account/get_qrcode_url/", {"app": "web"})
+    code, js, _ck = api_get("/account/get_qrcode_url/", {"app": "web"})
     if code != 200 or not isinstance(js, dict):
         err("获取二维码失败（HTTP %s）：%s" % (code, js.get("_exc") or js.get("_raw") or js))
         flush_notify(_QN_SITE, "获取二维码失败")
@@ -205,42 +234,73 @@ def main():
     log("二维码已生成（有效期 %s 秒）" % expire)
     log("扫码链接：%s" % qr_url)
 
-    png = save_qr_png(qr_url)
-    if png:
-        log("二维码图片：%s" % png)
     if not print_qr_ascii(qr_url):
-        log("（没装 segno，日志里没有二维码图片 —— 依赖管理加 segno 即可显示；"
-            "或者直接用上面那条链接在电脑上生成二维码）")
+        err("没能画出二维码 —— 请到青龙「依赖管理 → Python3」添加 segno 后重跑；"
+            "或用上面那条链接在电脑上生成二维码再扫")
 
     print()
     log("👉 请用「小黑盒」App 扫描上面的二维码（%s 秒内有效）" % expire)
+    log("   扫完还要在手机上点「确认登录」，脚本才能拿到凭据")
 
     # 2) 轮询
+    #    状态机（对齐官方前端/heybox-cli 的实现）：
+    #      顶层 status 恒为 "ok"，真正状态在 result.error：
+    #        wait  = 还没扫
+    #        ready = 已扫，等手机点确认
+    #        ok    = 成功，result.pkey 就是新凭据
+    #        其它  = 已失效/被拒绝
     deadline = time.time() + min(WAIT_SECONDS, int(expire) + 10)
     pkey = ""
     heybox_id = ""
+    last_raw = {}
+    scanned = False
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL)
-        code, js = api_get("/account/qr_state/", {"qr": qr, "app": "web"})
+        code, js, ck = api_get("/account/qr_state/", {"qr": qr, "app": "web"})
         if code != 200 or not isinstance(js, dict):
+            last_raw = js
             continue
-        st = js.get("status")
-        r = js.get("result") or {}
-        if st == "ok":
-            pkey = r.get("pkey") or ""
-            profile = r.get("profile") or {}
-            heybox_id = profile.get("heybox_id") or r.get("heybox_id") or ""
-            if pkey:
-                break
-        elif st == "need_google_check":
+        if js.get("status") == "need_google_check":
             err("该账号需要谷歌二次验证，扫码登录无法完成")
             flush_notify(_QN_SITE, "需要谷歌二次验证")
             return 1
+        r = js.get("result") or {}
+        state = r.get("error") or ""
+        last_raw = r
+        if state == "ok":
+            # pkey 可能放在 result.pkey，也可能只在 Set-Cookie 里下发
+            pkey = (r.get("pkey") or ""
+                    or (r.get("session") or {}).get("pkey") or ""
+                    or ck.get("user_pkey") or ck.get("pkey") or "")
+            profile = r.get("profile") or {}
+            detail = r.get("account_detail") or {}
+            heybox_id = (profile.get("heybox_id") or detail.get("userid")
+                         or r.get("heybox_id") or ck.get("heybox_id")
+                         or ck.get("user_heybox_id") or "")
+            if pkey:
+                break
+            err("服务端说登录成功，但没返回 pkey（原始响应：%s）"
+                % json.dumps(r, ensure_ascii=False)[:300])
+        elif state == "ready":
+            if not scanned:
+                scanned = True
+                log("👀 已扫到，请在手机上点「确认登录」")
+        elif state == "wait":
+            if scanned:
+                scanned = False
         else:
-            log("等待扫码…（%s）" % (r.get("error_msg") or r.get("error") or st or ""))
+            err("二维码状态异常：error=%s msg=%s"
+                % (state, r.get("error_msg") or js.get("msg") or ""))
+            log("原始响应：%s" % json.dumps(r, ensure_ascii=False)[:300])
+            flush_notify(_QN_SITE, "二维码状态异常：%s" % state)
+            return 1
 
     if not pkey:
         err("等待超时（%s 秒）未完成扫码" % WAIT_SECONDS)
+        err("最后一次服务端返回：%s" % json.dumps(last_raw, ensure_ascii=False)[:300])
+        if not scanned:
+            err("提示：全程没检测到「已扫描」—— 二维码可能没被扫到，"
+                "或 App 端登录被风控拦截（官方 App 登录会提示「本次登录存在风险」）")
         flush_notify(_QN_SITE, "扫码超时")
         return 1
 
