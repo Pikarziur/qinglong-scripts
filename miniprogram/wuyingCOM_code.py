@@ -81,7 +81,7 @@ PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
 
 # 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
-YYB_ONLY_REFS = []
+YYB_ONLY_REFS = [2,3]
 
 PROXY_RETRY_TIMES = 3
 PROXY_VALIDATE_URL = "http://httpbin.org/ip"
@@ -589,13 +589,17 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
     if state in ("identityVerify", "IV"):
         # 这不是「实名认证」——已实名的账号同样会收到。阿里云对本次静默登录下发了
         # 一次性「安全验证/身份核验」挑战, 脚本不代为完成、也不绕过。
+        # 实测: 换 scene/loginType/redirectURL 等参数均无效, 该挑战按【微信账号】记录,
+        # 与设备无关 —— 只能在那个微信号上完成一次验证。
         print("❌ [登录] 阿里云对本次静默登录下发了安全验证挑战(identityVerify)")
-        return None, None, ("阿里云对本次静默登录下发了『安全验证』挑战(state="
-                            "identityVerify, 与实名认证无关, 已实名也会遇到)。"
-                            "脚本不会代过风控验证。两种解法: ① 在小程序「无影云电脑」"
-                            "内登录一次并按提示完成安全验证, 让阿里云信任该登录环境; "
-                            "② 从小程序里取到 LoginToken 与 SessionId, 填入变量 "
-                            "wuying_token(格式 LoginToken#SessionId), 脚本会自动续期。")
+        print("   → 挑战按【微信账号】记录, 与设备无关: 在手机用【同一个微信号】完成一次安全验证,")
+        print("     之后本脚本用该号的 code 静默登录即可通过。")
+        print("   → 若小程序里点登录没弹验证, 说明本地还留着旧会话: 先「我的→退出登录」或删掉")
+        print("     小程序清缓存, 再重新登录就会走授权流程并弹出验证。")
+        return None, None, ("阿里云下发『安全验证』挑战(state=identityVerify, 与实名认证无关)。"
+                            "解法: 用同一个微信号在手机小程序退出登录后重新登录并完成安全验证"
+                            "(挑战按微信账号记录, 完成后脚本可自动登录); "
+                            "或临时填 wuying_token(LoginToken#SessionId, 实测约半天即过期)")
     print(f"❌ [登录] 登录状态异常(state={state})")
     return None, None, f"登录状态异常(state={state}), 请在小程序内手动登录一次后重试"
 
