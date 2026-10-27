@@ -52,6 +52,7 @@ import json
 import os
 import random
 import re
+import base64
 import time
 import traceback
 import uuid
@@ -583,6 +584,29 @@ def get_cached_shop_id(server: str) -> str:
     return DEFAULT_SHOP_ID
 
 
+def extract_group_id_from_token(token: str) -> str:
+    """从 mobileToken(JWT) 里取 groupId。
+
+    登录响应顶层 result.userId / customerId / mallId 全是 null，但顶层 result.groupId
+    有值，且 JWT payload.sub 里也带 groupId。
+    实测签到接口的「用户id」用的就是这个 groupId（传 80000136 可正常签到）。
+    """
+    try:
+        parts = str(token or "").split(".")
+        if len(parts) < 2:
+            return ""
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        sub = data.get("sub")
+        if isinstance(sub, str):
+            sub = json.loads(sub)
+        if isinstance(sub, dict) and sub.get("groupId"):
+            return str(sub["groupId"])
+    except Exception:
+        pass
+    return ""
+
+
 def get_cached_user_id(server: str) -> str:
     cache = load_token_cache()
     data = cache.get(server)
@@ -609,6 +633,8 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
             point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
             if point_resp.get("success"):
                 print("✅ [缓存] token 有效")
+                if not user_id:
+                    user_id = extract_group_id_from_token(cache_token)
                 return cache_token, shop_id, user_id, None
         except Exception as exc:
             print(f"⚠️ [缓存] 验证异常: {exc}")
@@ -629,8 +655,12 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
             if info.get("shopId"):
                 shop_id = str(info["shopId"])
                 print(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
-            if info.get("userId"):
-                user_id = str(info["userId"])
+            # 签到接口的「用户id」实际是 groupId(80000136), 顶层 result.userId 为 null
+            if info.get("groupId"):
+                user_id = str(info["groupId"])
+    # 顶层拿不到时, 退到 JWT 里取 groupId
+    if not user_id:
+        user_id = extract_group_id_from_token(token)
 
     expire_time = None
     if raw_login and isinstance(raw_login, dict):
@@ -649,7 +679,8 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
 
 
 def is_already_signed(text: Any) -> bool:
-    return bool(re.search(r"已签|重复", str(text or "")))
+    # 「已达到最大参与次数」= 本期活动次数已用满, 等价于不需要再签, 按幂等成功处理
+    return bool(re.search(r"已签|重复|最大参与次数", str(text or "")))
 
 
 def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str, str] | None) -> Tuple[str, str]:
