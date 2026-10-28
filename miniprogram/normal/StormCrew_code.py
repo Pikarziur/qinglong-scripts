@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  谷雨
-# cron: 30 5,15 * * *
+# name:  影视飓风
+# cron: 45 6 * * *
 # 积分有效期：
 # =========================================================
 
@@ -18,17 +18,19 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
 
 
 """
-谷雨小程序动态 code 版
+影视飓风小程序动态 code 版
 
 功能：
   1. 本地 code 服务获取微信 code
-  2. /mobile/wxAppLogin 使用 code 换 token（全接口带 SHA1 签名）
-  3. 动态查询当前可参与的签到活动（activityType=3）
-  4. 每日签到（先查本月已签日期防重复提交）
-  5. 查询积分（getMyAllPoint）
-  6. Token 缓存与自动刷新
-  7. PushPlus / 企业微信推送
-  8. 品赞代理，业务请求优先代理，失败直连兜底
+  2. /wscshop/weapp/authorize.json 使用 code 换 accessToken（有赞 wsc 店铺契约）
+  3. /wscump/checkin/show_checkin_page_v2.json 获取签到活动 checkinId（兼作 token 校验）
+  4. /wscump/checkin/checkinV2.json 每日签到（自动识别已签到/达上限）
+  5. /wscump/integral/user_points.json 查询当前积分
+  6. PushPlus 推送
+  7. 品赞代理，业务请求优先代理，失败直连兜底
+
+说明：登录接口取自源脚本（有赞 weapp authorize，clientId/clientSecret 方式失败自动回退 clientBiz），
+      access_token 走查询串（app_id/kdt_id/access_token），Extra-Data 与 Cookie 细节照源脚本保留。
 
 环境变量：
   PLUSPLUS_TOKEN    PushPlus token，可选
@@ -36,45 +38,28 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
   CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
-  YYB_SERVER        YYB 账号基座，格式「地址@账号ID」，每行一个
-  YYB_ONLY_REFS     账号序号白名单（1 起，按 YYB_SERVER 行序），见脚本顶部硬编码常量，留空跑全部
 
 依赖：
   pip install requests
-  pip install curl_cffi      # 必需: 服务端按 TLS 指纹识别客户端, 缺它登录会被判异常(996)
   socks5 代理需：
   pip install requests[socks]
 """
 
 import sys
-import hashlib
 import json
 import os
 import random
-import re
-import base64
 import time
 import traceback
-import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 import requests
 
-# TLS 指纹伪装: 服务端按 TLS 指纹识别客户端, requests 的原生指纹会被判为异常请求,
-# 登录接口直接返回 996「当前请求异常，请刷新重试」。用 curl_cffi 模拟浏览器指纹即可通过。
-# 未安装 curl_cffi 时回落 requests(登录必然失败, 需 pip install curl_cffi)。
-try:
-    from curl_cffi import requests as _cf_requests
-except Exception:
-    _cf_requests = None
 
-TLS_IMPERSONATE = "chrome"
-
-
-APP_NAME = "谷雨小程序"
-APPID = "wxda948f3be0afc375"
+APP_NAME = "影视飓风"
+APPID = "wx92782ef90ebc836d"
 
 SERVERS = [
     "127.0.0.1:8088",
@@ -87,34 +72,35 @@ PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
 PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
 
-# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
-YYB_ONLY_REFS = []
-
 PROXY_RETRY_TIMES = 3
 PROXY_VALIDATE_URL = "http://httpbin.org/ip"
 PROXY_FETCH_INTERVAL = 3
 ENABLE_DIRECT_FALLBACK = True
 REQUEST_TIMEOUT = 30
 
-BASE_URL = "https://mall-mobile-v6.vecrp.com"
-LOGIN_URL = f"{BASE_URL}/mobile/wxAppLogin"
-INTEGRAL_SYSTEM_URL = f"{BASE_URL}/mobile/activity/common/queryIntegralSystemList"
-ACTIVITY_LIST_URL = f"{BASE_URL}/mobile/activity/common/queryActivityList"
-SIGN_INFO_LIST_URL = f"{BASE_URL}/mobile/activity/sign/querySignInfoList"
-SIGN_URL = f"{BASE_URL}/mobile/activity/sign/sign"
-MY_POINT_URL = f"{BASE_URL}/mobile/customer/getMyAllPoint"
+BASE_URL = "https://h5.youzan.com"
+AUTH_URL = f"{BASE_URL}/wscshop/weapp/authorize.json"
+CHECKIN_PAGE_URL = f"{BASE_URL}/wscump/checkin/show_checkin_page_v2.json"
+CHECKIN_URL = f"{BASE_URL}/wscump/checkin/checkinV2.json"
+POINTS_URL = f"{BASE_URL}/wscump/integral/user_points.json"
 
-SECRET_KEY = "R6WbJ830wNsEdjH9GumwKYiYxHz0K9QD"
-DEFAULT_SHOP_ID = "100186753"
+CLIENT_ID = "4d65249d377b2c3ed8"
+CLIENT_SECRET = "1cdc05151d64f3a4a6ebd0e9de64422a"
+GRANT_TYPE = "yz_union"
+CLIENT_BIZ = "weapp_wsc"
+KDT_ID = "149536603"
+USER_VERSION = "2.226.7.101"
+PAGE_VERSION = "17"
 
-COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gycookie.json")
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ysjfcookie.json")
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI "
-    "MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) "
-    "UnifiedPCWindowsWechat(0xf254173b) XWEB/19027"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF"
 )
+
+SESSION_ID = ""
+COOKIE_HEADER = ""
 
 
 def now_text() -> str:
@@ -151,10 +137,17 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
     return resp.get("data") or {}
 
 
+def mask_phone(phone: Any) -> str:
+    phone = str(phone or "")
+    if len(phone) == 11 and phone.isdigit():
+        return f"{phone[:3]}****{phone[7:]}"
+    return phone
+
+
 def log_title() -> None:
     print()
     print("╔" + "═" * 50 + "╗")
-    print("║ 🌸 谷雨小程序签到动态 code 版                 ║")
+    print("║ 🎬 影视飓风小程序动态 code 版                ║")
     print(f"║ 🕒 启动时间: {now_text():<32}║")
     print(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
     print("╚" + "═" * 50 + "╝")
@@ -308,16 +301,8 @@ def request_with_proxy(
 ) -> requests.Response:
     kwargs.setdefault("timeout", REQUEST_TIMEOUT)
 
-    # 服务端按 TLS 指纹识别客户端: requests 的指纹会被判为异常请求, 登录接口直接返回
-    # 996「当前请求异常，请刷新重试」(与请求体/签名/UA 都无关)。用 curl_cffi 模拟浏览器
-    # 指纹即可通过; 未安装 curl_cffi 时回落 requests(登录会失败)。
-    if _cf_requests is not None:
-        kwargs.setdefault("impersonate", TLS_IMPERSONATE)
-
     if proxies:
         try:
-            if _cf_requests is not None:
-                return _cf_requests.request(method, url, proxies=proxies, **kwargs)
             return requests.request(method, url, proxies=proxies, **kwargs)
         except Exception as exc:
             print(f"⚠️ [代理] {server} 代理请求失败: {exc}")
@@ -325,8 +310,6 @@ def request_with_proxy(
                 raise
             print("🔁 [兜底] 切换直连重试")
 
-    if _cf_requests is not None:
-        return _cf_requests.request(method, url, **kwargs)
     session = direct_session()
     return session.request(method, url, **kwargs)
 
@@ -398,109 +381,170 @@ def get_code(server: str) -> str | None:
         return None
 
 
-def common_headers(token: str | None = None) -> Dict[str, str]:
+def common_headers(session_id: str = "") -> Dict[str, str]:
     headers = {
-        "host": "mall-mobile-v6.vecrp.com",
-        "accept": "*/*",
-        "accept-language": "zh-CN,zh;q=0.9",
-        "appid": APPID,
-        "content-type": "application/json;charset=UTF-8",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "cross-site",
-        "user-agent": USER_AGENT,
-        "token": token or "",
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        "Accept": "*/*",
         "xweb_xhr": "1",
-        "Referer": f"https://servicewechat.com/{APPID}/65/page-frame.html",
+        "Referer": f"https://servicewechat.com/{APPID}/{PAGE_VERSION}/page-frame.html",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Extra-Data": json.dumps(
+            {
+                "sid": session_id or "",
+                "version": USER_VERSION,
+                "clientType": "weapp-miniprogram",
+                "client": "weapp",
+                "bizEnv": "wsc",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     }
+    if COOKIE_HEADER:
+        headers["Cookie"] = COOKIE_HEADER
     return headers
 
 
-def signed_headers(method: str, token: str, params: Dict[str, Any] | None = None, payload: Any = None) -> Dict[str, str]:
-    """谷雨全接口签名：sha1(按 key 排序后 key+value 依次连接)；POST 取 body JSON 文本，GET 取 params"""
-    ts = int(time.time() * 1000)
+def base_params(token: str, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """有赞 wsc 契约：access_token 走查询串（照源脚本 getBaseParams）"""
+    params: Dict[str, Any] = {
+        "app_id": APPID,
+        "kdt_id": KDT_ID,
+        "access_token": token or "",
+    }
+    if extra:
+        params.update(extra)
+    return params
 
-    if method.upper() == "POST":
-        sign_source = {
-            "body": json.dumps(payload if payload is not None else {}, ensure_ascii=False, separators=(",", ":")),
-            "secretKey": SECRET_KEY,
-            "ts": ts,
-        }
-    else:
-        sign_source = dict(params or {})
-        sign_source["secretKey"] = SECRET_KEY
-        sign_source["ts"] = ts
 
-    sign = hashlib.sha1(
-        "".join(sorted(f"{key}{sign_source[key]}" for key in sign_source)).encode("utf-8")
-    ).hexdigest()
-
-    headers = common_headers(token)
-    headers.update({
-        "sign": sign,
-        "starttime": str(ts),
-        "ts": str(ts),
-        "x-tracedid": uuid.uuid4().hex,
-    })
-    return headers
+def capture_cookies(response: requests.Response) -> None:
+    """照源脚本：把响应 Set-Cookie 的首段串起来，后续请求带回"""
+    global COOKIE_HEADER
+    try:
+        cookies = response.raw.headers.getlist("Set-Cookie")  # type: ignore[attr-defined]
+    except Exception:
+        cookies = []
+    if not cookies:
+        single = response.headers.get("Set-Cookie") or response.headers.get("set-cookie")
+        cookies = [single] if single else []
+    parts = []
+    for item in cookies:
+        seg = str(item).split(";")[0].strip()
+        if seg:
+            parts.append(seg)
+    if parts:
+        COOKIE_HEADER = "; ".join(parts)
 
 
 def extract_token(data: Any) -> str | None:
     if not isinstance(data, dict):
         return None
 
-    if not data.get("success"):
-        return None
+    candidates = [
+        data.get("token"),
+        data.get("accessToken"),
+        data.get("access_token"),
+        data.get("jwt"),
+    ]
 
-    info = data.get("result")
-    if isinstance(info, dict):
-        token = info.get("mobileToken") or info.get("token")
-        if token and str(token) != "null":
-            return str(token)
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        candidates.extend([
+            inner.get("token"),
+            inner.get("accessToken"),
+            inner.get("access_token"),
+            inner.get("jwt"),
+        ])
+
+        user = inner.get("user")
+        if isinstance(user, dict):
+            candidates.extend([
+                user.get("token"),
+                user.get("accessToken"),
+                user.get("access_token"),
+                user.get("jwt"),
+            ])
+
+    for item in candidates:
+        if item and item != "null":
+            return str(item)
 
     return None
 
 
+def extract_session_id(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in ("sessionId", "session_id"):
+        if data.get(key):
+            return str(data[key])
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        for key in ("sessionId", "session_id"):
+            if inner.get(key):
+                return str(inner[key])
+    return ""
+
+
+def extract_user_desc(data: Any) -> str:
+    """从授权响应提取昵称+脱敏手机号（照源脚本登录成功日志）"""
+    if not isinstance(data, dict):
+        return "未知"
+    src = data.get("data") if isinstance(data.get("data"), dict) else data
+    nick = src.get("nick_name") or src.get("nickName") or ""
+    mobile = mask_phone(src.get("mobile") or "")
+    desc = f"{nick} {mobile}".strip()
+    return desc or "未知"
+
+
+def is_token_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(word in text for word in ("access_token", "token", "登录", "授权", "invalid session", "session"))
+
+
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
     try:
+        global SESSION_ID
         print("🔐 [登录] 使用 code 换 token")
-        payload = {
-            "code": str(code),
-            "appid": APPID,
-            "shopId": None,
-            "envVersion": "release",
-            "isEnterpriseWx": False,
-            "scene": 1168,
-            "referrerInfo": {"appId": APPID},
-        }
-        response = request_with_proxy(
-            "POST",
-            LOGIN_URL,
-            headers=signed_headers("POST", "", None, payload),
-            json=payload,
-            proxies=proxies,
-            server=server,
-        )
 
-        try:
-            data = response.json()
-        except Exception:
-            data = {"raw": response.text[:800]}
+        def _authorize(payload: Dict[str, Any]) -> Dict[str, Any]:
+            response = request_with_proxy(
+                "POST",
+                AUTH_URL,
+                headers=common_headers(),
+                json={**payload, "code": code},
+                proxies=proxies,
+                server=server,
+            )
+            capture_cookies(response)
+            try:
+                return response.json()
+            except Exception:
+                return {"raw": response.text[:800]}
+
+        # 源脚本：先试 clientId/clientSecret/grantType，失败回退 clientBiz
+        data = _authorize({
+            "appId": APPID,
+            "clientId": CLIENT_ID,
+            "clientSecret": CLIENT_SECRET,
+            "grantType": GRANT_TYPE,
+        })
+        if not extract_token(data):
+            print("🔁 [登录] 主授权方式未取得 token，改用 clientBiz 重试")
+            data = _authorize({
+                "appId": APPID,
+                "clientBiz": CLIENT_BIZ,
+            })
 
         token = extract_token(data)
-        if token:
-            print(f"✅ [登录] token 获取成功: {mask(token)}")
-            return token, data
-
-        biz_code = str(data.get("code")) if isinstance(data, dict) else ""
-        if biz_code == "996":
-            print("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」")
-            print("   根因: 服务端按 TLS 指纹识别客户端。本脚本已用 curl_cffi 模拟浏览器指纹,")
-            print("   若仍失败, 多半是 curl_cffi 未安装 —— 请在青龙执行: pip install curl_cffi")
-            print(f"   本次发送的请求体: {json_preview(payload, 400)}")
-        else:
+        if not token:
             print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
-        return None, data
+            return None, data
+
+        SESSION_ID = extract_session_id(data)
+        print(f"✅ [登录] token 获取成功: {mask(token)}")
+        return token, data
     except Exception as exc:
         print(f"❌ [登录] 请求异常: {exc}")
         return None, None
@@ -510,11 +554,12 @@ def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None, p
     response = request_with_proxy(
         "GET",
         url,
-        headers=signed_headers("GET", token, params),
-        params=params,
+        headers=common_headers(SESSION_ID),
+        params=base_params(token, params),
         proxies=proxies,
         server=server,
     )
+    capture_cookies(response)
     try:
         return response.json()
     except Exception:
@@ -524,15 +569,17 @@ def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None, p
         }
 
 
-def api_post(server: str, url: str, token: str, proxies: Dict[str, str] | None, payload: Dict[str, Any]) -> Dict[str, Any]:
+def api_post(server: str, url: str, token: str, proxies: Dict[str, str] | None, payload: Dict[str, Any], params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     response = request_with_proxy(
         "POST",
         url,
-        headers=signed_headers("POST", token, None, payload),
+        headers=common_headers(SESSION_ID),
         json=payload,
+        params=base_params(token, params),
         proxies=proxies,
         server=server,
     )
+    capture_cookies(response)
     try:
         return response.json()
     except Exception:
@@ -576,91 +623,65 @@ def get_cached_token(server: str) -> str | None:
     return None
 
 
-def get_cached_shop_id(server: str) -> str:
+def get_cached_extra(server: str) -> Dict[str, str]:
     cache = load_token_cache()
     data = cache.get(server)
-    if data and data.get("shopId"):
-        return str(data["shopId"])
-    return DEFAULT_SHOP_ID
+    if isinstance(data, dict):
+        return {
+            "sessionId": str(data.get("sessionId") or ""),
+            "cookie": str(data.get("cookie") or ""),
+        }
+    return {"sessionId": "", "cookie": ""}
 
 
-def extract_group_id_from_token(token: str) -> str:
-    """从 mobileToken(JWT) 里取 groupId。
-
-    登录响应顶层 result.userId / customerId / mallId 全是 null，但顶层 result.groupId
-    有值，且 JWT payload.sub 里也带 groupId。
-    实测签到接口的「用户id」用的就是这个 groupId（传 80000136 可正常签到）。
-    """
-    try:
-        parts = str(token or "").split(".")
-        if len(parts) < 2:
-            return ""
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
-        sub = data.get("sub")
-        if isinstance(sub, str):
-            sub = json.loads(sub)
-        if isinstance(sub, dict) and sub.get("groupId"):
-            return str(sub["groupId"])
-    except Exception:
-        pass
-    return ""
-
-
-def get_cached_user_id(server: str) -> str:
+def set_cached_token(server: str, token: str, expire_time: str, extra: Dict[str, Any] | None = None) -> None:
     cache = load_token_cache()
-    data = cache.get(server)
-    if data and data.get("userId"):
-        return str(data["userId"])
-    return ""
-
-
-def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "", user_id: str = "") -> None:
-    cache = load_token_cache()
-    cache[server] = {"token": token, "shopId": shop_id, "userId": user_id,
-                     "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
+    entry: Dict[str, Any] = {"token": token, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
+    if extra:
+        entry.update(extra)
+    cache[server] = entry
     save_token_cache(cache)
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, str, Dict[str, Any] | None]:
-    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, userId, raw_login)"""
+def clear_cached_token(server: str) -> None:
+    try:
+        cache = load_token_cache()
+        if server in cache:
+            del cache[server]
+            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            print(f"🗑️ [缓存] 已清除 {server} 失效 token")
+    except Exception as exc:
+        print(f"⚠️ [缓存] 清除失败: {exc}")
+
+
+def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
+    """优先使用缓存 token（签到页接口验证），失效自动 code 刷新"""
+    global SESSION_ID, COOKIE_HEADER
     cache_token = get_cached_token(server)
-    shop_id = get_cached_shop_id(server)
-    user_id = get_cached_user_id(server)
     if cache_token:
+        extra = get_cached_extra(server)
+        SESSION_ID = extra.get("sessionId", "")
+        COOKIE_HEADER = extra.get("cookie", "")
         print("🔍 [缓存] 验证 token")
         try:
-            point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
-            if point_resp.get("success"):
+            page_resp = api_get(server, CHECKIN_PAGE_URL, cache_token, proxies)
+            if page_resp.get("code") == 0:
                 print("✅ [缓存] token 有效")
-                if not user_id:
-                    user_id = extract_group_id_from_token(cache_token)
-                return cache_token, shop_id, user_id, None
+                return cache_token, None
         except Exception as exc:
             print(f"⚠️ [缓存] 验证异常: {exc}")
+        SESSION_ID = ""
+        COOKIE_HEADER = ""
         print("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
-        return None, shop_id, user_id, None
+        return None, None
 
     token, raw_login = login_by_code(server, code, proxies)
     if not token:
-        return None, shop_id, user_id, raw_login
-
-    shop_id = DEFAULT_SHOP_ID
-    if raw_login and isinstance(raw_login, dict):
-        info = raw_login.get("result")
-        if isinstance(info, dict):
-            if info.get("shopId"):
-                shop_id = str(info["shopId"])
-                print(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
-            # 签到接口的「用户id」实际是 groupId(80000136), 顶层 result.userId 为 null
-            if info.get("groupId"):
-                user_id = str(info["groupId"])
-    # 顶层拿不到时, 退到 JWT 里取 groupId
-    if not user_id:
-        user_id = extract_group_id_from_token(token)
+        return None, raw_login
 
     expire_time = None
     if raw_login and isinstance(raw_login, dict):
@@ -674,122 +695,71 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, shop_id, user_id)
-    return token, shop_id, user_id, raw_login
+    set_cached_token(server, token, expire_time, {"sessionId": SESSION_ID, "cookie": COOKIE_HEADER})
+    return token, raw_login
 
 
-def is_already_signed(text: Any) -> bool:
-    # 「已达到最大参与次数」= 本期活动次数已用满, 等价于不需要再签, 按幂等成功处理
-    return bool(re.search(r"已签|重复|最大参与次数", str(text or "")))
+# ====================== 签到业务（移植自源脚本 Task 类） ======================
+def show_checkin_page(server: str, token: str, proxies: Dict[str, str] | None) -> str:
+    resp = api_get(server, CHECKIN_PAGE_URL, token, proxies)
+    if resp.get("code") != 0:
+        msg = resp.get("msg") or json_preview(resp, 300)
+        if is_token_error(msg):
+            clear_cached_token(server)
+        print(f"⚠️ [签到] 获取签到活动失败: {msg}")
+        return ""
+    data = safe_data(resp)
+    checkin_id = str(data.get("checkinId") or "")
+    is_show = bool(data.get("isShow"))
+    print(f"📋 [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
+    return checkin_id
 
 
-def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str, str] | None) -> Tuple[str, str]:
-    """签到活动按年新建，动态查询当前可参与的签到活动（activityType=3），返回 (activityId, title)"""
-    integral_account = ""
-    try:
-        sys_resp = api_get(server, INTEGRAL_SYSTEM_URL, token, proxies, params={"shopId": shop_id, "earnSpendType": 1})
-        if sys_resp.get("success"):
-            rows = sys_resp.get("result")
-            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                integral_account = str(rows[0].get("integralAccount") or "")
-    except Exception as exc:
-        print(f"⚠️ [签到] 查询积分体系异常: {exc}")
+def do_checkin(server: str, token: str, proxies: Dict[str, str] | None, checkin_id: str) -> str:
+    if not checkin_id:
+        print("⚠️ [签到] 未获取到 checkinId，跳过签到")
+        return "未获取到 checkinId，跳过签到"
 
-    activity_id = ""
-    activity_title = ""
-    try:
-        payload = {
-            "earnSpendType": 1,
-            "shopId": shop_id,
-            "pageNo": 1,
-            "pageSize": 10,
-            "integralAccount": integral_account,
-            "activityType": 3,
-        }
-        act_resp = api_post(server, ACTIVITY_LIST_URL, token, proxies, payload)
-        rows_raw = act_resp.get("result") if isinstance(act_resp, dict) else None
-        if isinstance(rows_raw, list):
-            rows = rows_raw
-        elif isinstance(rows_raw, dict):
-            rows = rows_raw.get("data") or rows_raw.get("rows") or []
-        else:
-            rows = []
+    resp = api_get(server, CHECKIN_URL, token, proxies, params={"checkinId": checkin_id})
+    if resp.get("code") == 0:
+        data = safe_data(resp)
+        awards_list: List[str] = []
+        for item in data.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            infos = item.get("infos")
+            if isinstance(infos, dict) and infos.get("title"):
+                awards_list.append(str(infos["title"]))
+        awards = "、".join(awards_list)
+        desc = data.get("desc") or ""
+        msg = f"签到成功: {desc}" + (f" {awards}" if awards else "")
+        print(f"✅ [签到] {msg}")
+        return msg
 
-        for item in rows:
-            if isinstance(item, dict) and str(item.get("activityType")) == "3" and item.get("canJoin") is not False:
-                activity_id = str(item.get("activityId") or "")
-                activity_title = str(item.get("title") or activity_id)
-                break
-    except Exception as exc:
-        print(f"⚠️ [签到] 查询签到活动异常: {exc}")
-
-    if activity_id:
-        print(f"✅ [签到] 签到活动: {activity_title}")
-    else:
-        print("⚠️ [签到] 未查到可参与的签到活动")
-    return activity_id, activity_title
-
-
-def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None, user_id: str = "") -> str:
-    if not activity_id:
-        print("⚠️ [签到] 跳过签到: 没有可用的签到活动")
-        return "没有可用的签到活动"
-
-    today = date.today()
-    today_text = today.strftime("%Y-%m-%d")
-    ym = today.strftime("%Y-%m")
-    last_day = (date(today.year + (today.month == 12), today.month % 12 + 1, 1) - timedelta(days=1)).day
-
-    # 先查本月已签日期，避免重复提交
-    try:
-        info_payload = {
-            "activityId": activity_id,
-            "startDate": f"{ym}-01",
-            "endDate": f"{ym}-{last_day:02d}",
-        }
-        info_resp = api_post(server, SIGN_INFO_LIST_URL, token, proxies, info_payload)
-        inner = info_resp.get("result") if isinstance(info_resp, dict) else None
-        date_list = inner.get("signDateList") if isinstance(inner, dict) else None
-        if isinstance(date_list, list) and any(str(d)[:10] == today_text for d in date_list):
-            print("✅ [签到] 今日已签到")
-            return "今日已签到"
-    except Exception:
-        pass
-
-    payload = {
-        "activityId": activity_id,
-        "shopId": shop_id,
-        "signDate": today_text,
-    }
-    # 签到接口必须带 userId, 否则返回「用户id不能为空」
-    if user_id:
-        payload["userId"] = user_id
-    sign_resp = api_post(server, SIGN_URL, token, proxies, payload)
-    if sign_resp.get("success"):
-        print("✅ [签到] 签到成功")
-        return "签到成功"
-    if is_already_signed(sign_resp.get("msg")):
+    msg = resp.get("msg") or json_preview(resp, 300)
+    if any(word in msg for word in ("已达最大参与次数", "已签到", "重复签到")):
         print("✅ [签到] 今日已签到")
         return "今日已签到"
-
-    msg = sign_resp.get("msg") or sign_resp.get("message") or json_preview(sign_resp, 300)
+    if is_token_error(msg):
+        clear_cached_token(server)
     print(f"❌ [签到] 签到失败: {msg}")
     return f"签到失败: {msg}"
 
 
-def get_user_points(server: str, token: str, shop_id: str, proxies: Dict[str, str] | None) -> str:
-    resp = api_get(server, MY_POINT_URL, token, proxies, params={"shopId": shop_id})
-    if resp.get("success"):
-        rows = resp.get("result")
-        score = ""
-        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-            score = rows[0].get("score")
-        print(f"💰 [积分] 当前积分: {score}")
-        return str(score)
-
-    msg = resp.get("msg") or resp.get("message") or json_preview(resp, 300)
-    print(f"❌ [积分] 获取积分失败: {msg}")
-    return "-"
+def get_points(server: str, token: str, proxies: Dict[str, str] | None) -> str:
+    resp = api_get(server, POINTS_URL, token, proxies)
+    if resp.get("code") != 0:
+        msg = resp.get("msg") or json_preview(resp, 300)
+        print(f"⚠️ [积分] 查询积分失败: {msg}")
+        return f"查询失败: {msg}"
+    data = safe_data(resp)
+    points = data.get("current_points")
+    if points is None:
+        points = data.get("real_points")
+    if points is None:
+        points = "未知"
+    print(f"💰 [积分] 当前积分: {points}")
+    return str(points)
 
 
 def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
@@ -799,8 +769,9 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "proxyStatus": "未使用代理",
         "proxyIp": "-",
         "token": "-",
+        "userMsg": "-",
         "signMsg": "-",
-        "points": "-",
+        "pointsMsg": "-",
         "error": "",
     }
 
@@ -812,26 +783,25 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     sleep(PROXY_FETCH_INTERVAL)
 
-    delay = random.randint(5, 24)
+    delay = random.randint(2, 6)
     print(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, shop_id, user_id, raw_login = login_with_cache(server, proxies)
+    token, raw_login = login_with_cache(server, proxies)
     if not token:
         result["error"] = f"登录失败: {json_preview(raw_login)}"
         return result
 
     result["token"] = mask(token)
+    if raw_login:
+        result["userMsg"] = extract_user_desc(raw_login)
 
     try:
-        activity_id, _ = find_sign_activity(server, token, shop_id, proxies)
-        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies, user_id)
-        result["points"] = get_user_points(server, token, shop_id, proxies)
+        checkin_id = show_checkin_page(server, token, proxies)
+        result["signMsg"] = do_checkin(server, token, proxies, checkin_id)
+        result["pointsMsg"] = get_points(server, token, proxies)
 
-        # 签到失败要如实标记失败, 否则青龙会误判为成功
-        result["success"] = not result["signMsg"].startswith("签到失败")
-        if not result["success"]:
-            result["error"] = result["signMsg"]
+        result["success"] = True
         return result
 
     except Exception as exc:
@@ -844,7 +814,7 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
 
-    content = f"""🌸 谷雨小程序签到任务结果
+    content = f"""🎬 影视飓风动态 code 任务结果
 
 ━━━━━━━━━━━━━━━━━━━━
 🏁 总结：{success_count} 成功 / {fail_count} 失败
@@ -857,8 +827,9 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
         content += f"""
 🧩 账号 {idx}
+👤 用户：{res["userMsg"]}
 📝 签到：{res["signMsg"]}
-💰 积分：{res["points"]}
+💰 积分：{res["pointsMsg"]}
 {icon} 结果：{"成功" if res["success"] else "失败"}
 """
 
@@ -872,10 +843,6 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
 def main() -> None:
     log_title()
-
-    if not SERVERS:
-        print("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
-        return 1
 
     results: List[Dict[str, Any]] = []
 
@@ -891,8 +858,9 @@ def main() -> None:
                 "proxyStatus": "-",
                 "proxyIp": "-",
                 "token": "-",
+                "userMsg": "-",
                 "signMsg": "-",
-                "points": "-",
+                "pointsMsg": "-",
                 "error": traceback.format_exc().strip(),
             })
 
@@ -905,13 +873,13 @@ def main() -> None:
 
     print()
     print("╔" + "═" * 50 + "╗")
-    print("║ 🏁 谷雨小程序任务执行完成                     ║")
+    print("║ 🏁 影视飓风任务执行完成                      ║")
     print(f"║ ✅ 成功: {success_count:<39}║")
     print(f"║ ❌ 失败: {fail_count:<39}║")
     print(f"║ 🕒 结束时间: {now_text():<32}║")
     print("╚" + "═" * 50 + "╝")
 
-    send_pushplus("🌸 谷雨小程序任务完成", build_notify(results))
+    send_pushplus("🎬 影视飓风任务完成", build_notify(results))
     return fail_count
 
 
@@ -1006,18 +974,6 @@ def _yyb_phone(server, *args, **kwargs):
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
-
-# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
-if YYB_ONLY_REFS:
-    _before = len(SERVERS)
-    _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
-    if _wanted:
-        SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
-        print(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
-    else:
-        print(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
-    if not SERVERS:
-        print(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code

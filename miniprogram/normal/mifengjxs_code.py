@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  影视飓风
-# cron: 45 6,16 * * *
+# name:  蜜蜂惊喜社
+# cron: 15 6 * * *
 # 积分有效期：
 # =========================================================
 
@@ -18,32 +18,30 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
 
 
 """
-影视飓风小程序动态 code 版
+蜜蜂惊喜社微信小程序动态 code 版
 
 功能：
   1. 本地 code 服务获取微信 code
-  2. /wscshop/weapp/authorize.json 使用 code 换 accessToken（有赞 wsc 店铺契约）
-  3. /wscump/checkin/show_checkin_page_v2.json 获取签到活动 checkinId（兼作 token 校验）
-  4. /wscump/checkin/checkinV2.json 每日签到（自动识别已签到/达上限）
-  5. /wscump/integral/user_points.json 查询当前积分
+  2. 有赞 authorize 接口使用 code 换 accessToken（yz_union 授权）
+  3. 查询积分（签到前/签到后 user_points.json）
+  4. 获取签到活动信息（show_checkin_page_v2.json）
+  5. 每日签到（checkinV2.json，含奖品明细）
   6. PushPlus 推送
   7. 品赞代理，业务请求优先代理，失败直连兜底
-
-说明：登录接口取自源脚本（有赞 weapp authorize，clientId/clientSecret 方式失败自动回退 clientBiz），
-      access_token 走查询串（app_id/kdt_id/access_token），Extra-Data 与 Cookie 细节照源脚本保留。
 
 环境变量：
   PLUSPLUS_TOKEN    PushPlus token，可选
   QYWX_TOKEN        企业微信机器人 Webhook key，可选（机器人地址 ?key= 后面的值）
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
-  CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
+  CODE_SERVER       覆盖本地 code 服务地址，可选
 
 依赖：
   pip install requests
   socks5 代理需：
   pip install requests[socks]
 """
+
 
 import sys
 import json
@@ -58,8 +56,8 @@ from urllib.parse import quote
 import requests
 
 
-APP_NAME = "影视飓风"
-APPID = "wx92782ef90ebc836d"
+APP_NAME = "蜜蜂惊喜社小程序"
+APPID = "wx3aa848f81dfa0967"
 
 SERVERS = [
     "127.0.0.1:8088",
@@ -78,29 +76,24 @@ PROXY_FETCH_INTERVAL = 3
 ENABLE_DIRECT_FALLBACK = True
 REQUEST_TIMEOUT = 30
 
-BASE_URL = "https://h5.youzan.com"
-AUTH_URL = f"{BASE_URL}/wscshop/weapp/authorize.json"
-CHECKIN_PAGE_URL = f"{BASE_URL}/wscump/checkin/show_checkin_page_v2.json"
-CHECKIN_URL = f"{BASE_URL}/wscump/checkin/checkinV2.json"
-POINTS_URL = f"{BASE_URL}/wscump/integral/user_points.json"
+API_BASE = "https://h5.youzan.com"
+LOGIN_URL = f"{API_BASE}/wscshop/weapp/authorize.json"
+POINTS_URL = f"{API_BASE}/wscump/integral/user_points.json"
+CHECKIN_PAGE_URL = f"{API_BASE}/wscump/checkin/show_checkin_page_v2.json"
+CHECKIN_URL = f"{API_BASE}/wscump/checkin/checkinV2.json"
 
+KDT_ID = "104905610"
+USER_VERSION = "2.226.7.201"
 CLIENT_ID = "4d65249d377b2c3ed8"
 CLIENT_SECRET = "1cdc05151d64f3a4a6ebd0e9de64422a"
 GRANT_TYPE = "yz_union"
-CLIENT_BIZ = "weapp_wsc"
-KDT_ID = "149536603"
-USER_VERSION = "2.226.7.101"
-PAGE_VERSION = "17"
 
-COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ysjfcookie.json")
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mfjxscookie.json")
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF"
 )
-
-SESSION_ID = ""
-COOKIE_HEADER = ""
 
 
 def now_text() -> str:
@@ -137,17 +130,10 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
     return resp.get("data") or {}
 
 
-def mask_phone(phone: Any) -> str:
-    phone = str(phone or "")
-    if len(phone) == 11 and phone.isdigit():
-        return f"{phone[:3]}****{phone[7:]}"
-    return phone
-
-
 def log_title() -> None:
     print()
     print("╔" + "═" * 50 + "╗")
-    print("║ 🎬 影视飓风小程序动态 code 版                ║")
+    print("║ 🐝 蜜蜂惊喜社小程序动态 code 版              ║")
     print(f"║ 🕒 启动时间: {now_text():<32}║")
     print(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
     print("╚" + "═" * 50 + "╝")
@@ -381,90 +367,42 @@ def get_code(server: str) -> str | None:
         return None
 
 
-def common_headers(session_id: str = "") -> Dict[str, str]:
+def common_headers(token: str | None = None) -> Dict[str, str]:
+    """有赞系请求头：access_token 放 URL 参数，Extra-Data 带 sid 会话"""
     headers = {
         "User-Agent": USER_AGENT,
-        "Content-Type": "application/json",
-        "Accept": "*/*",
-        "xweb_xhr": "1",
-        "Referer": f"https://servicewechat.com/{APPID}/{PAGE_VERSION}/page-frame.html",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Extra-Data": json.dumps(
-            {
-                "sid": session_id or "",
-                "version": USER_VERSION,
-                "clientType": "weapp-miniprogram",
-                "client": "weapp",
-                "bizEnv": "wsc",
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
+        "Referer": f"https://servicewechat.com/{APPID}/32/page-frame.html",
+        "Accept": "application/json, text/plain, */*",
     }
-    if COOKIE_HEADER:
-        headers["Cookie"] = COOKIE_HEADER
+    if token:
+        headers["Extra-Data"] = json.dumps({
+            "is_weapp": 1,
+            "sid": token,
+            "version": USER_VERSION,
+            "client": "weapp",
+            "bizEnv": "wsc",
+        }, separators=(",", ":"), ensure_ascii=False)
     return headers
 
 
-def base_params(token: str, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """有赞 wsc 契约：access_token 走查询串（照源脚本 getBaseParams）"""
-    params: Dict[str, Any] = {
-        "app_id": APPID,
-        "kdt_id": KDT_ID,
-        "access_token": token or "",
-    }
-    if extra:
-        params.update(extra)
-    return params
-
-
-def capture_cookies(response: requests.Response) -> None:
-    """照源脚本：把响应 Set-Cookie 的首段串起来，后续请求带回"""
-    global COOKIE_HEADER
-    try:
-        cookies = response.raw.headers.getlist("Set-Cookie")  # type: ignore[attr-defined]
-    except Exception:
-        cookies = []
-    if not cookies:
-        single = response.headers.get("Set-Cookie") or response.headers.get("set-cookie")
-        cookies = [single] if single else []
-    parts = []
-    for item in cookies:
-        seg = str(item).split(";")[0].strip()
-        if seg:
-            parts.append(seg)
-    if parts:
-        COOKIE_HEADER = "; ".join(parts)
-
-
 def extract_token(data: Any) -> str | None:
+    """有赞 authorize 响应：data.accessToken（兼存 sessionId 用于 Extra-Data）"""
     if not isinstance(data, dict):
         return None
 
     candidates = [
-        data.get("token"),
         data.get("accessToken"),
         data.get("access_token"),
-        data.get("jwt"),
+        data.get("token"),
     ]
 
     inner = data.get("data")
     if isinstance(inner, dict):
         candidates.extend([
-            inner.get("token"),
             inner.get("accessToken"),
             inner.get("access_token"),
-            inner.get("jwt"),
+            inner.get("token"),
         ])
-
-        user = inner.get("user")
-        if isinstance(user, dict):
-            candidates.extend([
-                user.get("token"),
-                user.get("accessToken"),
-                user.get("access_token"),
-                user.get("jwt"),
-            ])
 
     for item in candidates:
         if item and item != "null":
@@ -473,113 +411,65 @@ def extract_token(data: Any) -> str | None:
     return None
 
 
-def extract_session_id(data: Any) -> str:
-    if not isinstance(data, dict):
-        return ""
-    for key in ("sessionId", "session_id"):
-        if data.get(key):
-            return str(data[key])
-    inner = data.get("data")
-    if isinstance(inner, dict):
-        for key in ("sessionId", "session_id"):
-            if inner.get(key):
-                return str(inner[key])
-    return ""
-
-
-def extract_user_desc(data: Any) -> str:
-    """从授权响应提取昵称+脱敏手机号（照源脚本登录成功日志）"""
-    if not isinstance(data, dict):
-        return "未知"
-    src = data.get("data") if isinstance(data.get("data"), dict) else data
-    nick = src.get("nick_name") or src.get("nickName") or ""
-    mobile = mask_phone(src.get("mobile") or "")
-    desc = f"{nick} {mobile}".strip()
-    return desc or "未知"
-
-
-def is_token_error(message: str) -> bool:
-    text = str(message or "").lower()
-    return any(word in text for word in ("access_token", "token", "登录", "授权", "invalid session", "session"))
+def build_url(api_path: str, token: str, query: Dict[str, Any] | None = None) -> str:
+    """照源脚本 buildUrl：store_id/app_id/kdt_id/access_token 拼 URL 参数"""
+    pathname = api_path.lstrip("/")
+    params = {
+        "store_id": "",
+        "app_id": APPID,
+        "kdt_id": KDT_ID,
+        "access_token": token,
+    }
+    if query:
+        params.update(query)
+    query_str = "&".join(f"{key}={quote(str(value))}" for key, value in params.items())
+    return f"{API_BASE}/{pathname}?{query_str}"
 
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
     try:
-        global SESSION_ID
-        print("🔐 [登录] 使用 code 换 token")
-
-        def _authorize(payload: Dict[str, Any]) -> Dict[str, Any]:
-            response = request_with_proxy(
-                "POST",
-                AUTH_URL,
-                headers=common_headers(),
-                json={**payload, "code": code},
-                proxies=proxies,
-                server=server,
-            )
-            capture_cookies(response)
-            try:
-                return response.json()
-            except Exception:
-                return {"raw": response.text[:800]}
-
-        # 源脚本：先试 clientId/clientSecret/grantType，失败回退 clientBiz
-        data = _authorize({
-            "appId": APPID,
-            "clientId": CLIENT_ID,
-            "clientSecret": CLIENT_SECRET,
-            "grantType": GRANT_TYPE,
-        })
-        if not extract_token(data):
-            print("🔁 [登录] 主授权方式未取得 token，改用 clientBiz 重试")
-            data = _authorize({
+        print("🔐 [登录] 使用 code 换 accessToken")
+        response = request_with_proxy(
+            "POST",
+            build_url("wscshop/weapp/authorize.json", ""),
+            headers={"User-Agent": USER_AGENT, "Referer": f"https://servicewechat.com/{APPID}/32/page-frame.html", "Accept": "application/json, text/plain, */*", "Content-Type": "application/json"},
+            json={
                 "appId": APPID,
-                "clientBiz": CLIENT_BIZ,
-            })
+                "clientId": CLIENT_ID,
+                "clientSecret": CLIENT_SECRET,
+                "grantType": GRANT_TYPE,
+                "code": code,
+            },
+            proxies=proxies,
+            server=server,
+        )
+
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw": response.text[:800]}
 
         token = extract_token(data)
-        if not token:
-            print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
-            return None, data
+        if token and to_float(data.get("code")) == 0:
+            print(f"✅ [登录] accessToken 获取成功: {mask(token)}")
+            return token, data
 
-        SESSION_ID = extract_session_id(data)
-        print(f"✅ [登录] token 获取成功: {mask(token)}")
-        return token, data
+        msg = data.get("msg") or data.get("message") or json_preview(data)
+        print(f"❌ [登录] 登录失败: {msg}")
+        return None, data
     except Exception as exc:
         print(f"❌ [登录] 请求异常: {exc}")
         return None, None
 
 
-def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
     response = request_with_proxy(
         "GET",
         url,
-        headers=common_headers(SESSION_ID),
-        params=base_params(token, params),
+        headers=common_headers(token),
         proxies=proxies,
         server=server,
     )
-    capture_cookies(response)
-    try:
-        return response.json()
-    except Exception:
-        return {
-            "code": -1,
-            "msg": f"JSON解析失败: {response.text[:300]}",
-        }
-
-
-def api_post(server: str, url: str, token: str, proxies: Dict[str, str] | None, payload: Dict[str, Any], params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    response = request_with_proxy(
-        "POST",
-        url,
-        headers=common_headers(SESSION_ID),
-        json=payload,
-        params=base_params(token, params),
-        proxies=proxies,
-        server=server,
-    )
-    capture_cookies(response)
     try:
         return response.json()
     except Exception:
@@ -623,56 +513,41 @@ def get_cached_token(server: str) -> str | None:
     return None
 
 
-def get_cached_extra(server: str) -> Dict[str, str]:
+def set_cached_token(server: str, token: str, expire_time: str) -> None:
     cache = load_token_cache()
-    data = cache.get(server)
-    if isinstance(data, dict):
-        return {
-            "sessionId": str(data.get("sessionId") or ""),
-            "cookie": str(data.get("cookie") or ""),
-        }
-    return {"sessionId": "", "cookie": ""}
-
-
-def set_cached_token(server: str, token: str, expire_time: str, extra: Dict[str, Any] | None = None) -> None:
-    cache = load_token_cache()
-    entry: Dict[str, Any] = {"token": token, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
-    if extra:
-        entry.update(extra)
-    cache[server] = entry
+    cache[server] = {"token": token, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
     save_token_cache(cache)
 
 
-def clear_cached_token(server: str) -> None:
-    try:
-        cache = load_token_cache()
-        if server in cache:
-            del cache[server]
-            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            print(f"🗑️ [缓存] 已清除 {server} 失效 token")
-    except Exception as exc:
-        print(f"⚠️ [缓存] 清除失败: {exc}")
+def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: str = "积分") -> str:
+    """照源脚本 getPoints()：user_points.json 查积分"""
+    resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies)
+    if to_float(resp.get("code")) != 0:
+        msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
+        print(f"⚠️ [积分] {label}获取失败: {msg}")
+        return f"获取失败: {msg}"
+    data = safe_data(resp)
+    points = data.get("current_points") if data.get("current_points") is not None else (
+        data.get("real_points") if data.get("real_points") is not None else (
+            data.get("total_points") if data.get("total_points") is not None else "未知"
+        )
+    )
+    print(f"✅ [积分] {label}: {points}")
+    return f"{points} 积分"
 
 
 def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
-    """优先使用缓存 token（签到页接口验证），失效自动 code 刷新"""
-    global SESSION_ID, COOKIE_HEADER
+    """优先使用缓存 token（积分接口验证），失效自动 code 刷新"""
     cache_token = get_cached_token(server)
     if cache_token:
-        extra = get_cached_extra(server)
-        SESSION_ID = extra.get("sessionId", "")
-        COOKIE_HEADER = extra.get("cookie", "")
         print("🔍 [缓存] 验证 token")
         try:
-            page_resp = api_get(server, CHECKIN_PAGE_URL, cache_token, proxies)
-            if page_resp.get("code") == 0:
+            resp = api_get(server, build_url("wscump/integral/user_points.json", cache_token), cache_token, proxies)
+            if to_float(resp.get("code")) == 0:
                 print("✅ [缓存] token 有效")
                 return cache_token, None
         except Exception as exc:
             print(f"⚠️ [缓存] 验证异常: {exc}")
-        SESSION_ID = ""
-        COOKIE_HEADER = ""
         print("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
@@ -695,71 +570,53 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, {"sessionId": SESSION_ID, "cookie": COOKIE_HEADER})
+    set_cached_token(server, token, expire_time)
     return token, raw_login
 
 
-# ====================== 签到业务（移植自源脚本 Task 类） ======================
-def show_checkin_page(server: str, token: str, proxies: Dict[str, str] | None) -> str:
-    resp = api_get(server, CHECKIN_PAGE_URL, token, proxies)
-    if resp.get("code") != 0:
-        msg = resp.get("msg") or json_preview(resp, 300)
-        if is_token_error(msg):
-            clear_cached_token(server)
+def do_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> str:
+    """照源脚本 getCheckinInfo + doCheckin：查活动 -> checkinV2 签到"""
+    page_resp = api_get(server, build_url("wscump/checkin/show_checkin_page_v2.json", token), token, proxies)
+    if to_float(page_resp.get("code")) != 0:
+        msg = page_resp.get("msg") or page_resp.get("message") or json_preview(page_resp, 200)
         print(f"⚠️ [签到] 获取签到活动失败: {msg}")
-        return ""
-    data = safe_data(resp)
-    checkin_id = str(data.get("checkinId") or "")
-    is_show = bool(data.get("isShow"))
-    print(f"📋 [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
-    return checkin_id
+        return f"获取签到活动失败: {msg}"
 
+    data = safe_data(page_resp)
+    checkin_id = data.get("checkinId") or data.get("checkin_id") or ""
+    is_show = data.get("isShow") if data.get("isShow") is not None else data.get("is_show")
+    print(f"✅ [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
 
-def do_checkin(server: str, token: str, proxies: Dict[str, str] | None, checkin_id: str) -> str:
     if not checkin_id:
-        print("⚠️ [签到] 未获取到 checkinId，跳过签到")
-        return "未获取到 checkinId，跳过签到"
+        print("⚠️ [签到] 未获取到签到活动，跳过")
+        return "未获取到签到活动，跳过"
 
-    resp = api_get(server, CHECKIN_URL, token, proxies, params={"checkinId": checkin_id})
-    if resp.get("code") == 0:
-        data = safe_data(resp)
-        awards_list: List[str] = []
-        for item in data.get("list") or []:
-            if not isinstance(item, dict):
-                continue
-            infos = item.get("infos")
-            if isinstance(infos, dict) and infos.get("title"):
-                awards_list.append(str(infos["title"]))
-        awards = "、".join(awards_list)
-        desc = data.get("desc") or ""
-        msg = f"签到成功: {desc}" + (f" {awards}" if awards else "")
-        print(f"✅ [签到] {msg}")
-        return msg
+    wait_time = random.randint(2, 5)
+    print(f"⏳ [签到] 提交前等待 {wait_time}s")
+    sleep(wait_time)
 
-    msg = resp.get("msg") or json_preview(resp, 300)
-    if any(word in msg for word in ("已达最大参与次数", "已签到", "重复签到")):
+    sign_resp = api_get(server, build_url("wscump/checkin/checkinV2.json", token, {"checkinId": checkin_id}), token, proxies)
+    if to_float(sign_resp.get("code")) == 0:
+        sign_data = safe_data(sign_resp)
+        award_list = []
+        for item in sign_data.get("list") or []:
+            if isinstance(item, dict):
+                infos = item.get("infos") or {}
+                title = infos.get("title") or infos.get("desc") or ""
+                if title:
+                    award_list.append(title)
+        award = ", ".join(award_list)
+        msg = f"{sign_data.get('desc') or ''}{' ' + award if award else ''}".strip()
+        print(f"✅ [签到] 签到成功: {msg}")
+        return f"签到成功: {msg}"
+
+    message = str(sign_resp.get("msg") or sign_resp.get("message") or json_preview(sign_resp, 200))
+    if any(keyword in message for keyword in ("已签到", "已经签到", "重复", "参与次数")) or "今日" in message and "签" in message:
         print("✅ [签到] 今日已签到")
         return "今日已签到"
-    if is_token_error(msg):
-        clear_cached_token(server)
-    print(f"❌ [签到] 签到失败: {msg}")
-    return f"签到失败: {msg}"
 
-
-def get_points(server: str, token: str, proxies: Dict[str, str] | None) -> str:
-    resp = api_get(server, POINTS_URL, token, proxies)
-    if resp.get("code") != 0:
-        msg = resp.get("msg") or json_preview(resp, 300)
-        print(f"⚠️ [积分] 查询积分失败: {msg}")
-        return f"查询失败: {msg}"
-    data = safe_data(resp)
-    points = data.get("current_points")
-    if points is None:
-        points = data.get("real_points")
-    if points is None:
-        points = "未知"
-    print(f"💰 [积分] 当前积分: {points}")
-    return str(points)
+    print(f"❌ [签到] 签到失败: {message}")
+    return f"签到失败: {message}"
 
 
 def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
@@ -769,7 +626,6 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "proxyStatus": "未使用代理",
         "proxyIp": "-",
         "token": "-",
-        "userMsg": "-",
         "signMsg": "-",
         "pointsMsg": "-",
         "error": "",
@@ -793,13 +649,17 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         return result
 
     result["token"] = mask(token)
-    if raw_login:
-        result["userMsg"] = extract_user_desc(raw_login)
 
     try:
-        checkin_id = show_checkin_page(server, token, proxies)
-        result["signMsg"] = do_checkin(server, token, proxies, checkin_id)
-        result["pointsMsg"] = get_points(server, token, proxies)
+        # 签到前积分
+        points_before = get_points(server, token, proxies, "签到前积分")
+
+        # 每日签到
+        result["signMsg"] = do_checkin(server, token, proxies)
+
+        # 签到后积分
+        points_after = get_points(server, token, proxies, "签到后积分")
+        result["pointsMsg"] = f"{points_before} → {points_after}"
 
         result["success"] = True
         return result
@@ -814,7 +674,7 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
 
-    content = f"""🎬 影视飓风动态 code 任务结果
+    content = f"""🐝 蜜蜂惊喜社小程序任务结果
 
 ━━━━━━━━━━━━━━━━━━━━
 🏁 总结：{success_count} 成功 / {fail_count} 失败
@@ -827,7 +687,6 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
         content += f"""
 🧩 账号 {idx}
-👤 用户：{res["userMsg"]}
 📝 签到：{res["signMsg"]}
 💰 积分：{res["pointsMsg"]}
 {icon} 结果：{"成功" if res["success"] else "失败"}
@@ -858,7 +717,6 @@ def main() -> None:
                 "proxyStatus": "-",
                 "proxyIp": "-",
                 "token": "-",
-                "userMsg": "-",
                 "signMsg": "-",
                 "pointsMsg": "-",
                 "error": traceback.format_exc().strip(),
@@ -873,13 +731,13 @@ def main() -> None:
 
     print()
     print("╔" + "═" * 50 + "╗")
-    print("║ 🏁 影视飓风任务执行完成                      ║")
+    print("║ 🏁 蜜蜂惊喜社任务执行完成                    ║")
     print(f"║ ✅ 成功: {success_count:<39}║")
     print(f"║ ❌ 失败: {fail_count:<39}║")
     print(f"║ 🕒 结束时间: {now_text():<32}║")
     print("╚" + "═" * 50 + "╝")
 
-    send_pushplus("🎬 影视飓风任务完成", build_notify(results))
+    send_pushplus("🐝 蜜蜂惊喜社任务完成", build_notify(results))
     return fail_count
 
 
