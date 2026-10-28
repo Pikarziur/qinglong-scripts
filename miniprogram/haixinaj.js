@@ -1492,17 +1492,35 @@ function parseYYBServer(raw) {
     .filter(Boolean);
 }
 
-async function yybRequest(entry, endpoint) {
-  const { data } = await request('POST', `${entry.server}${endpoint}`, {
-    headers: { 'content-type': 'application/json' },
-    data: { ref: entry.ref, app_id: CONSTS.WX_APP_ID },
-    timeout: 60000,
-  });
-  const result = data?.data?.result;
-  if (Number(data?.code ?? -1) !== 0 || !result || typeof result !== 'object') {
-    throw new Error(`${endpoint}失败: ${data?.msg || data?.message || safeJsonPreview(data)}`);
+async function yybRequest(entry, endpoint, retry = 2) {
+  for (let attempt = 1; attempt <= retry + 1; attempt++) {
+    try {
+      const { data } = await request('POST', `${entry.server}${endpoint}`, {
+        headers: { 'content-type': 'application/json' },
+        data: { ref: entry.ref, app_id: CONSTS.WX_APP_ID },
+        timeout: 60000,
+      });
+      const result = data?.data?.result;
+      if (Number(data?.code ?? -1) !== 0 || !result || typeof result !== 'object') {
+        throw new Error(`${endpoint}失败: ${data?.msg || data?.message || safeJsonPreview(data)}`);
+      }
+      return result;
+    } catch (err) {
+      const msg = String((err && err.message) || err || '');
+      // YYB-Go 偶发「刷新协议号账号凭证」超时等瞬时网络错误（常见文案:
+      // call failed: refresh account credentials: Post ".../pc_yyb_refresh_token_auth":
+      // context deadline exceeded），重试即可自愈，不必整个账号失败。
+      const transient = /deadline exceeded|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|network/i.test(msg);
+      if (!transient) throw err;
+      if (attempt > retry) {
+        logInfo(`  - ${endpoint} 连续 ${attempt} 次因瞬时网络错误失败, 放弃: ${msg.slice(0, 90)}`);
+        throw err;
+      }
+      const waitMs = 3000 * attempt;
+      logInfo(`  - ${endpoint} 第${attempt}次因瞬时网络错误失败, ${waitMs / 1000}s 后重试: ${msg.slice(0, 90)}`);
+      await sleep(waitMs);
+    }
   }
-  return result;
 }
 
 async function loginByYYB(entry) {
