@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  嘉立创
+# version: 2026-10-29a
 # cron: 0 6 * * *
 # 积分有效期：次年12月31日
 # =========================================================
@@ -36,6 +37,7 @@
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 import os
+from datetime import datetime
 import sys
 import json
 import time
@@ -182,6 +184,18 @@ def err(msg):   _emit("ERROR", msg)
 
 # ———————————— 账号分隔标识 ————————————
 # 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -709,6 +723,7 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
 
 
 def main() -> int:
+    log_startup()
     accounts = parse_accounts()
     results: List[Dict[str, Any]] = []
     fail_count = 0

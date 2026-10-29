@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  平安i动
+# version: 2026-10-29a
 # cron: 25 6 * * *
 # 积分有效期：未知
 =========================================================*/
@@ -307,7 +308,7 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-09-11 14:32';   // 更新脚本此值
+const SCRIPT_VER = '2026-10-29a';   // 更新脚本此值
 const AES_PASS = '123456789aasdfgh';                               // 模块135常量 m.a
 const LOGIN_PUBKEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRxFgN1vGYDSkfH90SI9Ixr1wxyTah3+ShYIDvEL1cI4XCvXHfnBkGb6dQPsiNj1skENyF9zEEWv0jshvgpgNleDzd6vnJRf8LQtolFv4dWXzJwruGTCq6lYTM/K+4E8iaiXarD9z3fsR4nIUcu5QRRY1m//nLhRtxonva/ubO+QIDAQAB

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  微信笔笔省
+# version: 2026-10-29a
 # cron: 1 10 * * *
 # 积分有效期：无
 # =========================================================
@@ -40,6 +41,15 @@ from datetime import datetime, timedelta
 # 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
 import os as _os
 import sys as _sys
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
 
 _QN_SITE = "微信支付提现笔笔省"
 # 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
@@ -223,6 +233,15 @@ class TLSAdapter(requests.adapters.HTTPAdapter):
         return super(TLSAdapter, self).init_poolmanager(*args, **kwargs)
 
 class AutoTask:
+    # ========== 启动信息 ==========
+    def log_startup(self, total: int = 0) -> None:
+        self.log(ACC_RULE)
+        self.log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+        if total:
+            self.log("🔢 账号数量: %d" % total)
+        self.log(ACC_RULE)
+
+
     def __init__(self, script_name):
         """
         初始化自动任务类
@@ -523,4 +542,5 @@ class AutoTask:
 
 if __name__ == "__main__":
     auto_task = AutoTask("微信支付提现笔笔省")
+    auto_task.log_startup()
     auto_task.run()

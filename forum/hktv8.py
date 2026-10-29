@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  HKTV论坛
+# version: 2026-10-29a
 # cron: 10 0 * * *
 # =========================================================
 """
@@ -84,6 +85,21 @@ from datetime import datetime
 # 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
 import os as _os
 import sys as _sys
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+ACC_RULE = "=" * 70
+
 
 _QN_SITE = "HKTV8"
 # 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
@@ -208,7 +224,7 @@ def err(msg):  _emit("ERROR", msg)
 # ========== 版本标识 ==========
 # 每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 # （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-SCRIPT_VER = "2026-10-01a"
+SCRIPT_VER = "2026-10-29a"
 
 # ========== 常量 ==========
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1078,6 +1094,7 @@ def run_probe(user, pwd):
 
 # ========== 主流程 ==========
 def main():
+    log_startup()
     log("🚀 HKTV论坛 每日签到开始（脚本 v%s）" % SCRIPT_VER)
 
     if _http is None:

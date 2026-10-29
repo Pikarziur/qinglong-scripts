@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  蜜蜂惊喜社
+# version: 2026-10-29a
 # cron: 15 6 * * *
 # 积分有效期：
 # =========================================================
@@ -54,6 +55,35 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 import requests
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
+# ========== 统一日志：[LEVEL] [MFJXS] message ==========
+def _emit(level, msg):
+    line = "[%s] [MFJXS] %s" % (level, msg)
+    print(line, flush=True)
+
+
+def log(msg):
+    _emit("INFO", msg)
+
+
+def warn(msg):
+    _emit("WARN", msg)
+
+
+def err(msg):
+    _emit("ERROR", msg)
+
 
 
 APP_NAME = "蜜蜂惊喜社小程序"
@@ -97,7 +127,8 @@ USER_AGENT = (
 
 
 def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+
 
 
 def sleep(seconds: float) -> None:
@@ -132,19 +163,19 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
 
 def log_title() -> None:
     print()
-    print("╔" + "═" * 50 + "╗")
-    print("║ 🐝 蜜蜂惊喜社小程序动态 code 版              ║")
-    print(f"║ 🕒 启动时间: {now_text():<32}║")
-    print(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
-    print("╚" + "═" * 50 + "╝")
+    log("╔" + "═" * 50 + "╗")
+    log("║ 🐝 蜜蜂惊喜社小程序动态 code 版              ║")
+    log(f"║ 🕒 启动时间: {now_text():<32}║")
+    log(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
+    log("╚" + "═" * 50 + "╝")
 
 
 def log_account_header(index: int, total: int, server: str) -> None:
     print()
-    print("┌" + "─" * 50 + "┐")
-    print(f"│ 🧩 账号 {index} / {total:<37}│")
-    print(f"│ 🌍 来源 {server:<40}│")
-    print("└" + "─" * 50 + "┘")
+    log("┌" + "─" * 50 + "┐")
+    log(f"│ 🧩 账号 {index} / {total:<37}│")
+    log(f"│ 🌍 来源 {server:<40}│")
+    log("└" + "─" * 50 + "┘")
 
 
 def direct_session() -> requests.Session:
@@ -216,7 +247,7 @@ def build_proxy_dict(proxy_info: Dict[str, Any] | None) -> Dict[str, str] | None
     scheme = "socks5" if PROXY_TYPE == "socks5" else "http"
     proxy_url = f"{scheme}://{auth}{host}:{port}"
 
-    print(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
+    log(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
 
     return {
         "http": proxy_url,
@@ -235,20 +266,20 @@ def validate_proxy(proxies: Dict[str, str] | None) -> Tuple[bool, str]:
                 ip = response.json().get("origin", "未知")
             except Exception:
                 ip = "未知"
-            print(f"✅ [代理] 验证通过，出口 IP: {ip}")
+            log(f"✅ [代理] 验证通过，出口 IP: {ip}")
             return True, ip
     except Exception as exc:
-        print(f"⚠️ [代理] 验证失败: {exc}")
+        warn(f"⚠️ [代理] 验证失败: {exc}")
 
     return False, ""
 
 
 def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
     if not PROXY_API:
-        print(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
+        warn(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
         return None, ""
 
-    print(f"🌐 [代理] {account_name} 正在获取品赞代理...")
+    log(f"🌐 [代理] {account_name} 正在获取品赞代理...")
 
     for index in range(1, PROXY_RETRY_TIMES + 1):
         try:
@@ -256,24 +287,24 @@ def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
             proxy_info = parse_proxy_response(response.text)
 
             if not proxy_info:
-                print(f"⚠️ [代理] 第 {index} 次代理解析失败")
+                warn(f"⚠️ [代理] 第 {index} 次代理解析失败")
                 continue
 
-            print(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
+            log(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
             proxies = build_proxy_dict(proxy_info)
 
             ok, ip = validate_proxy(proxies)
             if ok:
                 return proxies, ip
 
-            print(f"⚠️ [代理] 第 {index} 次代理不可用")
+            warn(f"⚠️ [代理] 第 {index} 次代理不可用")
         except Exception as exc:
-            print(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
+            warn(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
 
         if index < PROXY_RETRY_TIMES:
             sleep(2)
 
-    print("⚠️ [代理] 获取失败，使用直连")
+    warn("⚠️ [代理] 获取失败，使用直连")
     return None, ""
 
 
@@ -291,10 +322,10 @@ def request_with_proxy(
         try:
             return requests.request(method, url, proxies=proxies, **kwargs)
         except Exception as exc:
-            print(f"⚠️ [代理] {server} 代理请求失败: {exc}")
+            warn(f"⚠️ [代理] {server} 代理请求失败: {exc}")
             if not ENABLE_DIRECT_FALLBACK:
                 raise
-            print("🔁 [兜底] 切换直连重试")
+            warn("🔁 [兜底] 切换直连重试")
 
     session = direct_session()
     return session.request(method, url, **kwargs)
@@ -304,7 +335,7 @@ def request_with_proxy(
 def send_qywx(title, content):
     """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时自动跳过。"""
     if not QYWX_TOKEN:
-        print("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
+        warn("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
         return False
     key = QYWX_TOKEN.split("key=")[-1].strip()
     import json as _qywx_json, urllib.request as _qywx_urllib
@@ -317,15 +348,15 @@ def send_qywx(title, content):
                                    data=payload, headers={"Content-Type": "application/json"})
         res = _qywx_json.loads(_qywx_urllib.urlopen(req, timeout=10).read().decode("utf-8"))
         ok = res.get("errcode") == 0
-        print("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
+        err("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
         return ok
     except Exception as _exc:
-        print("[企业微信] 推送异常:", _exc)
+        err("[企业微信] 推送异常:", _exc)
         return False
 def send_pushplus(title: str, content: str) -> None:
     send_qywx(title, content)  # 企业微信推送（QYWX_TOKEN 未配置时自动跳过）
     if not PLUSPLUS_TOKEN:
-        print("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
+        warn("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
         return
 
     try:
@@ -339,14 +370,14 @@ def send_pushplus(title: str, content: str) -> None:
             },
             timeout=10,
         )
-        print("✅ [PushPlus] 推送成功")
+        log("✅ [PushPlus] 推送成功")
     except Exception as exc:
-        print(f"❌ [PushPlus] 推送失败: {exc}")
+        err(f"❌ [PushPlus] 推送失败: {exc}")
 
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
-    print(f"🔐 [授权] 请求本地 code 服务: {url}")
+    log(f"🔐 [授权] 请求本地 code 服务: {url}")
 
     try:
         response = direct_session().get(
@@ -357,13 +388,13 @@ def get_code(server: str) -> str | None:
         data = response.json()
 
         if data.get("err") != 0 or not data.get("code"):
-            print(f"❌ [授权] code 获取失败: {json_preview(data)}")
+            err(f"❌ [授权] code 获取失败: {json_preview(data)}")
             return None
 
-        print("✅ [授权] code 获取成功")
+        log("✅ [授权] code 获取成功")
         return data["code"]
     except Exception as exc:
-        print(f"❌ [授权] code 获取异常: {exc}")
+        err(f"❌ [授权] code 获取异常: {exc}")
         return None
 
 
@@ -428,7 +459,7 @@ def build_url(api_path: str, token: str, query: Dict[str, Any] | None = None) ->
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
     try:
-        print("🔐 [登录] 使用 code 换 accessToken")
+        log("🔐 [登录] 使用 code 换 accessToken")
         response = request_with_proxy(
             "POST",
             build_url("wscshop/weapp/authorize.json", ""),
@@ -451,14 +482,14 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
 
         token = extract_token(data)
         if token and to_float(data.get("code")) == 0:
-            print(f"✅ [登录] accessToken 获取成功: {mask(token)}")
+            log(f"✅ [登录] accessToken 获取成功: {mask(token)}")
             return token, data
 
         msg = data.get("msg") or data.get("message") or json_preview(data)
-        print(f"❌ [登录] 登录失败: {msg}")
+        err(f"❌ [登录] 登录失败: {msg}")
         return None, data
     except Exception as exc:
-        print(f"❌ [登录] 请求异常: {exc}")
+        err(f"❌ [登录] 请求异常: {exc}")
         return None, None
 
 
@@ -486,7 +517,7 @@ def load_token_cache() -> Dict[str, Any]:
             with open(COOKIE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as exc:
-        print(f"⚠️ [缓存] 读取失败: {exc}")
+        warn(f"⚠️ [缓存] 读取失败: {exc}")
     return {}
 
 
@@ -494,9 +525,9 @@ def save_token_cache(cache: Dict[str, Any]) -> None:
     try:
         with open(COOKIE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
-        print("✅ [缓存] Token保存成功")
+        log("✅ [缓存] Token保存成功")
     except Exception as exc:
-        print(f"❌ [缓存] 保存失败: {exc}")
+        err(f"❌ [缓存] 保存失败: {exc}")
 
 
 def get_cached_token(server: str) -> str | None:
@@ -506,10 +537,10 @@ def get_cached_token(server: str) -> str | None:
         try:
             expire = datetime.fromisoformat(data["expireTime"]).timestamp() * 1000
             if time.time() * 1000 < expire - 3600 * 1000:
-                print(f"✅ [缓存] 使用 {server} token")
+                log(f"✅ [缓存] 使用 {server} token")
                 return data["token"]
         except Exception as exc:
-            print(f"⚠️ [缓存] 过期时间解析异常: {exc}")
+            warn(f"⚠️ [缓存] 过期时间解析异常: {exc}")
     return None
 
 
@@ -524,7 +555,7 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
     resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies)
     if to_float(resp.get("code")) != 0:
         msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
-        print(f"⚠️ [积分] {label}获取失败: {msg}")
+        warn(f"⚠️ [积分] {label}获取失败: {msg}")
         return f"获取失败: {msg}"
     data = safe_data(resp)
     points = data.get("current_points") if data.get("current_points") is not None else (
@@ -532,7 +563,7 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
             data.get("total_points") if data.get("total_points") is not None else "未知"
         )
     )
-    print(f"✅ [积分] {label}: {points}")
+    log(f"✅ [积分] {label}: {points}")
     return f"{points} 积分"
 
 
@@ -540,15 +571,15 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
     """优先使用缓存 token（积分接口验证），失效自动 code 刷新"""
     cache_token = get_cached_token(server)
     if cache_token:
-        print("🔍 [缓存] 验证 token")
+        log("🔍 [缓存] 验证 token")
         try:
             resp = api_get(server, build_url("wscump/integral/user_points.json", cache_token), cache_token, proxies)
             if to_float(resp.get("code")) == 0:
-                print("✅ [缓存] token 有效")
+                log("✅ [缓存] token 有效")
                 return cache_token, None
         except Exception as exc:
-            print(f"⚠️ [缓存] 验证异常: {exc}")
-        print("⚠️ [缓存] token 已失效，重新登录")
+            warn(f"⚠️ [缓存] 验证异常: {exc}")
+        warn("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
@@ -579,20 +610,20 @@ def do_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> str:
     page_resp = api_get(server, build_url("wscump/checkin/show_checkin_page_v2.json", token), token, proxies)
     if to_float(page_resp.get("code")) != 0:
         msg = page_resp.get("msg") or page_resp.get("message") or json_preview(page_resp, 200)
-        print(f"⚠️ [签到] 获取签到活动失败: {msg}")
+        warn(f"⚠️ [签到] 获取签到活动失败: {msg}")
         return f"获取签到活动失败: {msg}"
 
     data = safe_data(page_resp)
     checkin_id = data.get("checkinId") or data.get("checkin_id") or ""
     is_show = data.get("isShow") if data.get("isShow") is not None else data.get("is_show")
-    print(f"✅ [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
+    log(f"✅ [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
 
     if not checkin_id:
-        print("⚠️ [签到] 未获取到签到活动，跳过")
+        warn("⚠️ [签到] 未获取到签到活动，跳过")
         return "未获取到签到活动，跳过"
 
     wait_time = random.randint(2, 5)
-    print(f"⏳ [签到] 提交前等待 {wait_time}s")
+    log(f"⏳ [签到] 提交前等待 {wait_time}s")
     sleep(wait_time)
 
     sign_resp = api_get(server, build_url("wscump/checkin/checkinV2.json", token, {"checkinId": checkin_id}), token, proxies)
@@ -607,15 +638,15 @@ def do_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> str:
                     award_list.append(title)
         award = ", ".join(award_list)
         msg = f"{sign_data.get('desc') or ''}{' ' + award if award else ''}".strip()
-        print(f"✅ [签到] 签到成功: {msg}")
+        log(f"✅ [签到] 签到成功: {msg}")
         return f"签到成功: {msg}"
 
     message = str(sign_resp.get("msg") or sign_resp.get("message") or json_preview(sign_resp, 200))
     if any(keyword in message for keyword in ("已签到", "已经签到", "重复", "参与次数")) or "今日" in message and "签" in message:
-        print("✅ [签到] 今日已签到")
+        log("✅ [签到] 今日已签到")
         return "今日已签到"
 
-    print(f"❌ [签到] 签到失败: {message}")
+    err(f"❌ [签到] 签到失败: {message}")
     return f"签到失败: {message}"
 
 
@@ -640,7 +671,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     sleep(PROXY_FETCH_INTERVAL)
 
     delay = random.randint(2, 6)
-    print(f"⏳ [延迟] 启动延迟 {delay}s")
+    log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
     token, raw_login = login_with_cache(server, proxies)
@@ -666,7 +697,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     except Exception as exc:
         result["error"] = traceback.format_exc().strip()
-        print(f"❌ [账号] 执行失败: {exc}")
+        err(f"❌ [账号] 执行失败: {exc}")
         return result
 
 
@@ -701,6 +732,7 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
 
 def main() -> None:
+    log_startup()
     log_title()
 
     results: List[Dict[str, Any]] = []
@@ -710,7 +742,7 @@ def main() -> None:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
         except Exception as exc:
-            print(f"❌ [主程序] {server} 执行异常: {exc}")
+            err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
                 "server": server,
                 "success": False,
@@ -723,19 +755,20 @@ def main() -> None:
             })
 
         if index < len(SERVERS):
-            print("⏳ [间隔] 等待 2s 后处理下一个账号")
+            log("⏳ [间隔] 等待 2s 后处理下一个账号")
             sleep(2)
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
+    log("📊 [执行汇总] 蜜蜂惊喜社 · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (len(results), success_count, fail_count))
 
     print()
-    print("╔" + "═" * 50 + "╗")
-    print("║ 🏁 蜜蜂惊喜社任务执行完成                    ║")
-    print(f"║ ✅ 成功: {success_count:<39}║")
-    print(f"║ ❌ 失败: {fail_count:<39}║")
-    print(f"║ 🕒 结束时间: {now_text():<32}║")
-    print("╚" + "═" * 50 + "╝")
+    log("╔" + "═" * 50 + "╗")
+    log("║ 🏁 蜜蜂惊喜社任务执行完成                    ║")
+    log(f"║ ✅ 成功: {success_count:<39}║")
+    err(f"║ ❌ 失败: {fail_count:<39}║")
+    log(f"║ 🕒 结束时间: {now_text():<32}║")
+    log("╚" + "═" * 50 + "╝")
 
     send_pushplus("🐝 蜜蜂惊喜社任务完成", build_notify(results))
     return fail_count

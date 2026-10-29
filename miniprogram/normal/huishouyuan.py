@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  回收猿旧衣服回收
+# version: 2026-10-29a
 # cron: 50 5 * * *
 # 积分有效期：未知
 # =========================================================
@@ -22,6 +23,7 @@
 # 作者 lcmovie  https://github.com/lcmovie/YYB-GO-Script-i
 
 import hashlib
+from datetime import datetime
 import os
 import sys
 import time
@@ -182,6 +184,18 @@ def err(msg):  _emit("ERROR", msg)
 
 
 # 执行汇总块用的分隔线
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 
@@ -408,6 +422,7 @@ def run_one(index, server, ref, context):
 
 
 def main():
+    log_startup()
     context = bind_context()
     accounts = routes()
     # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号

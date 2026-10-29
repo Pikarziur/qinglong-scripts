@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小黑盒扫码登录
+# version: 2026-10-29a
 # cron:  0 0 1 1 * *
 # 积分有效期：永久有效
 # =========================================================
@@ -26,12 +27,29 @@
 # =========================================================
 
 import json
+from datetime import datetime
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlencode, urlparse
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
 
 # 签名函数直接复用主脚本（保证与 xiaoheihe.py 完全一致，避免两处实现漂移）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -209,6 +227,7 @@ def save_qr_png(text):
 # 主流程
 # ────────────────────────────────────────────
 def main():
+    log_startup()
     log("🚀 小黑盒扫码登录开始")
 
     # 1) 拿二维码

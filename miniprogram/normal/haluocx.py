@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  哈啰出行单车
+# version: 2026-10-29a
 # cron: 40 5 * * *
 # 积分有效期：获得起3个月内
 # =========================================================
@@ -179,6 +180,14 @@ def err(msg):  _emit("ERROR", msg)
 # ────────────────────────────────────────────
 # 账号分隔标识 + 账号白名单
 # ────────────────────────────────────────────
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 # 账号白名单：按 YYB_SERVER 的行序（1 起）筛选本次要跑的账号。
@@ -252,7 +261,8 @@ def pick_user_agent() -> str:
 # 小工具
 # --------------------------------------------------------------------------- #
 def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+
 
 
 def mask_phone(value: Any) -> str:
@@ -717,6 +727,7 @@ def _finish(total: int, ok_count: int, skipped: int = 0) -> int:
 # 入口
 # --------------------------------------------------------------------------- #
 def main() -> int:
+    log_startup()
     log(_ACC_RULE)
     log("🚲 %s" % APP_NAME)
     log("🕒 启动时间: %s" % now_text())

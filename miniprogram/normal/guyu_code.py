@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  谷雨
+# version: 2026-10-29a
 # cron: 30 5 * * *
 # 积分有效期：
 # =========================================================
@@ -61,6 +62,35 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 import requests
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
+# ========== 统一日志：[LEVEL] [GY] message ==========
+def _emit(level, msg):
+    line = "[%s] [GY] %s" % (level, msg)
+    print(line, flush=True)
+
+
+def log(msg):
+    _emit("INFO", msg)
+
+
+def warn(msg):
+    _emit("WARN", msg)
+
+
+def err(msg):
+    _emit("ERROR", msg)
+
 
 # TLS 指纹伪装: 服务端按 TLS 指纹识别客户端, requests 的原生指纹会被判为异常请求,
 # 登录接口直接返回 996「当前请求异常，请刷新重试」。用 curl_cffi 模拟浏览器指纹即可通过。
@@ -118,7 +148,8 @@ USER_AGENT = (
 
 
 def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+
 
 
 def sleep(seconds: float) -> None:
@@ -153,19 +184,19 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
 
 def log_title() -> None:
     print()
-    print("╔" + "═" * 50 + "╗")
-    print("║ 🌸 谷雨小程序签到动态 code 版                 ║")
-    print(f"║ 🕒 启动时间: {now_text():<32}║")
-    print(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
-    print("╚" + "═" * 50 + "╝")
+    log("╔" + "═" * 50 + "╗")
+    log("║ 🌸 谷雨小程序签到动态 code 版                 ║")
+    log(f"║ 🕒 启动时间: {now_text():<32}║")
+    log(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
+    log("╚" + "═" * 50 + "╝")
 
 
 def log_account_header(index: int, total: int, server: str) -> None:
     print()
-    print("┌" + "─" * 50 + "┐")
-    print(f"│ 🧩 账号 {index} / {total:<37}│")
-    print(f"│ 🌍 来源 {server:<40}│")
-    print("└" + "─" * 50 + "┘")
+    log("┌" + "─" * 50 + "┐")
+    log(f"│ 🧩 账号 {index} / {total:<37}│")
+    log(f"│ 🌍 来源 {server:<40}│")
+    log("└" + "─" * 50 + "┘")
 
 
 def direct_session() -> requests.Session:
@@ -237,7 +268,7 @@ def build_proxy_dict(proxy_info: Dict[str, Any] | None) -> Dict[str, str] | None
     scheme = "socks5" if PROXY_TYPE == "socks5" else "http"
     proxy_url = f"{scheme}://{auth}{host}:{port}"
 
-    print(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
+    log(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
 
     return {
         "http": proxy_url,
@@ -256,20 +287,20 @@ def validate_proxy(proxies: Dict[str, str] | None) -> Tuple[bool, str]:
                 ip = response.json().get("origin", "未知")
             except Exception:
                 ip = "未知"
-            print(f"✅ [代理] 验证通过，出口 IP: {ip}")
+            log(f"✅ [代理] 验证通过，出口 IP: {ip}")
             return True, ip
     except Exception as exc:
-        print(f"⚠️ [代理] 验证失败: {exc}")
+        warn(f"⚠️ [代理] 验证失败: {exc}")
 
     return False, ""
 
 
 def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
     if not PROXY_API:
-        print(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
+        warn(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
         return None, ""
 
-    print(f"🌐 [代理] {account_name} 正在获取品赞代理...")
+    log(f"🌐 [代理] {account_name} 正在获取品赞代理...")
 
     for index in range(1, PROXY_RETRY_TIMES + 1):
         try:
@@ -277,24 +308,24 @@ def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
             proxy_info = parse_proxy_response(response.text)
 
             if not proxy_info:
-                print(f"⚠️ [代理] 第 {index} 次代理解析失败")
+                warn(f"⚠️ [代理] 第 {index} 次代理解析失败")
                 continue
 
-            print(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
+            log(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
             proxies = build_proxy_dict(proxy_info)
 
             ok, ip = validate_proxy(proxies)
             if ok:
                 return proxies, ip
 
-            print(f"⚠️ [代理] 第 {index} 次代理不可用")
+            warn(f"⚠️ [代理] 第 {index} 次代理不可用")
         except Exception as exc:
-            print(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
+            warn(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
 
         if index < PROXY_RETRY_TIMES:
             sleep(2)
 
-    print("⚠️ [代理] 获取失败，使用直连")
+    warn("⚠️ [代理] 获取失败，使用直连")
     return None, ""
 
 
@@ -320,10 +351,10 @@ def request_with_proxy(
                 return _cf_requests.request(method, url, proxies=proxies, **kwargs)
             return requests.request(method, url, proxies=proxies, **kwargs)
         except Exception as exc:
-            print(f"⚠️ [代理] {server} 代理请求失败: {exc}")
+            warn(f"⚠️ [代理] {server} 代理请求失败: {exc}")
             if not ENABLE_DIRECT_FALLBACK:
                 raise
-            print("🔁 [兜底] 切换直连重试")
+            warn("🔁 [兜底] 切换直连重试")
 
     if _cf_requests is not None:
         return _cf_requests.request(method, url, **kwargs)
@@ -335,7 +366,7 @@ def request_with_proxy(
 def send_qywx(title, content):
     """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时自动跳过。"""
     if not QYWX_TOKEN:
-        print("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
+        warn("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
         return False
     key = QYWX_TOKEN.split("key=")[-1].strip()
     import json as _qywx_json, urllib.request as _qywx_urllib
@@ -348,15 +379,15 @@ def send_qywx(title, content):
                                    data=payload, headers={"Content-Type": "application/json"})
         res = _qywx_json.loads(_qywx_urllib.urlopen(req, timeout=10).read().decode("utf-8"))
         ok = res.get("errcode") == 0
-        print("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
+        err("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
         return ok
     except Exception as _exc:
-        print("[企业微信] 推送异常:", _exc)
+        err("[企业微信] 推送异常:", _exc)
         return False
 def send_pushplus(title: str, content: str) -> None:
     send_qywx(title, content)  # 企业微信推送（QYWX_TOKEN 未配置时自动跳过）
     if not PLUSPLUS_TOKEN:
-        print("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
+        warn("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
         return
 
     try:
@@ -370,14 +401,14 @@ def send_pushplus(title: str, content: str) -> None:
             },
             timeout=10,
         )
-        print("✅ [PushPlus] 推送成功")
+        log("✅ [PushPlus] 推送成功")
     except Exception as exc:
-        print(f"❌ [PushPlus] 推送失败: {exc}")
+        err(f"❌ [PushPlus] 推送失败: {exc}")
 
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
-    print(f"🔐 [授权] 请求本地 code 服务: {url}")
+    log(f"🔐 [授权] 请求本地 code 服务: {url}")
 
     try:
         response = direct_session().get(
@@ -388,13 +419,13 @@ def get_code(server: str) -> str | None:
         data = response.json()
 
         if data.get("err") != 0 or not data.get("code"):
-            print(f"❌ [授权] code 获取失败: {json_preview(data)}")
+            err(f"❌ [授权] code 获取失败: {json_preview(data)}")
             return None
 
-        print("✅ [授权] code 获取成功")
+        log("✅ [授权] code 获取成功")
         return data["code"]
     except Exception as exc:
-        print(f"❌ [授权] code 获取异常: {exc}")
+        err(f"❌ [授权] code 获取异常: {exc}")
         return None
 
 
@@ -463,7 +494,7 @@ def extract_token(data: Any) -> str | None:
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
     try:
-        print("🔐 [登录] 使用 code 换 token")
+        log("🔐 [登录] 使用 code 换 token")
         payload = {
             "code": str(code),
             "appid": APPID,
@@ -489,20 +520,20 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
 
         token = extract_token(data)
         if token:
-            print(f"✅ [登录] token 获取成功: {mask(token)}")
+            log(f"✅ [登录] token 获取成功: {mask(token)}")
             return token, data
 
         biz_code = str(data.get("code")) if isinstance(data, dict) else ""
         if biz_code == "996":
-            print("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」")
-            print("   根因: 服务端按 TLS 指纹识别客户端。本脚本已用 curl_cffi 模拟浏览器指纹,")
-            print("   若仍失败, 多半是 curl_cffi 未安装 —— 请在青龙执行: pip install curl_cffi")
-            print(f"   本次发送的请求体: {json_preview(payload, 400)}")
+            err("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」")
+            log("   根因: 服务端按 TLS 指纹识别客户端。本脚本已用 curl_cffi 模拟浏览器指纹,")
+            err("   若仍失败, 多半是 curl_cffi 未安装 —— 请在青龙执行: pip install curl_cffi")
+            log(f"   本次发送的请求体: {json_preview(payload, 400)}")
         else:
-            print(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
+            err(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
         return None, data
     except Exception as exc:
-        print(f"❌ [登录] 请求异常: {exc}")
+        err(f"❌ [登录] 请求异常: {exc}")
         return None, None
 
 
@@ -549,7 +580,7 @@ def load_token_cache() -> Dict[str, Any]:
             with open(COOKIE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as exc:
-        print(f"⚠️ [缓存] 读取失败: {exc}")
+        warn(f"⚠️ [缓存] 读取失败: {exc}")
     return {}
 
 
@@ -557,9 +588,9 @@ def save_token_cache(cache: Dict[str, Any]) -> None:
     try:
         with open(COOKIE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
-        print("✅ [缓存] Token保存成功")
+        log("✅ [缓存] Token保存成功")
     except Exception as exc:
-        print(f"❌ [缓存] 保存失败: {exc}")
+        err(f"❌ [缓存] 保存失败: {exc}")
 
 
 def get_cached_token(server: str) -> str | None:
@@ -569,10 +600,10 @@ def get_cached_token(server: str) -> str | None:
         try:
             expire = datetime.fromisoformat(data["expireTime"]).timestamp() * 1000
             if time.time() * 1000 < expire - 3600 * 1000:
-                print(f"✅ [缓存] 使用 {server} token")
+                log(f"✅ [缓存] 使用 {server} token")
                 return data["token"]
         except Exception as exc:
-            print(f"⚠️ [缓存] 过期时间解析异常: {exc}")
+            warn(f"⚠️ [缓存] 过期时间解析异常: {exc}")
     return None
 
 
@@ -628,17 +659,17 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
     shop_id = get_cached_shop_id(server)
     user_id = get_cached_user_id(server)
     if cache_token:
-        print("🔍 [缓存] 验证 token")
+        log("🔍 [缓存] 验证 token")
         try:
             point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
             if point_resp.get("success"):
-                print("✅ [缓存] token 有效")
+                log("✅ [缓存] token 有效")
                 if not user_id:
                     user_id = extract_group_id_from_token(cache_token)
                 return cache_token, shop_id, user_id, None
         except Exception as exc:
-            print(f"⚠️ [缓存] 验证异常: {exc}")
-        print("⚠️ [缓存] token 已失效，重新登录")
+            warn(f"⚠️ [缓存] 验证异常: {exc}")
+        warn("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
@@ -654,7 +685,7 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         if isinstance(info, dict):
             if info.get("shopId"):
                 shop_id = str(info["shopId"])
-                print(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
+                log(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
             # 签到接口的「用户id」实际是 groupId(80000136), 顶层 result.userId 为 null
             if info.get("groupId"):
                 user_id = str(info["groupId"])
@@ -693,7 +724,7 @@ def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str,
             if isinstance(rows, list) and rows and isinstance(rows[0], dict):
                 integral_account = str(rows[0].get("integralAccount") or "")
     except Exception as exc:
-        print(f"⚠️ [签到] 查询积分体系异常: {exc}")
+        warn(f"⚠️ [签到] 查询积分体系异常: {exc}")
 
     activity_id = ""
     activity_title = ""
@@ -721,18 +752,18 @@ def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str,
                 activity_title = str(item.get("title") or activity_id)
                 break
     except Exception as exc:
-        print(f"⚠️ [签到] 查询签到活动异常: {exc}")
+        warn(f"⚠️ [签到] 查询签到活动异常: {exc}")
 
     if activity_id:
-        print(f"✅ [签到] 签到活动: {activity_title}")
+        log(f"✅ [签到] 签到活动: {activity_title}")
     else:
-        print("⚠️ [签到] 未查到可参与的签到活动")
+        warn("⚠️ [签到] 未查到可参与的签到活动")
     return activity_id, activity_title
 
 
 def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None, user_id: str = "") -> str:
     if not activity_id:
-        print("⚠️ [签到] 跳过签到: 没有可用的签到活动")
+        warn("⚠️ [签到] 跳过签到: 没有可用的签到活动")
         return "没有可用的签到活动"
 
     today = date.today()
@@ -751,7 +782,7 @@ def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Di
         inner = info_resp.get("result") if isinstance(info_resp, dict) else None
         date_list = inner.get("signDateList") if isinstance(inner, dict) else None
         if isinstance(date_list, list) and any(str(d)[:10] == today_text for d in date_list):
-            print("✅ [签到] 今日已签到")
+            log("✅ [签到] 今日已签到")
             return "今日已签到"
     except Exception:
         pass
@@ -766,14 +797,14 @@ def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Di
         payload["userId"] = user_id
     sign_resp = api_post(server, SIGN_URL, token, proxies, payload)
     if sign_resp.get("success"):
-        print("✅ [签到] 签到成功")
+        log("✅ [签到] 签到成功")
         return "签到成功"
     if is_already_signed(sign_resp.get("msg")):
-        print("✅ [签到] 今日已签到")
+        log("✅ [签到] 今日已签到")
         return "今日已签到"
 
     msg = sign_resp.get("msg") or sign_resp.get("message") or json_preview(sign_resp, 300)
-    print(f"❌ [签到] 签到失败: {msg}")
+    err(f"❌ [签到] 签到失败: {msg}")
     return f"签到失败: {msg}"
 
 
@@ -784,11 +815,11 @@ def get_user_points(server: str, token: str, shop_id: str, proxies: Dict[str, st
         score = ""
         if isinstance(rows, list) and rows and isinstance(rows[0], dict):
             score = rows[0].get("score")
-        print(f"💰 [积分] 当前积分: {score}")
+        log(f"💰 [积分] 当前积分: {score}")
         return str(score)
 
     msg = resp.get("msg") or resp.get("message") or json_preview(resp, 300)
-    print(f"❌ [积分] 获取积分失败: {msg}")
+    err(f"❌ [积分] 获取积分失败: {msg}")
     return "-"
 
 
@@ -813,7 +844,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     sleep(PROXY_FETCH_INTERVAL)
 
     delay = random.randint(5, 24)
-    print(f"⏳ [延迟] 启动延迟 {delay}s")
+    log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
     token, shop_id, user_id, raw_login = login_with_cache(server, proxies)
@@ -836,7 +867,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     except Exception as exc:
         result["error"] = traceback.format_exc().strip()
-        print(f"❌ [账号] 执行失败: {exc}")
+        err(f"❌ [账号] 执行失败: {exc}")
         return result
 
 
@@ -871,10 +902,11 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 
 
 def main() -> None:
+    log_startup()
     log_title()
 
     if not SERVERS:
-        print("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
+        log("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
         return 1
 
     results: List[Dict[str, Any]] = []
@@ -884,7 +916,7 @@ def main() -> None:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
         except Exception as exc:
-            print(f"❌ [主程序] {server} 执行异常: {exc}")
+            err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
                 "server": server,
                 "success": False,
@@ -897,19 +929,20 @@ def main() -> None:
             })
 
         if index < len(SERVERS):
-            print("⏳ [间隔] 等待 2s 后处理下一个账号")
+            log("⏳ [间隔] 等待 2s 后处理下一个账号")
             sleep(2)
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
+    log("📊 [执行汇总] 谷雨 · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (len(results), success_count, fail_count))
 
     print()
-    print("╔" + "═" * 50 + "╗")
-    print("║ 🏁 谷雨小程序任务执行完成                     ║")
-    print(f"║ ✅ 成功: {success_count:<39}║")
-    print(f"║ ❌ 失败: {fail_count:<39}║")
-    print(f"║ 🕒 结束时间: {now_text():<32}║")
-    print("╚" + "═" * 50 + "╝")
+    log("╔" + "═" * 50 + "╗")
+    log("║ 🏁 谷雨小程序任务执行完成                     ║")
+    log(f"║ ✅ 成功: {success_count:<39}║")
+    err(f"║ ❌ 失败: {fail_count:<39}║")
+    log(f"║ 🕒 结束时间: {now_text():<32}║")
+    log("╚" + "═" * 50 + "╝")
 
     send_pushplus("🌸 谷雨小程序任务完成", build_notify(results))
     return fail_count
@@ -1013,11 +1046,11 @@ if YYB_ONLY_REFS:
     _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
     if _wanted:
         SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
-        print(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
+        log(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
     else:
-        print(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
+        warn(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
     if not SERVERS:
-        print(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
+        log(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code

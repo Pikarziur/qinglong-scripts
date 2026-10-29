@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  联通任务
+# version: 2026-10-29a
 # cron: 12 7,20 * * *
 # 积分有效期：
 # =========================================================
@@ -105,6 +106,38 @@ import string
 import tempfile
 import threading
 from datetime import datetime
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+ACC_RULE = "=" * 70
+
+# ========== 统一日志：[LEVEL] [UNICOM] message ==========
+def _emit(level, msg):
+    line = "[%s] [UNICOM] %s" % (level, msg)
+    print(line, flush=True)
+
+
+def log(msg):
+    _emit("INFO", msg)
+
+
+def warn(msg):
+    _emit("WARN", msg)
+
+
+def err(msg):
+    _emit("ERROR", msg)
+
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except:
@@ -115,7 +148,7 @@ from requests.packages.urllib3.util.retry import Retry
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
 from Crypto.Util.Padding import pad, unpad
-SCRIPT_VERSION = "v1.1.1-login"
+SCRIPT_VERSION = "2026-10-29a"
 # ========================================
 # 全局配置 (globalConfig)
 # true=开启, false=关闭
@@ -519,7 +552,7 @@ class UserService:
         prefix = f"账号[{self.index}]"
         full_msg = f"{prefix}{msg}"
         log_line = f"[{datetime.now().strftime('%H:%M:%S')}] {full_msg}"
-        print(log_line)
+        log(log_line)
         if notify:
             self.notify_logs.append(str(msg))
 
@@ -7276,8 +7309,8 @@ def cross_view_security_share_keys(users):
     if len(participants) < 2:
         participants[0].log("联通助理-分享AI助手对话：仅 1 个账号拿到分享key，跳过跨账号互看")
         return
-    print("")
-    print("========= 联通助理-开始跨账号查看AI分享对话 =========")
+    log("")
+    log("========= 联通助理-开始跨账号查看AI分享对话 =========")
     n = len(participants)
     for i, viewer in enumerate(participants):
         target = participants[(i + 1) % n]
@@ -7297,7 +7330,7 @@ def cross_view_security_share_keys(users):
 
 def do_notify(users):
     if not globalConfig.get("enable_notify", True):
-        print("推送通知已关闭")
+        log("推送通知已关闭")
         return
     notify_content = []
     for u in users:
@@ -7312,40 +7345,41 @@ def do_notify(users):
         try:
             from notify import send
             send(f"中国联通 {SCRIPT_VERSION}", content)
-            print(f"推送成功 (内容长度: {len(content)})")
+            log(f"推送成功 (内容长度: {len(content)})")
         except Exception as e:
-            print(f"推送失败，可能未配置 notify.py: {str(e)}")
+            err(f"推送失败，可能未配置 notify.py: {str(e)}")
     else:
-        print("无推送内容")
+        log("无推送内容")
 
 def main():
+    log_startup()
     global GRAB_AMOUNT
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [Script Start] chinaUnicom Python {SCRIPT_VERSION}")
+    log(f"[{datetime.now().strftime('%H:%M:%S')}] [Script Start] chinaUnicom Python {SCRIPT_VERSION}")
     cookies = os.environ.get("chinaUnicomCookie", "")
     if not cookies:
-        print("[-] 未配置 chinaUnicomCookie：需要联通 App Token 或手机号#服务密码；YYB_SERVER 不能直接替代")
+        log("[-] 未配置 chinaUnicomCookie：需要联通 App Token 或手机号#服务密码；YYB_SERVER 不能直接替代")
         sys.exit(1)
     accounts = [c for c in re.split(r'[&\n]', cookies) if c.strip()]
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 发现 {len(accounts)} 个账号")
-    print("")
+    log(f"[{datetime.now().strftime('%H:%M:%S')}] 发现 {len(accounts)} 个账号")
+    log("")
     users = []
     for idx, config in enumerate(accounts):
         u = UserService(idx + 1, config.strip())
         users.append(u)
         if u.appId:
-             print(f"账号[{idx+1}] 识别到 Token#AppId 模式")
+             log(f"账号[{idx+1}] 识别到 Token#AppId 模式")
         elif u.account_mobile:
              mode = '服务密码' if u.account_password else '本地缓存'
-             print(f"账号[{idx+1}] 识别到{mode}模式: {mask_str(u.account_mobile)}")
-    print(f"共找到{len(accounts)}个账号")
-    print("")
+             log(f"账号[{idx+1}] 识别到{mode}模式: {mask_str(u.account_mobile)}")
+    log(f"共找到{len(accounts)}个账号")
+    log("")
     env_amount = os.environ.get("UNICOM_GRAB_AMOUNT", "")
     if env_amount and env_amount.isdigit():
         GRAB_AMOUNT = int(env_amount)
     test_mode = os.environ.get("UNICOM_TEST_MODE", "").strip().lower()
     query_only = test_mode == "query"
     if test_mode in ('login', 'sign'):
-        print('[Test Mode] ' + ('仅登录验证' if test_mode == 'login' else '仅首页签到'))
+        log('[Test Mode] ' + ('仅登录验证' if test_mode == 'login' else '仅首页签到'))
         for user in users:
             user.configure_proxy()
             try:
@@ -7361,7 +7395,7 @@ def main():
                 user.session.close()
         return
     if query_only:
-        print("[Test Mode] 仅查询模式，跳过任务执行")
+        warn("[Test Mode] 仅查询模式，跳过任务执行")
     sc = globalConfig.get("sign_config", {})
     mc = globalConfig.get("market_config", {})
     rc = globalConfig.get("regional_config", {})
@@ -7379,7 +7413,7 @@ def main():
                 and hour == 9 and (58 <= current_min <= 59)):
             ah_friday_grab = True
             grab_mode = True
-    print("-" * 36)
+    log("-" * 36)
     switch_map = [
         ("enable_sign",     "首页签到"),
         ("enable_ltzf",     "联通祝福"),
@@ -7406,31 +7440,31 @@ def main():
             status = "仅查询" if enabled else "关闭"
         else:
             status = "运行" if enabled else "关闭"
-        print(f"{label}设置为: {status}")
+        log(f"{label}设置为: {status}")
         if key == "enable_sign" and enabled and not query_only:
-            print(f"  └─ 抢话费券: {'开启' if sc.get('run_grab_coupon', False) else '关闭'}")
+            log(f"  └─ 抢话费券: {'开启' if sc.get('run_grab_coupon', False) else '关闭'}")
         if key == "enable_regional" and enabled and not query_only:
             ah_status = "开启" if rc.get("run_ah_friday", True) and AH_FRIDAY_AMOUNT else "关闭"
-            print(f"  └─ 安徽超级星期五: {ah_status}" + (f" (面额{AH_FRIDAY_AMOUNT}元)" if AH_FRIDAY_AMOUNT else ""))
+            log(f"  └─ 安徽超级星期五: {ah_status}" + (f" (面额{AH_FRIDAY_AMOUNT}元)" if AH_FRIDAY_AMOUNT else ""))
         if key == "enable_market" and enabled and not query_only and not grab_mode:
-            print(f"  └─ 浇水: {'开启' if mc.get('run_water', True) else '关闭'}")
-            print(f"  └─ 做任务: {'开启' if mc.get('run_task', True) else '关闭'}")
-            print(f"  └─ 会员中心: {'开启' if mc.get('run_member_center', True) else '关闭'}")
-            print(f"  └─ 抽奖: {'开启' if mc.get('run_draw', True) else '关闭'}")
-            print(f"  └─ 自动领奖: {'开启' if mc.get('run_claim', False) else '关闭'}")
-    print(f"推送通知设置为: {'开启' if globalConfig.get('enable_notify', True) else '关闭'}")
-    print(f"设备ID刷新: {'强制刷新' if globalConfig.get('refresh_device_id', False) else '使用缓存'}")
-    print("-" * 36)
-    print("")
+            log(f"  └─ 浇水: {'开启' if mc.get('run_water', True) else '关闭'}")
+            log(f"  └─ 做任务: {'开启' if mc.get('run_task', True) else '关闭'}")
+            log(f"  └─ 会员中心: {'开启' if mc.get('run_member_center', True) else '关闭'}")
+            log(f"  └─ 抽奖: {'开启' if mc.get('run_draw', True) else '关闭'}")
+            log(f"  └─ 自动领奖: {'开启' if mc.get('run_claim', False) else '关闭'}")
+    log(f"推送通知设置为: {'开启' if globalConfig.get('enable_notify', True) else '关闭'}")
+    log(f"设备ID刷新: {'强制刷新' if globalConfig.get('refresh_device_id', False) else '使用缓存'}")
+    log("-" * 36)
+    log("")
     if grab_mode:
-        print(f"⏰ [自动触发] 检测到抢兑时间点 ({hour}:{current_min:02d})，进入并发抢兑模式")
+        log(f"⏰ [自动触发] 检测到抢兑时间点 ({hour}:{current_min:02d})，进入并发抢兑模式")
         tasks_desc = []
         if sc.get("run_grab_coupon", False) and globalConfig.get("enable_sign", True):
             tasks_desc.append(f"{GRAB_AMOUNT}元话费券")
         if ah_friday_grab:
             tasks_desc.append(f"安徽{AH_FRIDAY_AMOUNT}元红包")
-        print(f"🚨🚨🚨 [抢兑模式已启动] 目标: {' + '.join(tasks_desc)} 🚨🚨🚨")
-        print("")
+        log(f"🚨🚨🚨 [抢兑模式已启动] 目标: {' + '.join(tasks_desc)} 🚨🚨🚨")
+        log("")
         from concurrent.futures import ThreadPoolExecutor
 
         def run_grab_task(u):
@@ -7450,28 +7484,28 @@ def main():
             else:
                 u.log("登录流程失败，跳过该账号")
 
-        print(f"🚀 [并发模式] 启动 {len(accounts)} 个账号同时抢兑...")
+        log(f"🚀 [并发模式] 启动 {len(accounts)} 个账号同时抢兑...")
         with ThreadPoolExecutor(max_workers=len(accounts)) as executor:
             futures = [executor.submit(run_grab_task, u) for u in users]
             for future in futures:
                 try:
                     future.result()
                 except Exception as e:
-                    print(f"[-] Thread Error: {e}")
+                    err(f"[-] Thread Error: {e}")
         do_notify(users)
         return
-    print("🚀 开始串行执行日常任务...")
-    print("")
+    log("🚀 开始串行执行日常任务...")
+    log("")
     for u in users:
-        print("")
-        print(f"🔄 正在初始化账号[{u.index}]...")
+        log("")
+        log(f"🔄 正在初始化账号[{u.index}]...")
         u.configure_proxy()
         if u.ensure_login():
-             print("")
-             print(f"------------------ 账号[{u.index}][{mask_str(u.account_mobile)}] ------------------")
-             print("")
+             log("")
+             log(f"------------------ 账号[{u.index}][{mask_str(u.account_mobile)}] ------------------")
+             log("")
              u.execute_daily_tasks(query_only=query_only)
-             print("⏳ 账号处理完毕，等待 2 秒...")
+             log("⏳ 账号处理完毕，等待 2 秒...")
              time.sleep(2)
         else:
              u.log("登录流程失败，跳过该账号")

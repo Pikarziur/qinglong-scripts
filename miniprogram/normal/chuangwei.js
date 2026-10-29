@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  创维会员中心
+# version: 2026-10-29a
 # cron: 15 5 * * *
 # 积分有效期：未知
 =========================================================*/
@@ -246,6 +247,14 @@ function logErr(msg)  { emit('ERROR', msg); }
 function section(title) { logInfo(`━━━ ${title} ━━━`); }
 
 // ========== 账号分隔标识：便于多账号日志区分定位 ==========
+// ========== 启动信息 ==========
+function logStartup(total) {
+  logInfo(ACC_RULE);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
+  logInfo(ACC_RULE);
+}
+const SCRIPT_VER = '2026-10-29a';
 const ACC_RULE = '='.repeat(70);
 function accBanner(idx, total, ident = '') {
   logInfo(ACC_RULE);

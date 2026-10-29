@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  海信爱家
+# version: 2026-10-29a
 # cron: 35 5 * * *
 # 积分有效期：每年12月31日
 =========================================================*/
@@ -169,6 +170,14 @@ function logWarn(msg) { emit('WARN', msg); }
 function logErr(msg)  { emit('ERROR', msg); }
 
 // ========== 账号分隔标识 ==========
+// ========== 启动信息 ==========
+function logStartup(total) {
+  logInfo(ACC_RULE);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
+  logInfo(ACC_RULE);
+}
+const SCRIPT_VER = '2026-10-29a';
 const ACC_RULE = '='.repeat(70);
 
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
@@ -2805,6 +2814,7 @@ async function runOneAccount(acc, idx, total) {
 }
 
 async function main() {
+  logStartup();
   if (!RAW_YYB_SERVER) {
     throw new Error('未设置变量 YYB_SERVER');
   }

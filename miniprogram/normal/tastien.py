@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  塔斯汀会员
+# version: 2026-10-29a
 # cron: 50 6 * * *
 # 积分有效期：获得起6个月内
 # =========================================================
@@ -211,6 +212,18 @@ def err(msg):  _emit("ERROR", msg)
 
 # ———————————— 账号分隔标识 ————————————
 # 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 
@@ -714,6 +727,7 @@ def run_account(index: int, token: str, login_result: Dict[str, Any], activity_i
 # 主流程
 # ────────────────────────────────────────────
 def main() -> int:
+    log_startup()
     entries = parse_yyb_entries()
     if not entries:
         err("❌ 未配置有效的 YYB_SERVER（格式：yyb-go:8000@账号标识，多账号换行 / 空格 / & 分隔）")

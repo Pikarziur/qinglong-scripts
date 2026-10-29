@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  长虹智慧家居
+# version: 2026-10-29a
 # cron: 10 5 * * *
 # 积分有效期：每年12月31日
 # =========================================================
@@ -176,6 +177,18 @@ def err(msg):   _emit("ERROR", msg)
 
 # ———————————— 账号分隔标识 ————————————
 # 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -408,6 +421,7 @@ class Changhong:
 
 
 def main():
+    log_startup()
     configure_network()
     lines = [x.strip() for x in os.getenv("YYB_SERVER", "").splitlines() if x.strip()]
     # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号

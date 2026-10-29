@@ -1,6 +1,16 @@
 #!/usr/bin/env node
+// ========== 账号分隔标识 ==========
+// ========== 启动信息 ==========
+function logStartup(total) {
+  log(ACC_RULE);
+  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  if (total !== undefined) log(`🔢 账号数量: ${total}`);
+  log(ACC_RULE);
+}
+const ACC_RULE = '='.repeat(70);
 /*=========================================================
 # name:  福利吧
+# version: 2026-10-29a
 # cron: 10 0 * * *
 =========================================================*/
 
@@ -187,7 +197,7 @@ const { URL } = require('url');
 // ========== 配置 ==========
 // 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 // （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-const SCRIPT_VER = '2026-10-01b';
+const SCRIPT_VER = '2026-10-29a';
 // 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
 const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -964,6 +974,7 @@ async function runProbe(user, pass) {
 
 // ========== 主流程 ==========
 async function main() {
+  logStartup();
     const summaryLines = [];
     const failLog = (m) => { emit('ERROR', m); summaryLines.push(m); };
     const okLog = (m) => { emit('INFO', m); summaryLines.push(m); };

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  雀巢
+# version: 2026-10-29a
 # cron: 30 6 * * *
 # 积分有效期：
 # =========================================================
@@ -104,6 +105,39 @@ import json
 import random
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
+# ========== 统一日志：[LEVEL] [QC] message ==========
+def _emit(level, msg):
+    line = "[%s] [QC] %s" % (level, msg)
+    print(line, flush=True)
+
+
+def log(msg):
+    _emit("INFO", msg)
+
+
+def warn(msg):
+    _emit("WARN", msg)
+
+
+def err(msg):
+    _emit("ERROR", msg)
+
 
 # 强制全局禁用所有系统代理环境变量
 for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
@@ -115,7 +149,7 @@ try:
     from httpx import AsyncHTTPTransport
     from httpx_socks import AsyncProxyTransport
 except ImportError:
-    print("❌ 缺少依赖库，请执行：pip install httpx[http2] httpx-socks python-dotenv")
+    err("❌ 缺少依赖库，请执行：pip install httpx[http2] httpx-socks python-dotenv")
     sys.exit(1)
 
 # ===================== 配置项 =====================
@@ -134,24 +168,24 @@ _all_servers = list(SERVERS)
 
 # 无有效地址直接退出并提示
 if len(SERVERS) == 0:
-    print("❌ 未配置环境变量 YYB_SERVER")
-    print("格式：地址@微信账号标识，多账号换行分隔")
-    print("192.168.1.21:8088")
-    print("10.30.9.49:8088")
+    err("❌ 未配置环境变量 YYB_SERVER")
+    log("格式：地址@微信账号标识，多账号换行分隔")
+    log("192.168.1.21:8088")
+    log("10.30.9.49:8088")
     sys.exit(1)
 
-print(f"✅ 读取到 {len(SERVERS)} 个 YYB Go 账号")
+log(f"✅ 读取到 {len(SERVERS)} 个 YYB Go 账号")
 
 # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
 if YYB_ONLY_REFS:
     _wanted = {int(r) for r in YYB_ONLY_REFS}
     SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
     if not SERVERS:
-        print(f"❌ YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_all_servers)} 个）")
+        err(f"❌ YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_all_servers)} 个）")
         sys.exit(1)
-    print(f"✅ 按 YYB_ONLY_REFS={YYB_ONLY_REFS} 筛选后剩 {len(SERVERS)} 个账号")
+    log(f"✅ 按 YYB_ONLY_REFS={YYB_ONLY_REFS} 筛选后剩 {len(SERVERS)} 个账号")
 
-print("-" * 60 + "\n")
+log("-" * 60 + "\n")
 
 def parse_yyb_go_entry(raw_value: str) -> Tuple[str, str]:
     value = str(raw_value or "").strip()
@@ -169,10 +203,10 @@ def parse_yyb_go_entry(raw_value: str) -> Tuple[str, str]:
 async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
     server, ref = parse_yyb_go_entry(server_entry)
     if not server:
-        print(f"❌ [{server_entry}] 获取code失败 | 服务地址为空")
+        err(f"❌ [{server_entry}] 获取code失败 | 服务地址为空")
         return None
     if not ref:
-        print(f"❌ [{server_entry}] 获取code失败 | 缺少openid/ref")
+        err(f"❌ [{server_entry}] 获取code失败 | 缺少openid/ref")
         return None
 
     url = f"http://{server}/wxapp/getCode"
@@ -183,16 +217,16 @@ async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
 
         code = (((res.get("data") or {}).get("result") or {}).get("code"))
         if res.get("code") != 0 or not code:
-            print(f"❌ [{server_entry}] 获取code失败 | 返回异常: {str(res)[:200]}")
+            err(f"❌ [{server_entry}] 获取code失败 | 返回异常: {str(res)[:200]}")
             return None
 
-        print(f"✅ [{server}] 获取code成功")
+        log(f"✅ [{server}] 获取code成功")
         return code
     except json.JSONDecodeError:
-        print(f"❌ [{server_entry}] 获取code失败 | 响应不是JSON格式")
+        err(f"❌ [{server_entry}] 获取code失败 | 响应不是JSON格式")
         return None
     except Exception as e:
-        print(f"❌ [{server_entry}] 获取code异常 | 原因: {str(e)}")
+        err(f"❌ [{server_entry}] 获取code异常 | 原因: {str(e)}")
         return None
 
 
@@ -285,10 +319,10 @@ async def validate_proxy(proxy_info: Dict[str, Any]) -> bool:
             response = await client.get(PROXY_VALIDATE_URL)
             if response.status_code == 200:
                 ip = response.json().get("origin", "未知")
-                print(f"✅ 代理验证通过 | 出口IP: {ip}")
+                log(f"✅ 代理验证通过 | 出口IP: {ip}")
                 return True
     except Exception as e:
-        print(f"⚠️ 代理验证失败 | 原因: {str(e)}")
+        warn(f"⚠️ 代理验证失败 | 原因: {str(e)}")
     return False
 
 def build_proxy_transport(proxy_info: Dict[str, Any]) -> Optional[AsyncProxyTransport]:
@@ -308,15 +342,15 @@ def build_proxy_transport(proxy_info: Dict[str, Any]) -> Optional[AsyncProxyTran
 
         return AsyncProxyTransport.from_url(proxy_url)
     except Exception as e:
-        print(f"❌ 代理生成失败 | 原因: {str(e)}")
+        err(f"❌ 代理生成失败 | 原因: {str(e)}")
         return None
 
 async def get_valid_proxy(account_name: str) -> Optional[Dict[str, Any]]:
     if not PROXY_API:
-        print(f"ℹ️ [{account_name}] 未配置代理 | 使用直连模式")
+        log(f"ℹ️ [{account_name}] 未配置代理 | 使用直连模式")
         return None
 
-    print(f"🔌 [{account_name}] 正在获取专属代理...")
+    log(f"🔌 [{account_name}] 正在获取专属代理...")
 
     for i in range(PROXY_RETRY_TIMES):
         try:
@@ -325,21 +359,21 @@ async def get_valid_proxy(account_name: str) -> Optional[Dict[str, Any]]:
             proxy_info = parse_proxy_response(response.text)
 
             if not proxy_info:
-                print(f"⚠️ [{account_name}] 第{i+1}次获取代理失败 | 响应格式错误")
+                warn(f"⚠️ [{account_name}] 第{i+1}次获取代理失败 | 响应格式错误")
                 continue
 
             if await validate_proxy(proxy_info):
                 return proxy_info
             else:
-                print(f"⚠️ [{account_name}] 第{i+1}次代理不可用 | 重试中...")
+                warn(f"⚠️ [{account_name}] 第{i+1}次代理不可用 | 重试中...")
 
         except Exception as e:
-            print(f"⚠️ [{account_name}] 第{i+1}次获取代理异常 | 原因: {str(e)}")
+            warn(f"⚠️ [{account_name}] 第{i+1}次获取代理异常 | 原因: {str(e)}")
 
         if i < PROXY_RETRY_TIMES - 1:
             await sleep(2000)
 
-    print(f"❌ [{account_name}] 代理获取失败 | 切换直连模式")
+    err(f"❌ [{account_name}] 代理获取失败 | 切换直连模式")
     return None
 
 # ===================== PushPlus推送函数 =====================
@@ -359,9 +393,9 @@ async def send_plusplus_notification(title: str, content: str) -> None:
                 }
             )
         if response.status_code == 200:
-            print("✅ 通知推送成功")
+            log("✅ 通知推送成功")
     except Exception as e:
-        print(f"❌ 通知推送失败 | 原因: {str(e)}")
+        err(f"❌ 通知推送失败 | 原因: {str(e)}")
 
 # ===================== 核心业务类 =====================
 class QueChaoBot:
@@ -379,7 +413,7 @@ class QueChaoBot:
 
     async def get_token_by_code(self, code: str) -> Optional[str]:
         """通过code换取token（简洁日志）"""
-        print(f"🔑 [{self.server}] 正在换取token...")
+        log(f"🔑 [{self.server}] 正在换取token...")
 
         headers = {
             "Host": "crm.nestlechinese.com",
@@ -421,15 +455,15 @@ class QueChaoBot:
             res = response.json()
             if res.get("access_token") and res.get("token_type", "Bearer").lower() == "bearer":
                 self.token = res["access_token"]
-                print(f"✅ [{self.server}] 获取token成功 | 模式: {mode}")
+                log(f"✅ [{self.server}] 获取token成功 | 模式: {mode}")
                 return self.token
             else:
                 raise Exception(f"业务错误: {res.get('error', '未知错误')}")
         except Exception as e:
-            print(f"⚠️ [{self.server}] {mode}获取token失败 | 原因: {str(e)}")
+            warn(f"⚠️ [{self.server}] {mode}获取token失败 | 原因: {str(e)}")
 
             if self.proxy_info and ENABLE_DIRECT_FALLBACK:
-                print(f"🌐 [{self.server}] 切换直连重试...")
+                warn(f"🌐 [{self.server}] 切换直连重试...")
                 try:
                     async with httpx.AsyncClient(
                         headers=headers,
@@ -442,12 +476,12 @@ class QueChaoBot:
                     res = response.json()
                     if res.get("access_token"):
                         self.token = res["access_token"]
-                        print(f"✅ [{self.server}] 直连获取token成功")
+                        log(f"✅ [{self.server}] 直连获取token成功")
                         return self.token
                     else:
                         raise Exception(f"直连业务错误: {res.get('error', '未知错误')}")
                 except Exception as e2:
-                    print(f"❌ [{self.server}] 直连获取token失败 | 原因: {str(e2)}")
+                    err(f"❌ [{self.server}] 直连获取token失败 | 原因: {str(e2)}")
 
         return None
 
@@ -486,7 +520,7 @@ class QueChaoBot:
 
     def check_response(self, response_data: Dict[str, Any]) -> bool:
         if response_data.get("errcode") != 200:
-            print(f"❌ [{self.server}] 请求失败 | 原因: {response_data.get('errmsg', '未知错误')}")
+            err(f"❌ [{self.server}] 请求失败 | 原因: {response_data.get('errmsg', '未知错误')}")
             return False
         return True
 
@@ -502,7 +536,7 @@ class QueChaoBot:
                 return response_data.get("data")
             return None
         except Exception as e:
-            print(f"❌ [{self.server}] 获取积分失败 | 原因: {str(e)}")
+            err(f"❌ [{self.server}] 获取积分失败 | 原因: {str(e)}")
             return None
 
     async def daily_sign(self) -> Tuple[bool, str]:
@@ -515,7 +549,7 @@ class QueChaoBot:
 
             if response_data.get("errcode") == 201:
                 sign_msg = "今日已签到"
-                print(f"ℹ️ [{self.server}] {sign_msg}")
+                log(f"ℹ️ [{self.server}] {sign_msg}")
                 return True, sign_msg
 
             if self.check_response(response_data):
@@ -523,16 +557,16 @@ class QueChaoBot:
                 sign_day = data.get("sign_day", 0)
                 sign_points = data.get("sign_points", 0)
                 sign_msg = f"签到成功 | 连续{sign_day}天 | +{sign_points}积分"
-                print(f"✅ [{self.server}] {sign_msg}")
+                log(f"✅ [{self.server}] {sign_msg}")
                 return True, sign_msg
             else:
                 sign_msg = f"签到失败: {response_data.get('errmsg', '未知错误')}"
-                print(f"❌ [{self.server}] {sign_msg}")
+                err(f"❌ [{self.server}] {sign_msg}")
                 return False, sign_msg
 
         except Exception as e:
             sign_msg = f"签到异常: {str(e)}"
-            print(f"❌ [{self.server}] {sign_msg}")
+            err(f"❌ [{self.server}] {sign_msg}")
             return False, sign_msg
 
     async def get_task_list(self) -> List[Dict[str, Any]]:
@@ -550,11 +584,11 @@ class QueChaoBot:
                     if task.get("task_status") == 0
                     and task.get("task_guid") not in SKIP_TASK_GUIDS
                 ]
-                print(f"📋 [{self.server}] 待完成任务: {len(uncompleted_tasks)}个")
+                log(f"📋 [{self.server}] 待完成任务: {len(uncompleted_tasks)}个")
                 return uncompleted_tasks
             return []
         except Exception as e:
-            print(f"❌ [{self.server}] 获取任务列表失败 | 原因: {str(e)}")
+            err(f"❌ [{self.server}] 获取任务列表失败 | 原因: {str(e)}")
             return []
 
     async def complete_task(self, task_guid: str, task_desc: str) -> Tuple[bool, str]:
@@ -567,16 +601,16 @@ class QueChaoBot:
 
             if self.check_response(response_data):
                 msg = f"完成【{task_desc}】 | +2积分"
-                print(f"✅ [{self.server}] {msg}")
+                log(f"✅ [{self.server}] {msg}")
                 return True, msg
             else:
                 msg = f"【{task_desc}】失败: {response_data.get('errmsg', '未知错误')}"
-                print(f"❌ [{self.server}] {msg}")
+                err(f"❌ [{self.server}] {msg}")
                 return False, msg
 
         except Exception as e:
             msg = f"【{task_desc}】异常: {str(e)}"
-            print(f"❌ [{self.server}] {msg}")
+            err(f"❌ [{self.server}] {msg}")
             return False, msg
 
     async def run(self) -> Dict[str, Any]:
@@ -592,9 +626,9 @@ class QueChaoBot:
             "error": ""
         }
 
-        print(f"\n{'='*40}")
-        print(f"[{self.server}] 开始执行任务")
-        print(f"{'='*40}")
+        log(f"\n{'='*40}")
+        log(f"[{self.server}] 开始执行任务")
+        log(f"{'='*40}")
 
         try:
             await sleep(random_int(2000, 5000))
@@ -619,7 +653,7 @@ class QueChaoBot:
                     return result
 
                 result["initial_score"] = initial_balance
-                print(f"💰 [{self.server}] 初始积分: {initial_balance}")
+                log(f"💰 [{self.server}] 初始积分: {initial_balance}")
 
                 # 每日签到
                 sign_success, sign_msg = await self.daily_sign()
@@ -643,23 +677,23 @@ class QueChaoBot:
                 if final_balance is not None:
                     result["final_score"] = final_balance
                     result["gained_score"] = final_balance - initial_balance
-                    print(f"📊 [{self.server}] 今日新增: {result['gained_score']}积分 | 当前: {final_balance}")
+                    log(f"📊 [{self.server}] 今日新增: {result['gained_score']}积分 | 当前: {final_balance}")
 
                 result["success"] = True
-                print(f"✅ [{self.server}] 任务执行完成")
+                log(f"✅ [{self.server}] 任务执行完成")
 
         except Exception as e:
             result["error"] = str(e)
-            print(f"❌ [{self.server}] 执行异常 | 原因: {str(e)}")
+            err(f"❌ [{self.server}] 执行异常 | 原因: {str(e)}")
 
         return result
 
 # ===================== 主程序 =====================
 async def main():
-    print('===== 雀巢会员俱乐部每日任务 =====\n')
-    print(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🔌 待执行账号: {len(SERVERS)} 个")
-    print(f"🌐 代理模式: {'单账号独立代理' if ENABLE_PER_ACCOUNT_PROXY else '全局共用代理'}\n")
+    log('===== 雀巢会员俱乐部每日任务 =====\n')
+    log(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log(f"🔌 待执行账号: {len(SERVERS)} 个")
+    log(f"🌐 代理模式: {'单账号独立代理' if ENABLE_PER_ACCOUNT_PROXY else '全局共用代理'}\n")
 
     global_proxy_info = None
     if not ENABLE_PER_ACCOUNT_PROXY and PROXY_API:
@@ -677,7 +711,7 @@ async def main():
         results.append(result)
 
         if index < len(SERVERS) - 1:
-            print(f"\n⏳ 等待2秒后执行下一个账号...")
+            log(f"\n⏳ 等待2秒后执行下一个账号...")
             await sleep(2000)
 
     # 汇总结果
@@ -697,16 +731,23 @@ async def main():
 
     await send_plusplus_notification("雀巢每日任务完成", notify_content)
 
-    print('\n' + '='*40)
-    print('🎉 所有账号执行完成')
-    print(f"📊 成功: {sum(1 for r in results if r['success'])}/{len(results)} 个")
-    print(f"💰 今日总新增: {sum(r['gained_score'] for r in results if r['success'])} 积分")
-    print('='*40)
+    log('\n' + '='*40)
+    log('🎉 所有账号执行完成')
+    log(f"📊 成功: {sum(1 for r in results if r['success'])}/{len(results)} 个")
+    log(f"💰 今日总新增: {sum(r['gained_score'] for r in results if r['success'])} 积分")
+    log('='*40)
+    log(ACC_RULE)
+    log("📊 [执行汇总] 雀巢 · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (
+        len(results),
+        sum(1 for r in results if r["success"]),
+        sum(1 for r in results if not r["success"])))
+    log(ACC_RULE)
 
 if __name__ == "__main__":
+    log_startup()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n⏹️ 用户中断执行")
+        log("\n⏹️ 用户中断执行")
     except Exception as e:
-        print(f"\n❌ 程序异常: {str(e)}")
+        err(f"\n❌ 程序异常: {str(e)}")

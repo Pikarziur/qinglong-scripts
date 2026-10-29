@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  京东Cookie
+# version: 2026-10-29a
 # cron: 0 */3 * * *
 # 积分有效期：
 # =========================================================
@@ -64,6 +65,39 @@ import urllib.parse
 import urllib.request
 from http.cookiejar import Cookie, CookieJar
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+# ========== 账号分隔标识 ==========
+# 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
+ACC_RULE = "=" * 70
+
+# ========== 统一日志：[LEVEL] [JD] message ==========
+def _emit(level, msg):
+    line = "[%s] [JD] %s" % (level, msg)
+    print(line, flush=True)
+
+
+def log(msg):
+    _emit("INFO", msg)
+
+
+def warn(msg):
+    _emit("WARN", msg)
+
+
+def err(msg):
+    _emit("ERROR", msg)
+
 
 # ========== 非敏感默认配置（环境变量优先） ==========
 
@@ -1557,6 +1591,7 @@ def _run_warm_round(cookie: str) -> Dict[str, Any]:
 
 # ==================== 主流程：取 CK、按配置保存、独立执行附加流程 ====================
 def main() -> int:
+    log_startup()
     """每账号独立处理：三态结果行 + 尾部汇总，账号状态一目了然。
 
     ✅ 取CK且写入（或仅获取模式）完成；⚠️ 需人工（取CK成功但写入失败，下次运行自动重试）；
@@ -1567,7 +1602,7 @@ def main() -> int:
         validate_config(mode)
         accounts = load_accounts()
     except Exception as exc:
-        print("❌ 初始化失败：" + safe_text(exc))
+        err("❌ 初始化失败：" + safe_text(exc))
         return 1
     # 账号序号白名单：按最终账号列表顺序从 1 开始编号，留空 [] 表示全部
     if YYB_ONLY_REFS:
@@ -1581,14 +1616,14 @@ def main() -> int:
     labels = {"local": "本地青龙", "remote": "远程青龙", "acquire": "仅获取（不写入）"}
     line = "─" * 46
     total = len(accounts)
-    print(line)
-    print(f"京东 Cookie 同步  {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"写入目标：{labels[mode]} ｜ 变量名：{QL_COOKIE_ENV_NAME} ｜ 账号数：{total}")
-    print(line)
+    log(line)
+    log(f"京东 Cookie 同步  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log(f"写入目标：{labels[mode]} ｜ 变量名：{QL_COOKIE_ENV_NAME} ｜ 账号数：{total}")
+    log(line)
     if mode == "acquire":
         missing = [name for name, value in zip(("QL_URL", "QL_CLIENT_ID", "QL_CLIENT_SECRET"),
                    (QL_URL, QL_CLIENT_ID, QL_CLIENT_SECRET)) if not value]
-        print("⚠️ 远程配置未填完整，本次仅取 CK；缺少：" + "、".join(missing))
+        warn("⚠️ 远程配置未填完整，本次仅取 CK；缺少：" + "、".join(missing))
     writer = None
     ok_n = warn_n = fail_n = 0
     warm_state = _warm_state()
@@ -1608,14 +1643,14 @@ def main() -> int:
     for index, account in enumerate(accounts, 1):
         ref = str(account.get("ref", "")) or "-"
         remark = str(account.get("remark", "") or "").strip()
-        print(f"▶ 账号 {index}/{total}（ref={ref}）" + (f"｜ {remark}" if remark else ""))
+        log(f"▶ 账号 {index}/{total}（ref={ref}）" + (f"｜ {remark}" if remark else ""))
         try:
             cookie = login_via_code(account)
             if not normalize_pt_cookie(cookie):
                 raise RuntimeError("登录结果缺少 pt_key/pt_pin")
         except Exception as exc:
             fail_n += 1
-            print("   ❌ 失败：" + brief_failure(exc))
+            err("   ❌ 失败：" + brief_failure(exc))
             time.sleep(1)
             continue
         pin = ""
@@ -1626,9 +1661,9 @@ def main() -> int:
         pin_tail = pin[-4:] if pin else "????"
         try:
             if mode == "acquire":
-                print(f"   ✅ 成功：取CK通过（pt_pin 尾号 {pin_tail}），仅获取模式未写入")
+                log(f"   ✅ 成功：取CK通过（pt_pin 尾号 {pin_tail}），仅获取模式未写入")
                 if SHOW_CK:
-                    print(cookie)
+                    log(cookie)
                 ok_n += 1
             else:
                 if writer is None:
@@ -1640,7 +1675,7 @@ def main() -> int:
                 ok_n += 1
         except Exception as exc:
             warn_n += 1
-            print(f"   ⚠️ 需人工：取CK通过（pt_pin 尾号 {pin_tail}）但写入失败：" + brief_failure(exc))
+            warn(f"   ⚠️ 需人工：取CK通过（pt_pin 尾号 {pin_tail}）但写入失败：" + brief_failure(exc))
         # 附加流程：每账号每天一次，进度即时落盘；中断后当天重跑只补未完成账号。
         # 结果不进入日志与退出码。
         if ref not in warm_done:
@@ -1654,9 +1689,12 @@ def main() -> int:
             warm_done.add(ref)
             _warm_save({"date": warm_state["date"], "done": sorted(warm_done)})
         time.sleep(1)
-    print(line)
-    print(f"结果汇总：✅ 成功 {ok_n} ｜ ⚠️ 需人工 {warn_n} ｜ ❌ 失败 {fail_n}（共 {total}）")
-    print(line)
+    log(line)
+    err(f"结果汇总：✅ 成功 {ok_n} ｜ ⚠️ 需人工 {warn_n} ｜ ❌ 失败 {fail_n}（共 {total}）")
+    log(line)
+    log(ACC_RULE)
+    log("📊 [执行汇总] 京东Cookie · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok_n, fail_n))
+    log(ACC_RULE)
     return 1 if fail_n else 0
 
 

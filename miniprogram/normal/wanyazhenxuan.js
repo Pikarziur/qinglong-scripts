@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  丸丫甄选
+# version: 2026-10-29a
 # cron: 55 6 * * *
 # 积分有效期：1年
 =========================================================*/
@@ -92,6 +93,14 @@ function err(msg)  { emit('ERROR', '❌', msg); }
 // ===== adapter end =====
 
 // ========== 账号分隔标识：便于多账号日志区分定位 ==========
+// ========== 启动信息 ==========
+function logStartup(total) {
+  log(ACC_RULE);
+  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  if (total !== undefined) log(`🔢 账号数量: ${total}`);
+  log(ACC_RULE);
+}
+const SCRIPT_VER = '2026-10-29a';
 const ACC_RULE = '='.repeat(70);
 function accBanner(idx, total, ident = '') {
     log(ACC_RULE);

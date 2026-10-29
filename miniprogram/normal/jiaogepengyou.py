@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  交个朋友会员商城
+# version: 2026-10-29a
 # cron: 5 6 * * *
 # 积分有效期：获得起1年后1日
 # =========================================================
@@ -26,6 +27,7 @@
 
 
 import os
+from datetime import datetime
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -169,6 +171,18 @@ def err(msg):   _emit("ERROR", msg)
 
 # ———————————— 账号分隔标识 ————————————
 # 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
+def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -419,6 +433,7 @@ def parse_accounts() -> List[Dict[str, Any]]:
 
 
 def main() -> int:
+    log_startup()
     results: List[Dict] = []
     accounts = parse_accounts()
     log(f"🚀 {SCRIPT_NAME} 开始 · 共 {len(accounts)} 个账号")

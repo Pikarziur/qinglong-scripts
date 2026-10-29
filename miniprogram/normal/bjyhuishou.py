@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  白鲸鱼旧衣服回收
+# version: 2026-10-29a
 # cron: 0 5 * * *
 # 积分有效期：永久有效
 # =========================================================
@@ -351,6 +352,14 @@ def err(msg):  _emit("ERROR", msg)
 # ────────────────────────────────────────────
 # 账号分隔标识 + 账号白名单
 # ────────────────────────────────────────────
+# ========== 启动信息 ==========
+def log_startup(total: int = 0) -> None:
+    log(_ACC_RULE)
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    if total:
+        log("🔢 账号数量: %d" % total)
+    log(_ACC_RULE)
+SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 
 # 账号白名单：按 YYB_SERVER 的行序（1 起）筛选本次要跑的账号。
@@ -436,7 +445,8 @@ USER_AGENT = (
 
 
 def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+
 
 
 def sleep(seconds: float) -> None:
@@ -1372,6 +1382,7 @@ def _finish(total: int, ok_count: int) -> int:
 
 
 def main() -> int:
+    log_startup()
     log_title()
 
     accounts = list(SERVERS)
