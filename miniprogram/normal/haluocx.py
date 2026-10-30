@@ -261,7 +261,9 @@ def pick_user_agent() -> str:
 # 小工具
 # --------------------------------------------------------------------------- #
 def now_text() -> str:
+    # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 

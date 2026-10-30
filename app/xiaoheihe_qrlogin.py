@@ -98,7 +98,7 @@ _QN_ERRORS = []
 # 统一日志
 # ────────────────────────────────────────────
 def _emit(level, msg):
-    print("[%s] [XHHQR] %s" % (level, msg))
+    print("[%s] [XHHQR] %s" % (level, msg), flush=True)
 
 
 def log(msg):

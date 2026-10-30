@@ -239,6 +239,7 @@ function parseYybGoEntry(rawValue) {
 }
 
 !(async () => {
+  logStartup();
     if (typeof $request !== "undefined") {
         await GetRewrite();
     } else {

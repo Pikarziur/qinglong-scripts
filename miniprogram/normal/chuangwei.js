@@ -962,6 +962,7 @@ async function runOne(account, idx) {
 }
 
 (async () => {
+  logStartup();
   const raw = process.env.YYB_SERVER || '';
   if (!raw.trim()) {
     logErr('❌ 未设置环境变量 YYB_SERVER；格式：YYB-Go-Enhanced地址@账号标识，多账号每行一条');

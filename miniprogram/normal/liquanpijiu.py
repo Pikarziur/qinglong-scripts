@@ -351,6 +351,8 @@ yyb = _YybCompat()
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+log_startup()
+
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
@@ -643,7 +645,6 @@ def run_account(openid, index):
 
 
 def main():
-    log_startup()
     entries = ACCOUNT_REFS
 
     if not entries:
@@ -674,6 +675,7 @@ def main():
         f"账号 {len(entries)} ｜ 成功 {ok_count} ｜ 失败 {len(entries) - ok_count}",
         logger=log,
     )
+
 
 
 if __name__ == "__main__":

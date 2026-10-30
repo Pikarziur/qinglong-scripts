@@ -719,6 +719,7 @@ async function printSummary(results) {
 }
 
 !(async () => {
+  logStartup();
     const results = [];
     await $.checkEnv(ckName);
     for (let _i = 0; _i < $.userList.length; _i++) {

@@ -663,6 +663,9 @@ async function finishSummary(total, okCount){
 }
 
 async function main(){
+  logInfo(ACC_RULE);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  logInfo(ACC_RULE);
   const raw = process.env.YYB_SERVER || '';
   if (!raw.trim()){ logErr('❌ 未配置 YYB_SERVER，格式：地址@账号ref，多账号一行一个'); await finishSummary(0, 0); process.exitCode = 1; return; }
   const configured = parseAccounts(raw);
@@ -685,8 +688,6 @@ async function main(){
   const total = accounts.length;
   logInfo(ACC_RULE);
   logInfo(`🚀 平安i动 健康币 · 共 ${total} 个账号`);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
-  logInfo(ACC_RULE);
 
   let okCount = 0;
   for (let idx = 0; idx < accounts.length; idx++){

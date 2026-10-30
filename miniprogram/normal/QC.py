@@ -167,7 +167,10 @@ if env_YYB_SERVER:
 _all_servers = list(SERVERS)
 
 # 无有效地址直接退出并提示
+log_startup()
+
 if len(SERVERS) == 0:
+
     err("❌ 未配置环境变量 YYB_SERVER")
     log("格式：地址@微信账号标识，多账号换行分隔")
     log("192.168.1.21:8088")
@@ -743,8 +746,8 @@ async def main():
         sum(1 for r in results if not r["success"])))
     log(ACC_RULE)
 
+
 if __name__ == "__main__":
-    log_startup()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

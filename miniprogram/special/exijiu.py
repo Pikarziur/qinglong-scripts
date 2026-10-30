@@ -246,11 +246,11 @@ def now_text() -> str:
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
-    log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log.info(_ACC_RULE)
+    log.info("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
     if total:
-        log("🔢 账号数量: %d" % total)
-    log(_ACC_RULE)
+        log.info("🔢 账号数量: %d" % total)
+    log.info(_ACC_RULE)
 SCRIPT_VER = "2026-10-29a"
 _ACC_RULE = "=" * 70
 

@@ -383,23 +383,34 @@ def ensure_summary(text, is_js, site):
 def detect_names(text, is_js):
     """探测脚本里已有的常量名与日志函数名, 让注入的代码跟随既有命名。
 
-    返回 (acc_name, log_fn):
+    返回 (acc_name, log_fn, ver_name):
       acc_name  分隔线常量名, 如 ACC_RULE / _ACC_RULE
       log_fn    日志函数名, 如 log / logInfo
+      ver_name  版本常量名, 如 SCRIPT_VER / SCRIPT_VERSION
     """
     acc = "ACC_RULE"
     m = re.search(r"^\s*(?:const\s+)?(_?[A-Za-z_]*ACC[A-Za-z_]*)\s*=\s*['\"]=", text, re.M)
     if m:
         acc = m.group(1)
     log_fn = "logInfo" if is_js else "log"
+    log_is_logger = False
     if is_js:
         if not re.search(r"function logInfo\b", text):
             if re.search(r"function log\b", text):
                 log_fn = "log"
     else:
-        if not re.search(r"^def log\(msg", text, re.M) and re.search(r"^def log\(", text, re.M):
+        # log = logging.getLogger(__name__) → log 是 Logger 对象, 用法是 log.info(...)
+        if re.search(r"^\s*log\s*=\s*logging\.getLogger", text, re.M):
+            log_is_logger = True
+            log_fn = "log.info"
+        elif not re.search(r"^def log\(msg", text, re.M) and re.search(r"^def log\(", text, re.M):
             log_fn = "log"
-    return acc, log_fn
+    # 版本常量名: 跟随文件里已有的(SCRIPT_VER / SCRIPT_VERSION)
+    ver_name = "SCRIPT_VER"
+    mv = re.search(r"^\s*(?:const\s+)?(SCRIPT_VER(?:SION)?)\s*=", text, re.M)
+    if mv:
+        ver_name = mv.group(1)
+    return acc, log_fn, ver_name
 
 
 def ensure_startup(text, is_js, ver, use_self=False):
@@ -415,20 +426,20 @@ def ensure_startup(text, is_js, ver, use_self=False):
         return text, False
     # 已有 SCRIPT_VER / SCRIPT_VERSION 常量 → 不再重复声明(否则 JS 会报
     # "Identifier 'SCRIPT_VER' has already been declared")
-    has_ver_const = bool(re.search(r"SCRIPT_?VER(?:SION)?\s*=\s*['\"]", text))
-    acc, lf = detect_names(text, is_js)
+    acc, lf, ver_name = detect_names(text, is_js)
+    has_ver_const = bool(re.search(r"^\s*(?:const\s+)?%s\s*=" % re.escape(ver_name), text, re.M))
     if is_js:
         block = (
             "// ========== 启动信息 ==========\n"
             "function logStartup(total) {\n"
             "  %s(%s);\n"
-            "  %s(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);\n"
+            "  %s(`📌 脚本版本: ${%s} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);\n"
             "  if (total !== undefined) %s(`🔢 账号数量: ${total}`);\n"
             "  %s(%s);\n"
             "}"
-        ) % (lf, acc, lf, lf, lf, acc)
+        ) % (lf, acc, lf, ver_name, lf, lf, acc)
         if not has_ver_const:
-            block += "\nconst SCRIPT_VER = '" + (ver or "2026-01-01a") + "';"
+            block += "\nconst " + ver_name + " = '" + (ver or "2026-01-01a") + "';"
         new = insert_after_line(text, r"^const\s+%s\s*=.*\.repeat\(\d+\);(?=\r?$)" % re.escape(acc), block)
     elif use_self:
         # 类结构脚本: 日志走类方法 self.log(...), 插到「真正被调用的那个类」里
@@ -445,7 +456,7 @@ def ensure_startup(text, is_js, ver, use_self=False):
             "    # ========== 启动信息 ==========\n"
             "    def log_startup(self, total: int = 0) -> None:\n"
             "        self.log(%s)\n"
-            "        self.log(\"📌 脚本版本: %%s ｜ %%s\" %% (SCRIPT_VER, now_text()))\n"
+            "        self.log(\"📌 脚本版本: %%s ｜ %%s\" %% (%s, now_text()))\n" % ver_name +
             "        if total:\n"
             "            self.log(\"🔢 账号数量: %%d\" %% total)\n"
             "        self.log(%s)\n"
@@ -456,19 +467,19 @@ def ensure_startup(text, is_js, ver, use_self=False):
         new = text[:pos] + block.replace("\n", eol) + eol + text[pos:]
         if not has_ver_const:
             new = insert_after_line(new, r"^_?ACC_RULE = \"=\" \* 70(?=\r?$)",
-                                    "SCRIPT_VER = \"" + (ver or "2026-01-01a") + "\"")
+                                    ver_name + " = \"" + (ver or "2026-01-01a") + "\"")
     else:
         block = (
             "# ========== 启动信息 ==========\n"
             "def log_startup(total: int = 0) -> None:\n"
             "    log(%s)\n"
-            "    log(\"📌 脚本版本: %%s ｜ %%s\" %% (SCRIPT_VER, now_text()))\n"
+            "    log(\"📌 脚本版本: %%s ｜ %%s\" %% (%s, now_text()))\n" % ver_name +
             "    if total:\n"
             "        log(\"🔢 账号数量: %%d\" %% total)\n"
             "    log(%s)"
         ) % (acc, acc)
         if not has_ver_const:
-            block += "\nSCRIPT_VER = \"" + (ver or "2026-01-01a") + "\""
+            block += "\n" + ver_name + " = \"" + (ver or "2026-01-01a") + "\""
         new = insert_after_line(text, r"^_?ACC_RULE = \"=\" \* 70(?=\r?$)", block)
     return (new, True) if new else (text, False)
 
@@ -478,19 +489,37 @@ def ensure_now_text(text):
 
     已有的 now_text 若直接用 datetime.now(), 在同时 `import datetime` 的脚本里
     会因 datetime 被模块覆盖而报 AttributeError —— 一并改成兼容写法。
+
+    ⚠️ 必须**整函数体**替换, 不能只替换第一行:
+    只替换第一行会把 return 语句顶掉, 让 now_text() 返回 None
+    (启动行就会打印成「脚本版本: xxx ｜ None」)。
     """
-    m = re.search(r"^def now_text\([^)]*\)[^:]*:\s*\r?\n(    [^\r\n]*)", text, re.M)
-    if m:
-        body = m.group(1)
-        if "datetime.now()" in body and "hasattr" not in body:
-            eol = _eol(text)
-            fixed = ('    _dt = datetime.now() if hasattr(datetime, "now") '
-                     'else datetime.datetime.now()')
-            # 整行替换(含行尾), 保持 CRLF
-            new = text[:m.start(1)] + fixed + eol + text[m.end(1):]
-            return new, True
-        return text, False
     eol = _eol(text)
+    m = re.search(r"^def now_text\([^)]*\)[^:]*:\s*\r?\n", text, re.M)
+    if m:
+        body = m.group(0)
+        start = m.end()
+        # 定位函数体范围: 连续的缩进行
+        lines = text[start:].split(eol)
+        end_line = 0
+        for i, l in enumerate(lines):
+            if l.strip() and not l.startswith((" ", "\t")):
+                end_line = i
+                break
+            if not l.strip() and i > 0:
+                end_line = i
+                break
+            end_line = i + 1
+        old_body = eol.join(lines[:end_line])
+        if "hasattr" in old_body:
+            return text, False                      # 已是兼容写法
+        fixed = (
+            "    # 兼容两种导入: from datetime import datetime / import datetime\n"
+            "    _dt = datetime.now() if hasattr(datetime, \"now\") else datetime.datetime.now()\n"
+            "    return _dt.strftime(\"%Y-%m-%d %H:%M:%S\")"
+        ).replace("\n", eol)
+        new = text[:start] + fixed + eol + text[start + len(old_body):]
+        return new, True
     block = (
         "def now_text() -> str:\n"
         "    # 兼容两种导入: from datetime import datetime / import datetime\n"
@@ -514,10 +543,12 @@ def ensure_now_text(text):
 def ensure_startup_call(text, is_js, use_self=False):
     """在入口处插入 log_startup()/logStartup() 调用, 避免定义了却不用。
 
-    入口有三种形态:
+    入口有四种形态(按优先级):
       ① def main() / async function main()   —— 插在函数体第一行
-      ② if __name__ == "__main__": 块        —— 插在该块内第一行
-      ③ auto_task.run() 调用                 —— 插在调用前一行
+      ② 顶层 IIFE (async () => { ... })()     —— 插在 IIFE 函数体第一行
+      ③ if __name__ == "__main__": 块        —— 插在该块内第一行
+      ④ auto_task.run() 调用                 —— 插在调用前一行
+      ⑤ 模块级(脚本在 import 后就可能 sys.exit) —— 插在 import 块之后
     use_self=True 时调用写成 auto_task.log_startup()。
     """
     call = "logStartup(" if is_js else "log_startup("
@@ -535,6 +566,11 @@ def ensure_startup_call(text, is_js, use_self=False):
         # 注意: 正则里的 \s* 会把行尾的 \r 一起吞掉, m.end() 落在 \n 之前。
         # 插入点必须用 _line_end 重新定位到整行行尾之后, 否则会多出一个 \r(\r\r\n)。
         m = re.search(r"^async function main\(\)\s*\{\s*$", text, re.M)
+        if m:
+            pos = _line_end(text, m.end())
+            return text[:pos] + "  " + stmt + eol + text[pos:], True
+        # 顶层 IIFE: (async () => { ... })() / !(async () => { ...)  —— 插到函数体第一行
+        m = re.search(r"^!?\(?\s*async\s*\(\s*\)\s*=>\s*\{(?=\r?$)", text, re.M)
         if m:
             pos = _line_end(text, m.end())
             return text[:pos] + "  " + stmt + eol + text[pos:], True
@@ -566,7 +602,7 @@ def ensure_startup_call(text, is_js, use_self=False):
             stmt2 = ("    %s.log_startup()" % var) if use_self else "    log_startup()"
             return text[:pos] + stmt2 + eol + text[pos:], True
 
-    # ② __main__ 块(无 .run() 形态)
+    # ④ __main__ 块(无 .run() 形态)
     if m_main:
         pos = _line_end(text, m_main.end())
         return text[:pos] + "    " + stmt + eol + text[pos:], True
@@ -763,6 +799,14 @@ def main():
         new_text = t
 
         if new_text != text:
+            # 自检: now_text() 必须有 return, 否则会返回 None
+            # (启动行会打印成「脚本版本: xxx ｜ None」)
+            if not is_js:
+                mn = re.search(r"^def now_text\([^)]*\)[^:]*:\s*\r?\n((?:    [^\r\n]*\r?\n)+)",
+                               new_text, re.M)
+                if mn and "return" not in mn.group(1):
+                    print("  ❌ %s: now_text() 缺少 return, 已跳过" % rel)
+                    continue
             changed.append((rel, notes))
             if not args.dry_run:
                 with open(path, "wb") as f:
