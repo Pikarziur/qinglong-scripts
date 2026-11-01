@@ -1,0 +1,40 @@
+# ────────────── 缓存与本地状态（绝不能提交）──────────────
+# Token / 凭据缓存：本地开发时落在仓库根的 .ql_cache/（青龙容器内为 /ql/data/config/ql_cache/）
+.ql_cache/
+# 各脚本历史上放在同目录的缓存文件（部分脚本仍在用，一并忽略避免误提交 token）
+*cookie.json
+*_cookie.json
+*cookies.json
+*_cookies.json
+*_token_cache.json
+*_tokens.json
+*_sessions.json
+*_cache.json
+*.state
+.cache/
+# 答题/抽奖等本地状态
+*_monthly.json
+*_state.json
+*_answers.json
+*_history.json
+
+# ────────────── Python ──────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ────────────── Node ──────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ────────────── 编辑器 / 系统 ──────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

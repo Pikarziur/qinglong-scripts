@@ -3,7 +3,7 @@
 # =========================================================
 # name:  小米社区
 # version: 2026-10-29a
-# cron: 20 6 * * *
+# cron: 36 5 * * *
 # 积分有效期：无
 # =========================================================
 
@@ -278,65 +278,72 @@ def entries():
 
 def get_code(server, ref):
     host = server if server.startswith(("http://", "https://")) else f"http://{server}"
-    # 用户信息操作可能较慢，必须先完成，再最后获取短时有效的一次性 code。
-    flow_start(1, "从 YYB-Go 获取微信授权信息")
-    user_info = requests.post(
-        f"{host}/wxapp/operateWxData",
-        json={
-            "ref": ref,
-            "app_id": APPID,
-            "payload": {
-                "api_name": "webapi_getuserinfo",
-                "data": {"lang": "zh_CN", "version": "3.10.3"},
-                "from_component": True,
-                "operate_directly": False,
-                "with_credentials": True,
+    # 用户信息（operateWxData / getUserProfile）属受限业务操作：上游仅允许真实点击触发，
+    # 协议代调常被 -14 拒绝。它只用于设置 userInfo Cookie 展示微信身份，不参与登录鉴权，
+    # 因此失败不应拖垮整个脚本 —— 降级为空 userInfo 继续走 getCode + 登录。
+    flow_start(1, "从 YYB-Go 获取微信授权信息（失败可降级）")
+    user_result = {}
+    try:
+        user_info = requests.post(
+            f"{host}/wxapp/operateWxData",
+            json={
+                "ref": ref,
+                "app_id": APPID,
+                "payload": {
+                    "api_name": "webapi_getuserinfo",
+                    "data": {"lang": "zh_CN", "version": "3.10.3"},
+                    "from_component": True,
+                    "operate_directly": False,
+                    "with_credentials": True,
+                },
             },
-        },
-        timeout=20,
-    )
-    user_info.raise_for_status()
-    user_body = user_info.json()
-    user_result = user_body.get("data", {}).get("result")
-    if user_body.get("code") != 0 or not isinstance(user_result, dict):
-        raise RuntimeError(f"YYB 获取微信用户信息失败（响应码：{user_body.get('code')}）")
-    if os.getenv("MI_COMMUNITY_DEBUG") == "1":
-        warn("调试：YYB用户信息字段=" + ",".join(
-            f"{key}:{type(value).__name__}:{len(value) if isinstance(value, (str, list, dict)) else '-'}"
-            for key, value in sorted(user_result.items())
-        ))
-    if not user_result.get("rawData") and isinstance(user_result.get("data"), str):
-        try:
+            timeout=20,
+        )
+        user_info.raise_for_status()
+        user_body = user_info.json()
+        user_result = user_body.get("data", {}).get("result")
+        if user_body.get("code") != 0 or not isinstance(user_result, dict):
+            raise RuntimeError(f"YYB 获取微信用户信息失败（响应码：{user_body.get('code')}）")
+        if os.getenv("MI_COMMUNITY_DEBUG") == "1":
+            warn("调试：YYB用户信息字段=" + ",".join(
+                f"{key}:{type(value).__name__}:{len(value) if isinstance(value, (str, list, dict)) else '-'}"
+                for key, value in sorted(user_result.items())
+            ))
+        if not user_result.get("rawData") and isinstance(user_result.get("data"), str):
             try:
-                decoded = json.loads(user_result["data"])
-            except json.JSONDecodeError:
-                decoded = json.loads(base64.b64decode(user_result["data"]).decode("utf-8"))
-            profile = decoded.get("data", decoded)
-            if isinstance(profile, str):
-                profile = json.loads(profile)
-            if isinstance(profile, dict):
-                user_result["userInfo"] = profile
-                user_result["rawData"] = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
-                user_result.setdefault("errMsg", "getUserInfo:ok")
-        except (ValueError, TypeError, UnicodeDecodeError):
-            pass
-    if user_result.get("cloud_id") and not user_result.get("cloudID"):
-        user_result["cloudID"] = user_result["cloud_id"]
-    if not user_result.get("rawData"):
-        profile = user_result.get("userInfo") if isinstance(user_result.get("userInfo"), dict) else {}
-        user_result["userInfo"] = profile
-        user_result["rawData"] = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
-        user_result.setdefault("errMsg", "getUserInfo:ok")
-    required_user_fields = {"encryptedData", "iv", "rawData", "signature"}
-    missing_user_fields = required_user_fields.difference(user_result)
-    if missing_user_fields:
-        raise RuntimeError(f"YYB 微信用户信息缺少字段：{','.join(sorted(missing_user_fields))}")
-    user_result = {
-        key: user_result[key]
-        for key in ("cloudID", "encryptedData", "iv", "signature", "userInfo", "rawData", "errMsg")
-        if key in user_result
-    }
-    flow_ok("微信授权信息获取成功")
+                try:
+                    decoded = json.loads(user_result["data"])
+                except json.JSONDecodeError:
+                    decoded = json.loads(base64.b64decode(user_result["data"]).decode("utf-8"))
+                profile = decoded.get("data", decoded)
+                if isinstance(profile, str):
+                    profile = json.loads(profile)
+                if isinstance(profile, dict):
+                    user_result["userInfo"] = profile
+                    user_result["rawData"] = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+                    user_result.setdefault("errMsg", "getUserInfo:ok")
+            except (ValueError, TypeError, UnicodeDecodeError):
+                pass
+        if user_result.get("cloud_id") and not user_result.get("cloudID"):
+            user_result["cloudID"] = user_result["cloud_id"]
+        if not user_result.get("rawData"):
+            profile = user_result.get("userInfo") if isinstance(user_result.get("userInfo"), dict) else {}
+            user_result["userInfo"] = profile
+            user_result["rawData"] = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+            user_result.setdefault("errMsg", "getUserInfo:ok")
+        required_user_fields = {"encryptedData", "iv", "rawData", "signature"}
+        missing_user_fields = required_user_fields.difference(user_result)
+        if missing_user_fields:
+            raise RuntimeError(f"YYB 微信用户信息缺少字段：{','.join(sorted(missing_user_fields))}")
+        user_result = {
+            key: user_result[key]
+            for key in ("cloudID", "encryptedData", "iv", "signature", "userInfo", "rawData", "errMsg")
+            if key in user_result
+        }
+        flow_ok("微信授权信息获取成功")
+    except Exception as exc:
+        warn(f"⚠️ 微信授权信息获取失败（{exc}），降级为空 userInfo 继续登录；若后续登录异常再排查")
+        user_result = {}
     flow_start(2, "从 YYB-Go 获取一次性微信 code")
     response = requests.post(
         f"{host}/wxapp/getCode",

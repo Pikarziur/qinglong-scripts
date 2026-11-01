@@ -3,7 +3,7 @@
 # =========================================================
 # name:  中通快递
 # version: 2026-10-29a
-# cron: 5 7 * * *
+# cron: 30 6 * * *
 # 积分有效期：次年6月30日
 # =========================================================
 #
@@ -46,6 +46,25 @@ from datetime import datetime
 # 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
 import os as _os
 import sys as _sys
+
+# ———————————— Token 缓存（仓库根 ql_cache.py）————————————
+# 缓存登录 token，避免每次都调 YYBGO 取 code（取码会撞 YYBGO 的 5 分钟恢复冷却）。
+# 缓存文件放在 /ql/data/config/ql_cache/<app_id>.json（青龙容器内，仓库外，不受脚本更新影响）。
+_qc_cache = None
+_qc_cache_err = ""
+try:
+    _qc_here = os.path.dirname(os.path.abspath(__file__))
+    _qc_dirs = [_qc_here, os.path.dirname(_qc_here), os.path.dirname(os.path.dirname(_qc_here))]
+    for _qc_p in _qc_dirs:
+        if _qc_p and os.path.isfile(os.path.join(_qc_p, "ql_cache.py")):
+            if _qc_p not in _sys.path:
+                _sys.path.insert(0, _qc_p)
+            from ql_cache import TokenCache as _qc_TokenCache
+            _qc_cache = _qc_TokenCache
+            break
+except Exception as _qc_e:
+    _qc_cache = None
+    _qc_cache_err = str(_qc_e)
 # ========== 账号分隔标识 ==========
 # 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
 def now_text() -> str:
@@ -187,8 +206,63 @@ class AutoTask:
         self.wx_appid = "wx7ddec43d9d27276a" # 微信小程序id
         self.account_results = []
         self.host = "hdgateway.zto.com"
+        self._cache_obj = None
+        self._last_token = ""
         self.user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.75(0x18004b21) NetType/WIFI Language/zh_CN"
 
+
+    # ========== Token 缓存 ==========
+    def _cache(self):
+        """按 app_id 隔离的 token 缓存对象（懒加载）。"""
+        if self._cache_obj is None and _qc_cache is not None:
+            try:
+                self._cache_obj = _qc_cache(self.wx_appid, self.site_name)
+            except Exception as exc:
+                self.log(f"⚠️ [缓存] 初始化失败: {exc}", level="warning")
+                self._cache_obj = False
+        return self._cache_obj or None
+
+    def cache_get_token(self, server, ref):
+        """取缓存 token；无缓存/已过期/模块不可用时返回 None。"""
+        cache = self._cache()
+        if not cache:
+            return None
+        try:
+            entry = cache.get(server, ref)
+        except Exception as exc:
+            self.log(f"⚠️ [缓存] 读取失败: {exc}", level="warning")
+            return None
+        if entry and entry.token:
+            self.log(f"✅ [缓存] 命中 token（{ref}）")
+            return entry.token
+        return None
+
+    def cache_set_token(self, server, ref, token, expire_time=""):
+        """写入 token 到缓存。"""
+        cache = self._cache()
+        if not cache or not token:
+            return False
+        try:
+            ok = cache.set(server, ref, token, expire_time)
+            if ok:
+                self.log(f"💾 [缓存] token 已保存（{ref}）")
+            return ok
+        except Exception as exc:
+            self.log(f"⚠️ [缓存] 保存失败: {exc}", level="warning")
+            return False
+
+    def cache_del_token(self, server, ref):
+        """删除缓存 token（登录失效时调用）。"""
+        cache = self._cache()
+        if not cache:
+            return False
+        try:
+            cache.delete(server, ref)
+            self.log(f"🗑️ [缓存] token 已清除（{ref}）")
+            return True
+        except Exception as exc:
+            self.log(f"⚠️ [缓存] 清除失败: {exc}", level="warning")
+            return False
     def log(self, msg, level="info"):
         prefix = {"error": "ERROR", "warning": "WARN"}.get(level, "INFO")
         line = f"[{prefix}] [ZTKD] {msg}"
@@ -314,6 +388,7 @@ class AutoTask:
                     self.log("❌ [登录] 响应缺少 token", level="error")
                     return False
                 session.headers["X-Token"] = token
+                self._last_token = token
                 return True
             else:
                 self.log(f"❌ [登录] 发生错误: {response_json['message']}", level="error")
@@ -353,8 +428,12 @@ class AutoTask:
             self.log(f"💥 [签到] 发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
             return False, "请求异常"
 
-    def get_points(self, session):
-        """查询当前会员积分，失败时返回 None。"""
+    def get_points(self, session, quiet=False):
+        """查询当前会员积分，失败时返回 None。
+
+        quiet=True 时不打印告警（用于缓存 token 探活 —— 探活失败是正常分支，
+        不该刷 WARN 日志、更不该触发错误推送）。
+        """
         try:
             response = session.post(
                 "https://membergateway.zto.com/member/getMemberPoints",
@@ -366,9 +445,11 @@ class AutoTask:
             points = (response_json.get("data") or {}).get("totalPoint")
             if response_json.get("success") is True and isinstance(points, (int, float)):
                 return int(points)
-            self.log("⚠️ [积分] 查询失败：响应中没有有效积分", level="warning")
+            if not quiet:
+                self.log("⚠️ [积分] 查询失败：响应中没有有效积分", level="warning")
         except Exception as e:
-            self.log(f"⚠️ [积分] 查询失败: {e}", level="warning")
+            if not quiet:
+                self.log(f"⚠️ [积分] 查询失败: {e}", level="warning")
         return None
 
     def log_points_change(self, before, after):
@@ -421,33 +502,52 @@ class AutoTask:
                     "x-clientCode": "wechatMiniZtoHelper",
                 })
 
-                # 执行微信授权
-                code = self.get_wx_code(server, ref)
-                if not code:
-                    self.account_results.append({
-                        "index": index,
-                        "login": "获取微信 code 失败",
-                        "sign": "未执行",
-                        "initial_points": None,
-                        "final_points": None,
-                        "normal": False,
-                    })
-                    self.acc_footer(index, len(all_entries))
-                    continue
+                # 优先用缓存 token（避免每次取 code 撞 YYBGO 的 5 分钟恢复冷却）
+                cached_token = self.cache_get_token(server, ref)
+                login_result = False
+                if cached_token:
+                    session.headers["X-Token"] = cached_token
+                    # 用一次只读接口探活：能查到积分说明 token 仍有效
+                    probe = self.get_points(session, quiet=True)
+                    if probe is not None:
+                        self.log("✅ [缓存] token 有效，跳过微信授权")
+                        login_result = True
+                    else:
+                        self.log("⚠️ [缓存] token 已失效，重新登录")
+                        self.cache_del_token(server, ref)
+                        session.headers.pop("X-Token", None)
 
-                login_result = self.wxlogin(session, code)
-                time.sleep(random.randint(1, 3))
                 if not login_result:
-                    self.account_results.append({
-                        "index": index,
-                        "login": "认证失败",
-                        "sign": "未执行",
-                        "initial_points": None,
-                        "final_points": None,
-                        "normal": False,
-                    })
-                    self.acc_footer(index, len(all_entries))
-                    continue
+                    # 执行微信授权
+                    code = self.get_wx_code(server, ref)
+                    if not code:
+                        self.account_results.append({
+                            "index": index,
+                            "login": "获取微信 code 失败",
+                            "sign": "未执行",
+                            "initial_points": None,
+                            "final_points": None,
+                            "normal": False,
+                        })
+                        self.acc_footer(index, len(all_entries))
+                        continue
+
+                    login_result = self.wxlogin(session, code)
+                    time.sleep(random.randint(1, 3))
+                    if not login_result:
+                        self.account_results.append({
+                            "index": index,
+                            "login": "认证失败",
+                            "sign": "未执行",
+                            "initial_points": None,
+                            "final_points": None,
+                            "normal": False,
+                        })
+                        self.acc_footer(index, len(all_entries))
+                        continue
+                    # 登录成功 → 写入缓存（下次直接复用）
+                    if self._last_token:
+                        self.cache_set_token(server, ref, self._last_token)
 
                 initial_points = self.get_points(session)
                 sign_success, sign_message = self.sign_in(session)

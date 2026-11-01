@@ -2,7 +2,7 @@
 /*=========================================================
 # name:  海信爱家
 # version: 2026-10-29a
-# cron: 35 5 * * *
+# cron: 42 4 * * *
 # 积分有效期：每年12月31日
 =========================================================*/
 
@@ -1501,7 +1501,7 @@ function parseYYBServer(raw) {
     .filter(Boolean);
 }
 
-async function yybRequest(entry, endpoint, retry = 2) {
+async function yybRequest(entry, endpoint, retry = 0) {  // 只请求一次，不重试，避免触发 YYB-GO 5 分钟限流
   for (let attempt = 1; attempt <= retry + 1; attempt++) {
     try {
       const { data } = await request('POST', `${entry.server}${endpoint}`, {
@@ -1518,7 +1518,7 @@ async function yybRequest(entry, endpoint, retry = 2) {
       const msg = String((err && err.message) || err || '');
       // YYB-Go 偶发「刷新协议号账号凭证」超时等瞬时网络错误（常见文案:
       // call failed: refresh account credentials: Post ".../pc_yyb_refresh_token_auth":
-      // context deadline exceeded），重试即可自愈，不必整个账号失败。
+      // context deadline exceeded）。为不触发 YYB-GO 5 分钟限流，此处只请求一次、失败即抛出，不再重试。
       const transient = /deadline exceeded|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|network/i.test(msg);
       if (!transient) throw err;
       if (attempt > retry) {
