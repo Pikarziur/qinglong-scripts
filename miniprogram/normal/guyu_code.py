@@ -53,7 +53,6 @@ import json
 import os
 import random
 import re
-import base64
 import time
 import traceback
 import uuid
@@ -617,69 +616,35 @@ def get_cached_shop_id(server: str) -> str:
     return DEFAULT_SHOP_ID
 
 
-def extract_group_id_from_token(token: str) -> str:
-    """从 mobileToken(JWT) 里取 groupId。
-
-    登录响应顶层 result.userId / customerId / mallId 全是 null，但顶层 result.groupId
-    有值，且 JWT payload.sub 里也带 groupId。
-    实测签到接口的「用户id」用的就是这个 groupId（传 80000136 可正常签到）。
-    """
-    try:
-        parts = str(token or "").split(".")
-        if len(parts) < 2:
-            return ""
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
-        sub = data.get("sub")
-        if isinstance(sub, str):
-            sub = json.loads(sub)
-        if isinstance(sub, dict) and sub.get("groupId"):
-            return str(sub["groupId"])
-    except Exception:
-        pass
-    return ""
-
-
-def get_cached_user_id(server: str) -> str:
+def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "") -> None:
     cache = load_token_cache()
-    data = cache.get(server)
-    if data and data.get("userId"):
-        return str(data["userId"])
-    return ""
-
-
-def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "", user_id: str = "") -> None:
-    cache = load_token_cache()
-    cache[server] = {"token": token, "shopId": shop_id, "userId": user_id,
+    cache[server] = {"token": token, "shopId": shop_id,
                      "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
     save_token_cache(cache)
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, str, Dict[str, Any] | None]:
-    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, userId, raw_login)"""
+def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, Dict[str, Any] | None]:
+    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, raw_login)"""
     cache_token = get_cached_token(server)
     shop_id = get_cached_shop_id(server)
-    user_id = get_cached_user_id(server)
     if cache_token:
         log("🔍 [缓存] 验证 token")
         try:
             point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
             if point_resp.get("success"):
                 log("✅ [缓存] token 有效")
-                if not user_id:
-                    user_id = extract_group_id_from_token(cache_token)
-                return cache_token, shop_id, user_id, None
+                return cache_token, shop_id, None
         except Exception as exc:
             warn(f"⚠️ [缓存] 验证异常: {exc}")
         warn("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
-        return None, shop_id, user_id, None
+        return None, shop_id, None
 
     token, raw_login = login_by_code(server, code, proxies)
     if not token:
-        return None, shop_id, user_id, raw_login
+        return None, shop_id, raw_login
 
     shop_id = DEFAULT_SHOP_ID
     if raw_login and isinstance(raw_login, dict):
@@ -688,12 +653,6 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
             if info.get("shopId"):
                 shop_id = str(info["shopId"])
                 log(f"🏪 [登录] 门店: {info.get('shopName') or shop_id}")
-            # 签到接口的「用户id」实际是 groupId(80000136), 顶层 result.userId 为 null
-            if info.get("groupId"):
-                user_id = str(info["groupId"])
-    # 顶层拿不到时, 退到 JWT 里取 groupId
-    if not user_id:
-        user_id = extract_group_id_from_token(token)
 
     expire_time = None
     if raw_login and isinstance(raw_login, dict):
@@ -707,8 +666,8 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, shop_id, user_id)
-    return token, shop_id, user_id, raw_login
+    set_cached_token(server, token, expire_time, shop_id)
+    return token, shop_id, raw_login
 
 
 def is_already_signed(text: Any) -> bool:
@@ -763,7 +722,7 @@ def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str,
     return activity_id, activity_title
 
 
-def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None, user_id: str = "") -> str:
+def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None) -> str:
     if not activity_id:
         warn("⚠️ [签到] 跳过签到: 没有可用的签到活动")
         return "没有可用的签到活动"
@@ -794,9 +753,10 @@ def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Di
         "shopId": shop_id,
         "signDate": today_text,
     }
-    # 签到接口必须带 userId, 否则返回「用户id不能为空」
-    if user_id:
-        payload["userId"] = user_id
+    # 不要传 userId：服务端按 token 解析当前登录用户。
+    # 这里原来传的是 groupId(80000136，多账号共用的集团/门店ID)，服务端会走
+    # 「代签指定用户」分支，取不到合法用户ID 就返回「用户id不能为空」。
+    # 实测去掉该字段后签到正常返回 integral=2（对应活动规则：每日签到奖励 2 积分）。
     sign_resp = api_post(server, SIGN_URL, token, proxies, payload)
     if sign_resp.get("success"):
         log("✅ [签到] 签到成功")
@@ -849,7 +809,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, shop_id, user_id, raw_login = login_with_cache(server, proxies)
+    token, shop_id, raw_login = login_with_cache(server, proxies)
     if not token:
         result["error"] = f"登录失败: {json_preview(raw_login)}"
         return result
@@ -858,7 +818,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     try:
         activity_id, _ = find_sign_activity(server, token, shop_id, proxies)
-        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies, user_id)
+        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies)
         result["points"] = get_user_points(server, token, shop_id, proxies)
 
         # 签到失败要如实标记失败, 否则青龙会误判为成功
