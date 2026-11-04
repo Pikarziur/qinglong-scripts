@@ -182,6 +182,15 @@ function selectYybEntry(identifier) {
     throw new Error(`YYB_SERVER 中找不到账号ref：${raw}`);
 }
 
+// YYB-GO 开启协议鉴权（YYB_PROTOCOL_TOKEN / YYB_API_KEY）后，所有协议接口都要带 Bearer 令牌，
+// 否则一律 401。统一在这里拼，避免各调用点漏带。
+function _yybAuthHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = String(process.env.YYB_API_KEY || '').trim() || String(process.env.YYB_PROTOCOL_TOKEN || '').trim();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return headers;
+}
+
 async function yybPost(identifier, appId, route, payload) {
     const item = selectYybEntry(identifier);
     const body = { ref: item.ref, app_id: appId };
@@ -190,7 +199,7 @@ async function yybPost(identifier, appId, route, payload) {
         timeout: 60000,
         proxy: false,
         validateStatus: () => true,
-        headers: { 'Content-Type': 'application/json' },
+        headers: _yybAuthHeaders(),
     });
     const data = response.data || {};
     if (response.status < 200 || response.status >= 300) {
@@ -229,8 +238,12 @@ const ACTIVITY_PAGE_ID = process.env.HSJJ_ACTIVITY_PAGE_ID || '7541';
 const H5_OAUTH_APPID = 'wx80226ec03be5ab6c';
 const H5_URLTAG = 'cfyh';
 const AUTO_CLAIM_H5_RED_PACKET = process.env.HSJJ_AUTO_CLAIM_H5 !== '0';
+// 手机号只用于日志展示，不参与认证。主动补取会额外打一次 getPhoneNumber，
+// 上游 -14 时纯属浪费配额（还会被 YYB-GO 计入熔断/限速），默认关闭，需要时置 1。
+const FETCH_MOBILE_IF_MISSING = !['0', 'false', 'off', 'no'].includes(String(process.env.HSJJ_FETCH_MOBILE || '').trim().toLowerCase());
 
-const CACHE_DIR = pathMod.join(process.cwd(), '.cache');
+// 缓存目录固定在脚本同级 .cache：青龙执行时 cwd 未必是脚本目录，用 cwd 会让缓存位置漂移。
+const CACHE_DIR = pathMod.join(__dirname, '.cache');
 const ACCOUNT_CACHE_FILE = pathMod.join(CACHE_DIR, 'hsjj_accounts.json');
 
 // ==================== 统一日志 ====================
@@ -533,8 +546,10 @@ async function apiRequest(method, url, data, token, encryptVer, openId, userId, 
                 return await apiRequest(method, url, data, token, encryptVer, openId, userId, appSecret, retries - 1, options);
             }
         }
-        if (retries > 0) {
+        // 只重试 GET：POST 是写操作（签到/兑换/领红包），重复提交可能重复发奖或触发风控
+        if (retries > 0 && method === 'GET') {
             log('  请求失败，重试... ' + e.message);
+            await sleep(1500);
             return await apiRequest(method, url, data, token, encryptVer, openId, userId, appSecret, retries - 1, options);
         }
         log('  请求失败: ' + url + ' - ' + e.message);
@@ -561,7 +576,7 @@ async function getPhoneCodeInfo(wxid) {
 
         if (debug) log(`[YYB] 请求手机号code: ref=${resolvedRef}, app_id=${APPID}`);
         const resp = await axios.post(url, { ref: resolvedRef, app_id: APPID }, {
-            headers: { 'Content-Type': 'application/json' },
+            headers: _yybAuthHeaders(),
             timeout: 30000,
             validateStatus: () => true
         });
@@ -618,6 +633,9 @@ async function getPhoneCode(wxid) {
 async function fillCachedMobileIfMissing(wxid, cache, cacheKey) {
     const cached = getCache(cache, cacheKey);
     if (cached?.mobile) return cached.mobile;
+    // 手机号只用于日志展示，认证不依赖它；默认不主动补取（省一次 getPhoneNumber 配额）。
+    // 需要补齐时设 HSJJ_FETCH_MOBILE=1。
+    if (!FETCH_MOBILE_IF_MISSING) return '';
     try {
         const phoneInfo = await getPhoneCodeInfo(wxid);
         if (phoneInfo.mobile) {
@@ -696,7 +714,10 @@ async function getOpenIdAndUnionId(code) {
 async function checkCachedLogin(cached) {
     if (!cached?.token || !cached?.openId || !cached?.userId) return false;
     const resp = await apiRequest('GET', '/fundex-activity/point/sign/getRecordList', {}, cached.token, '', cached.openId, cached.userId, '', 0);
-    return resp?.code === '200';
+    if (!resp) return null;   // 网络/服务异常：无法判定，保留缓存，别做无谓重登
+    if (String(resp.code) === '200') return true;
+    if (/^(401|403|407)$/.test(String(resp.code))) return false;  // 明确失效才重登
+    return null;
 }
 
 // 动态获取页面活动 ID 和渠道参数，失败才兜底使用默认页面 ID/当天渠道。
@@ -722,8 +743,10 @@ async function discoverActivityEntry(token, openId, userId) {
         log(`  🧭 动态活动入口(宽松匹配): pageId=${pageId} channel=${channel}`);
         return { pageId, registerChannel: channel, skipAddr: '' };
     }
-    log(`  ⚠️ 未从首页发现活动入口，兜底 pageId=${ACTIVITY_PAGE_ID}`);
-    return { pageId: ACTIVITY_PAGE_ID, registerChannel: buildDailyRegisterChannel(), skipAddr: '' };
+    // 找不到入口时直接跳过兑换：默认 ACTIVITY_PAGE_ID（7541）多为过期活动，
+    // 拿它提交只会返回「活动已结束」，白白浪费当日机会（实测 11-03 09:00 就是这样白跑的）。
+    log('  ⚠️ 未从首页发现活动入口，本次跳过兑换（不使用可能已过期的默认活动ID）');
+    return { pageId: '', unavailable: true };
 }
 
 // 获取加密密钥配置
@@ -819,7 +842,7 @@ async function getEncryptKey(wxid) {
             app_id: APPID,
             payload: { api_name: 'webapi_getuserencryptkey' }
         }, {
-            headers: { 'Content-Type': 'application/json' },
+            headers: _yybAuthHeaders(),
             timeout: 30000,
             validateStatus: () => true
         });
@@ -932,8 +955,14 @@ async function doSign(session, wxid, cache, cacheKey) {
         await sleep(waitMs);
         return await doSign(session, wxid, cache, cacheKey);
     }
+    // 7005 先重取 encryptKey 重试一次，再考虑整会话重登（重登在 -14 下必失败）
+    if (resp?.code === '7005' && !session._signCryptoRetry) {
+        session._signCryptoRetry = true;
+        log('  🔄 签到返回7005，重新获取加密参数后重试一次');
+        return await doSign(session, wxid, cache, cacheKey);
+    }
     if (resp?.code === '7005' && !session._signReloginDone) {
-        const fresh = await refreshProtocolSession(wxid, cache, cacheKey, '签到提交返回7005');
+        const fresh = await refreshProtocolSession(wxid, cache, cacheKey, '新密钥仍被拒绝，同步小程序业务会话（限一次）');
         if (fresh) {
             session.token = fresh.token;
             session.openId = fresh.openId;
@@ -960,7 +989,7 @@ async function getTotalPoint(token, openId, userId) {
         return Number(resp.data.totalPoint || 0);
     }
     log('  ⚠️ 查询当前积分失败: ' + (resp?.message || resp?.msg || JSON.stringify(resp)));
-    return 0;
+    return null;   // 与 0 区分：0 是真的没积分，null 是查询失败
 }
 
 // 查询ROE并提交口令
@@ -968,6 +997,11 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
     const token = session.token;
     const openId = session.openId;
     const loginData = session.loginData;
+    // 首页没发现活动入口时不做任何提交（避免用过期活动ID换一句「活动已结束」的误判）
+    if (activityEntry?.unavailable) {
+        log('  ⏭️ 首页未发现口令活动入口，跳过本次兑换');
+        return { success: true, skipped: true };
+    }
     log('  🔍 查询ROE...');
 
     // 提交加密接口前必须尽量使用最新 encryptKey/version。
@@ -1005,11 +1039,12 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
     const activityStatus = String(activity?.activitystatusResponseVo?.status ?? activity?.status ?? '');
     if (actResp?.code !== '200' || !activity) {
         log(`  ⚠️ 活动接口无数据（code=${actResp?.code || '-'}）`);
-        return false;
+        return { success: false };
     }
     if (activityStatus && activityStatus !== '1') {
-        log(`  ⚠️ 活动已结束（status=${activityStatus}）`);
-        return false;
+        // 活动未开始/已结束属于「无可参与」，不算失败
+        log(`  ⚠️ 活动不可参与（status=${activityStatus}）：${activity.activityTime || ''}`);
+        return { success: true, skipped: true, status: activityStatus };
     }
     log('  📋 活动: ' + activity.title + ` | status=${activityStatus || '-'}`);
 
@@ -1044,7 +1079,16 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
     // - activitystatusResponseVo.activityId 才是 doExchange 兑换接口使用的真实活动 ID，例如 131003
     // 如果误用页面配置 ID，接口会返回“本次活动已结束”等误导性错误。
     const exchangeActivityId = activity?.activitystatusResponseVo?.activityId || activity.id;
-    let payload = { watchword: roeAnswer, openId: openId, activityId: exchangeActivityId };
+    // doExchange 需要 activityTemplateId / registerChannel，缺失会返回 400 参数异常。
+    // registerChannel 用首页发现入口时拿到的当天渠道（形如 s=red&m=daily&c=1103）。
+    const registerChannel = String((activityEntry && activityEntry.registerChannel) || buildDailyRegisterChannel()).replace(/^&/, '');
+    let payload = {
+        watchword: roeAnswer,
+        openId: openId,
+        activityId: exchangeActivityId,
+        activityTemplateId: Number(activity?.activityTemplateId ? activity.activityTemplateId : 0),
+        registerChannel: registerChannel,
+    };
     log('  🎯 兑换活动ID: ' + exchangeActivityId);
 
     // SM4加密
@@ -1066,10 +1110,7 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
     }
 
     // 提交口令
-    // 0624 抓包里 doExchange 的 register_channel 为空；
-    // 渠道只用于发现页面入口，不强行带到兑换提交，避免 7005。
-    const registerChannel = '';
-    log('  🧭 提交渠道参数: 空(按抓包)');
+    log('  🧭 提交渠道参数: ' + registerChannel);
     const resp = await apiRequest(
         'POST',
         '/fundex-activity/watchWordCustom/doExchange',
@@ -1089,8 +1130,16 @@ async function doRoeReward(session, wxid, cache, cacheKey, activityEntry = null)
         await sleep(waitMs);
         return await doRoeReward(session, wxid, cache, cacheKey, activityEntry);
     }
+    // 7005 = 服务端按 key_version 解密失败 / 会话环境不匹配。
+    // 第一级：先重取 encryptKey 再重试（doRoeReward 开头会重新 getEncryptKey）；
+    // 第二级：仍失败才整会话重登——重登要 getPhoneNumber，上游 -14 时会直接失败，所以只试一次。
+    if (resp?.code === '7005' && !session._roeCryptoRetry) {
+        session._roeCryptoRetry = true;
+        log('  🔄 兑换返回7005，重新获取加密参数后重试一次');
+        return await doRoeReward(session, wxid, cache, cacheKey, activityEntry);
+    }
     if (resp?.code === '7005' && !session._roeReloginDone) {
-        const fresh = await refreshProtocolSession(wxid, cache, cacheKey, '兑换提交返回7005');
+        const fresh = await refreshProtocolSession(wxid, cache, cacheKey, '新密钥仍被拒绝，同步小程序业务会话（限一次）');
         if (fresh) {
             session.token = fresh.token;
             session.openId = fresh.openId;
@@ -1395,7 +1444,13 @@ async function runTask(accountInfo) {
         let loginData = null;
 
         // 1. 先读缓存，缓存有效就不再调用 wx.login / 手机号授权 / 登录接口。
-        if (cached && await checkCachedLogin(cached)) {
+        // 缓存校验返回 null 表示「无法判定」（网络/服务异常）：保留 CK 并退出，
+        // 不做整条重登——重登要消耗 getPhoneNumber 配额，上游 -14 时纯属浪费。
+        const cachedStatus = cached ? await checkCachedLogin(cached) : false;
+        if (cached && cachedStatus === null) {
+            throw new Error('缓存验证未完成（网络或服务异常），保留CK，稍后重试');
+        }
+        if (cached && cachedStatus) {
             token = cached.token;
             openId = cached.openId;
             unionId = cached.unionId || '';
@@ -1423,6 +1478,9 @@ async function runTask(accountInfo) {
             // 4. 获取手机号授权code
             const phoneInfo = await getPhoneCodeInfo(wxid);
             const phoneCode = phoneInfo.phoneCode;
+            // 上游 -14 时 getPhoneCodeInfo 返回空 code，必须判空：
+            // 否则会拿着空串去登录（服务端回 70000），日志却显示「手机号授权code获取成功」，掩盖真实失败。
+            if (!phoneCode) throw new Error('手机号授权code获取失败，保留原登录缓存');
             log('  ✅ 手机号授权code获取成功' + (phoneInfo.mobile ? '，手机号：' + phoneInfo.mobile : ''));
 
             // 5. 登录
@@ -1459,7 +1517,7 @@ async function runTask(accountInfo) {
         await sleep(randomInt(1000, 2000));
 
         // 6. 签到
-        await doSign(session, wxid, cache, cacheKey);
+        const signOk = await doSign(session, wxid, cache, cacheKey);
         await sleep(randomInt(1000, 2000));
 
         // 7. 动态发现页面活动 ID，然后执行 ROE 口令红包。
@@ -1565,7 +1623,15 @@ async function runTask(accountInfo) {
         if (claimedAmount > 0) {
             log('  💰 本次自动提现领取: ' + formatMoney(claimedAmount) + '元');
         }
-        return { success: true, currentPoint, roeReward, redPacketAmount, historyRedPacketAmount, pendingRedPacketAmount, claimedAmount };
+        // 严格判定：签到与兑换都成功才算成功。
+        // 原来无条件 success:true，会把「兑换全部失败」也报成成功，青龙永远不会告警。
+        const roeOk = Boolean(roeResult?.success);
+        if (!signOk) log('  ⚠️ 签到未成功');
+        if (!roeOk) log('  ⚠️ 口令兑换未成功');
+        return {
+            success: Boolean(signOk && roeOk && currentPoint !== null),
+            currentPoint, roeReward, redPacketAmount, historyRedPacketAmount, pendingRedPacketAmount, claimedAmount,
+        };
 
     } catch (e) {
         log('❌ 异常: ' + e.message);
@@ -1607,7 +1673,7 @@ async function main() {
             const result = await runTask(accounts[i]);
             if (result && result.success) {
                 successCount++;
-                accounts[i].currentPoint = result.currentPoint || 0;
+                accounts[i].currentPoint = (result.currentPoint === null || result.currentPoint === undefined) ? null : result.currentPoint;
                 accounts[i].roeReward = result.roeReward || 0;
                 accounts[i].redPacketAmount = result.redPacketAmount || 0;
                 accounts[i].historyRedPacketAmount = result.historyRedPacketAmount || 0;
@@ -1632,7 +1698,7 @@ async function main() {
     let totalClaimed = 0;
     for (const account of accounts) {
         const display = account.note || account.wxid;
-        const currentPoint = account.currentPoint || 0;
+        const currentPoint = (account.currentPoint === null || account.currentPoint === undefined) ? '查询失败' : account.currentPoint;
         const pendingRedPacketAmount = account.pendingRedPacketAmount || 0;
         const claimedAmount = account.claimedAmount || 0;
         totalClaimed += claimedAmount;
