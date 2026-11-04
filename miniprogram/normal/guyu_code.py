@@ -132,6 +132,7 @@ ACTIVITY_LIST_URL = f"{BASE_URL}/mobile/activity/common/queryActivityList"
 SIGN_INFO_LIST_URL = f"{BASE_URL}/mobile/activity/sign/querySignInfoList"
 SIGN_URL = f"{BASE_URL}/mobile/activity/sign/sign"
 MY_POINT_URL = f"{BASE_URL}/mobile/customer/getMyAllPoint"
+CUSTOMER_INFO_URL = f"{BASE_URL}/mobile/customer/initMy"
 
 SECRET_KEY = "R6WbJ830wNsEdjH9GumwKYiYxHz0K9QD"
 DEFAULT_SHOP_ID = "100186753"
@@ -616,35 +617,67 @@ def get_cached_shop_id(server: str) -> str:
     return DEFAULT_SHOP_ID
 
 
-def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "") -> None:
+def set_cached_token(server: str, token: str, expire_time: str, shop_id: str = "", customer_id: str = "") -> None:
     cache = load_token_cache()
-    cache[server] = {"token": token, "shopId": shop_id,
+    cache[server] = {"token": token, "shopId": shop_id, "customerId": customer_id,
                      "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
     save_token_cache(cache)
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, Dict[str, Any] | None]:
-    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, raw_login)"""
+def get_cached_customer_id(server: str) -> str:
+    cache = load_token_cache()
+    data = cache.get(server)
+    if data and data.get("customerId"):
+        return str(data["customerId"])
+    return ""
+
+
+def fetch_customer_id(server: str, token: str, shop_id: str, proxies: Dict[str, str] | None) -> str:
+    """取签到接口需要的「用户id」= initMy 返回的 customerId。
+
+    实测（2026-11-04）：签到必须带 userId=customerId 才会成功。
+    传 groupId(80000136，多账号共用的集团/门店ID) 或完全不传，服务端都回「用户id不能为空」。
+    """
+    try:
+        resp = api_get(server, CUSTOMER_INFO_URL, token, proxies, params={"shopId": shop_id})
+        if resp.get("success"):
+            customer = (resp.get("result") or {}).get("customer") or {}
+            customer_id = customer.get("customerId")
+            if customer_id:
+                return str(customer_id)
+            warn("⚠️ initMy 未返回 customerId")
+        else:
+            warn(f"⚠️ initMy 查询失败: {resp.get('msg') or resp.get('message') or '未知错误'}")
+    except Exception as exc:
+        warn(f"⚠️ initMy 查询异常: {exc}")
+    return ""
+
+
+def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str, str, Dict[str, Any] | None]:
+    """优先使用缓存 token（积分接口验证），失效自动 code 刷新；返回 (token, shopId, customerId, raw_login)"""
     cache_token = get_cached_token(server)
     shop_id = get_cached_shop_id(server)
+    customer_id = get_cached_customer_id(server)
     if cache_token:
         log("🔍 [缓存] 验证 token")
         try:
             point_resp = api_get(server, MY_POINT_URL, cache_token, proxies, params={"shopId": shop_id})
             if point_resp.get("success"):
                 log("✅ [缓存] token 有效")
-                return cache_token, shop_id, None
+                if not customer_id:
+                    customer_id = fetch_customer_id(server, cache_token, shop_id, proxies)
+                return cache_token, shop_id, customer_id, None
         except Exception as exc:
             warn(f"⚠️ [缓存] 验证异常: {exc}")
         warn("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
-        return None, shop_id, None
+        return None, shop_id, customer_id, None
 
     token, raw_login = login_by_code(server, code, proxies)
     if not token:
-        return None, shop_id, raw_login
+        return None, shop_id, customer_id, raw_login
 
     shop_id = DEFAULT_SHOP_ID
     if raw_login and isinstance(raw_login, dict):
@@ -666,8 +699,11 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, shop_id)
-    return token, shop_id, raw_login
+    customer_id = fetch_customer_id(server, token, shop_id, proxies)
+    if customer_id:
+        log(f"🆔 用户ID(customerId): {customer_id}")
+    set_cached_token(server, token, expire_time, shop_id, customer_id)
+    return token, shop_id, customer_id, raw_login
 
 
 def is_already_signed(text: Any) -> bool:
@@ -722,7 +758,7 @@ def find_sign_activity(server: str, token: str, shop_id: str, proxies: Dict[str,
     return activity_id, activity_title
 
 
-def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None) -> str:
+def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Dict[str, str] | None, customer_id: str = "") -> str:
     if not activity_id:
         warn("⚠️ [签到] 跳过签到: 没有可用的签到活动")
         return "没有可用的签到活动"
@@ -753,10 +789,14 @@ def do_sign(server: str, token: str, shop_id: str, activity_id: str, proxies: Di
         "shopId": shop_id,
         "signDate": today_text,
     }
-    # 不要传 userId：服务端按 token 解析当前登录用户。
-    # 这里原来传的是 groupId(80000136，多账号共用的集团/门店ID)，服务端会走
-    # 「代签指定用户」分支，取不到合法用户ID 就返回「用户id不能为空」。
-    # 实测去掉该字段后签到正常返回 integral=2（对应活动规则：每日签到奖励 2 积分）。
+    # 签到接口必须带 userId，且它要的是【当前用户的 customerId】。
+    # 历史踩坑：传 groupId(80000136，多账号共用的集团/门店ID) → 服务端取不到合法用户 → 「用户id不能为空」；
+    # 完全不传 → 2026-11-03 当天能过，跨天(11-04)又回同样的错（服务端按日重置用户标识）。
+    # 实测传 customerId 稳定成功，返回 integral=2（对应活动规则：每日签到奖励 2 积分）。
+    if customer_id:
+        payload["userId"] = customer_id
+    else:
+        warn("⚠️ 未取得 customerId，仍尝试签到（服务端可能拒绝）")
     sign_resp = api_post(server, SIGN_URL, token, proxies, payload)
     if sign_resp.get("success"):
         log("✅ [签到] 签到成功")
@@ -809,7 +849,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, shop_id, raw_login = login_with_cache(server, proxies)
+    token, shop_id, customer_id, raw_login = login_with_cache(server, proxies)
     if not token:
         result["error"] = f"登录失败: {json_preview(raw_login)}"
         return result
@@ -818,7 +858,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     try:
         activity_id, _ = find_sign_activity(server, token, shop_id, proxies)
-        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies)
+        result["signMsg"] = do_sign(server, token, shop_id, activity_id, proxies, customer_id)
         result["points"] = get_user_points(server, token, shop_id, proxies)
 
         # 签到失败要如实标记失败, 否则青龙会误判为成功
