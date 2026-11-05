@@ -17,6 +17,9 @@
 *_state.json
 *_answers.json
 *_history.json
+# 每日任务完成标记（本地状态，含账号标识与日期）
+ryytn_daily_done.json
+*_daily_done.json
 
 # ────────────── Python ──────────────
 __pycache__/
