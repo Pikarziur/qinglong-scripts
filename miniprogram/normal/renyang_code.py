@@ -113,6 +113,15 @@ PROXY_FETCH_INTERVAL = 3
 ENABLE_DIRECT_FALLBACK = True
 REQUEST_TIMEOUT = 30
 
+# ── YYB-GO 熔断（HTTP 429）处理 ────────────────────────────────────────
+# 2026-11-05：YYB-GO 对 (账号, AppID, 操作类型) 做目标层熔断，连续 2 次 -14
+# 就暂停该目标 10 分钟；取码限速也会返回 429。此时请求根本没发往上游，
+# 继续换账号硬打只会让熔断扩散、放大上游风控。
+#
+# 实测数据（同账号相邻两次熔断间隔）：最小 6s / 中位 10790s(约3小时) / 最大约2天。
+# 中位数远超一轮任务的时长，等待没有实际意义，因此**不做自动退避重试**：
+# 遇 429 立即放弃本账号，把 Retry-After 秒数打印出来，由下一次定时任务自然重试。
+
 BASE_URL = "https://www.milkcard.mall.ryytngroup.com"
 LOGIN_URL = f"{BASE_URL}/mall/xhr/minilogin"
 
@@ -489,6 +498,13 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
             payload["offset"] = pkg["initVector"]
             payload["code"] = pkg["authCode"]
             log("✅ [登录] 已获取手机号授权数据（encryptedData/offset/code）")
+        except _YybCircuitOpen:
+            # 熔断 = 服务端本地挡住，请求根本没发往上游。此时继续拿空授权数据去请求
+            # minilogin 必然白跑一次业务接口，直接放弃本账号，别把熔断扩散到其它账号。
+            raise
+        except _YybAccountInvalid as exc:
+            warn(f"🚫 [登录] {exc}")
+            return None, None
         except Exception as exc:
             warn(f"⚠️ [登录] 手机号授权数据获取失败，将以空授权数据尝试: {exc}")
 
@@ -630,11 +646,27 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
             warn(f"⚠️ [缓存] 验证异常: {exc}")
         warn("⚠️ [缓存] token 已失效，重新登录")
 
-    code = get_code(server)
+    try:
+        code = get_code(server)
+    except _YybCircuitOpen as exc:
+        # 取码也被熔断/限速挡住：请求没发往上游，换号继续打只会扩大熔断。
+        warn(f"🚫 [熔断] 取码被熔断，放弃本账号（{exc}）")
+        return None, {"error": str(exc)}
     if not code:
         return None, None
 
-    token, raw_login = login_by_code(server, code, proxies)
+    try:
+        token, raw_login = login_by_code(server, code, proxies)
+    except _YybCircuitOpen as exc:
+        # 同理：熔断期间不再重试，也不去请求 minilogin（必然拿不到 token）。
+        wait = exc.retry_after
+        tip = f"，约 {wait}s 后解除" if wait else ""
+        warn(f"🚫 [熔断] 手机号授权被熔断，放弃本账号（{exc}{tip}）")
+        return None, {"error": str(exc)}
+    except _YybAccountInvalid as exc:
+        warn(f"🚫 [登录] {exc}")
+        return None, {"error": str(exc)}
+
     if not token:
         return None, raw_login
 
@@ -1135,6 +1167,48 @@ def _yyb_appid(args, kwargs):
     return str(appid)
 
 
+class _YybCircuitOpen(RuntimeError):
+    """YYB-GO 熔断/限速：HTTP 429，请求根本没发往上游。
+
+    2026-11-05 实测响应体：
+      {"code":429,"msg":"call deferred: 目标暂时熔断，192s 内不再请求上游；避免重复触发风控",
+       "data":{"circuit_open":"target","request_rejected":false,"retry_after":192}}
+    响应头同时带 Retry-After: 176。
+
+    这类错误**不是上游拒绝**（上游拒绝是 502 + shortlink_application -14），
+    而是服务端本地挡住了重复请求。必须按「立即放弃本账号」处理，不能换号硬打。
+    """
+
+    def __init__(self, message: str, retry_after: int = 0, circuit_open: str = ""):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.circuit_open = circuit_open
+
+
+class _YybAccountInvalid(RuntimeError):
+    """账号已失效需要重新扫码：HTTP 409 / 404，或返回体带 rescan_required。"""
+
+
+def _yyb_retry_after(response, body) -> int:
+    """从响应头 Retry-After 或返回体 data.retry_after 取退避秒数。"""
+    header = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    for candidate in (header,):
+        if candidate:
+            try:
+                return max(0, int(float(str(candidate).strip())))
+            except (TypeError, ValueError):
+                pass
+    data = body.get("data") if isinstance(body, dict) else None
+    if isinstance(data, dict):
+        raw = data.get("retry_after")
+        if raw is not None:
+            try:
+                return max(0, int(float(raw)))
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
 def _yyb_json_request(server, path, appid, payload=None):
     import requests
     endpoint, ref = _yyb_parts(server)
@@ -1154,6 +1228,29 @@ def _yyb_json_request(server, path, appid, payload=None):
         body = response.json()
     except ValueError as exc:
         raise RuntimeError("YYB 返回非 JSON") from exc
+
+    # ── 429：熔断 / 取码限速，请求没到上游 ──────────────────────────────
+    # 2026-11-05：认养一头牛 3 个账号连续被 -14 打爆后，服务端把每个成员的
+    # (账号, AppID, 操作类型) 目标熔断 10 分钟。此时继续换账号硬打只会让
+    # 熔断扩散，必须按 Retry-After 退避。
+    if response.status_code == 429:
+        wait = _yyb_retry_after(response, body)
+        data = body.get("data") if isinstance(body, dict) else None
+        circuit = ""
+        if isinstance(data, dict):
+            circuit = str(data.get("circuit_open") or "")
+        msg = body.get("msg") or body.get("message") or "请求被限速"
+        raise _YybCircuitOpen(
+            "YYB 熔断/限速（HTTP 429, circuit_open=%s）：%s" % (circuit or "-", msg),
+            retry_after=wait,
+            circuit_open=circuit,
+        )
+
+    # ── 409 / 404：账号失效或不存在，需要重新扫码 ──────────────────────
+    if response.status_code in (404, 409):
+        msg = body.get("msg") or body.get("message") or ("HTTP %s" % response.status_code)
+        raise _YybAccountInvalid("YYB 账号失效需重扫（HTTP %s）：%s" % (response.status_code, msg))
+
     if response.status_code >= 400:
         raise RuntimeError(str(body.get("message") or body.get("msg") or body))
     return body
@@ -1234,6 +1331,10 @@ def _yyb_phone_package(server, *args, **kwargs) -> Dict[str, str]:
 
     minilogin 需要：encryptedData（手机号密文）、offset（=iv）、code（phoneCode）。
     实测 /wxapp/getPhoneNumber 与 /wx/getphonenumber 两个能力路径都可用。
+
+    2026-11-05：区分两类失败，避免把「服务端本地熔断」误当成「上游拒绝」
+      - _YybCircuitOpen（429）：请求没发往上游，换路径重试也没用，直接上抛放弃本账号
+      - 其它异常（502 / -14）：上游真的拒绝了这个 (微信 × 渠道 × 小程序) 组合
     """
     appid = _yyb_appid(args, kwargs)
     errors: List[str] = []
@@ -1241,6 +1342,9 @@ def _yyb_phone_package(server, *args, **kwargs) -> Dict[str, str]:
     for path in ("/wxapp/getPhoneNumber", "/wx/getphonenumber"):
         try:
             body = _yyb_json_request(server, path, appid)
+        except _YybCircuitOpen:
+            # 熔断是本地状态，换另一条能力路径同样会被挡，直接上抛给调用方
+            raise
         except Exception as exc:
             errors.append("%s -> %s" % (path, exc))
             continue

@@ -199,7 +199,14 @@ except ImportError:
     _HAS_GETCODE = False
 
 class _ExijiuFormatter(logging.Formatter):
-    """统一日志：[LEVEL] [EXIJIU] emoji message（行首已有 emoji 则沿用，避免重复注入）。"""
+    """统一日志：[LEVEL] [EXIJIU] emoji message（行首已有 emoji 则沿用，避免重复注入）。
+
+    对齐规则（2026-11-05 修正）：
+      - 消息自带前导空格（子项，缩进 3/6 空格）→ 不注入 emoji，保留原始缩进，
+        否则同级子项会因多出的 "ℹ️ " 而左右错开（如「昵称:」比「🌾高粱:」右移 2 字符）。
+      - 纯分隔线（全是 = / ─ 等）→ 不注入 emoji，让横线左端与正文起始列对齐。
+      - 消息首字符已是 emoji → 沿用原 emoji，不重复注入。
+    """
     _EMOJI = {
         logging.DEBUG: "🔍", logging.INFO: "ℹ️", logging.WARNING: "⚠️",
         logging.ERROR: "❌", logging.CRITICAL: "💥",
@@ -214,8 +221,27 @@ class _ExijiuFormatter(logging.Formatter):
         return ((0x2300 <= cp <= 0x23FF) or (0x2600 <= cp <= 0x27BF) or (0x2B00 <= cp <= 0x2BFF)
                 or cp == 0x2139 or cp >= 0x1F300)
 
+    @staticmethod
+    def _is_indented(text):
+        """消息是否以空格开头（子项缩进）。"""
+        return str(text).startswith(" ")
+
+    @staticmethod
+    def _is_rule(text):
+        """消息是否纯分隔线（= / ─ / ═ 等重复字符）。"""
+        s = str(text).strip()
+        if len(s) < 3:
+            return False
+        return len(set(s)) == 1 and s[0] in "=─═━-—_"
+
     def format(self, record):
-        emoji = "" if self._has_emoji_head(record.getMessage()) else self._EMOJI.get(record.levelno, "•")
+        msg = record.getMessage()
+        if self._is_indented(msg) or self._is_rule(msg):
+            emoji = ""
+        elif self._has_emoji_head(msg):
+            emoji = ""
+        else:
+            emoji = self._EMOJI.get(record.levelno, "•")
         record.prefix = (emoji + " ") if emoji else ""
         return super().format(record)
 
@@ -1274,7 +1300,7 @@ def run(client, do_daily=True):
     # ── 会员信息 ──
     log.info("👤 获取会员信息...")
     info = client.member_info()
-    log.info("   昵称: %-12s  积分: %-6s  💧水: %-4s  🌿肥: %-4s" % (
+    log.info("   👤 昵称: %-12s  积分: %-6s  💧水: %-4s  🌿肥: %-4s" % (
         info.get("nick_name"), info.get("integration"), info.get("water"), info.get("manure")))
     log.info("   🌾高粱: %-6s斤  🌾小麦: %-6s斤  🍺酒曲: %-4s块  🍶酒: %sL" % (
         info.get("sorghum"), info.get("wheat"), info.get("wine_yeast"), info.get("wine")))
@@ -1312,7 +1338,7 @@ def run(client, do_daily=True):
     log.info("🌱 查看地块...")
     plots = client.get_sorghum_list() or []
     active = [p for p in plots if p.get("status", -1) != -1]
-    log.info("   共 %d 块地，已解锁 %d 块" % (len(plots), len(active)))
+    log.info("   📍 共 %d 块地，已解锁 %d 块" % (len(plots), len(active)))
 
     # 开垦新土地
     try:
@@ -1458,7 +1484,7 @@ def run(client, do_daily=True):
         info = client.member_info() or info
         sorghum = int(info.get("sorghum") or 0); wheat = int(info.get("wheat") or 0)
         wine_yeast = int(info.get("wine_yeast") or 0); wine_vol = int(info.get("wine") or 0)
-        log.info("   共 %d 个酒坛  │  🌾高粱: %s斤  🌾小麦: %s斤  🍺酒曲: %s块  🍶酒: %sL" % (len(wines), sorghum, wheat, wine_yeast, wine_vol))
+        log.info("   🍶 共 %d 个酒坛  │  🌾高粱: %s斤  🌾小麦: %s斤  🍺酒曲: %s块  🍶酒: %sL" % (len(wines), sorghum, wheat, wine_yeast, wine_vol))
         if not wines:
             can_put = min((sorghum // 200) * 200, 5000, wine_yeast * 200)
             if can_put >= 200:
@@ -1569,7 +1595,7 @@ def run(client, do_daily=True):
         log.info("📝 花园答题...")
         try:
             questions = client.get_question_task() or []; todo = [q for q in questions if q.get("id") and q.get("answer")]
-            log.info("   共 %d 道题，待答 %d 道" % (len(questions), len(todo)))
+            log.info("   ❓ 共 %d 道题，待答 %d 道" % (len(questions), len(todo)))
             for q in todo:
                 qid, answer = q.get("id"), q.get("answer", ""); log.info("   ❓ [%s] %s  →  %s" % (qid, q.get("title", "")[:25], answer))
                 try: time.sleep(3); r = client.answer_results(qid, answer); log.info("      ✅ 答题成功: %s" % r)
@@ -1582,7 +1608,7 @@ def run(client, do_daily=True):
         log.info("🎰 检查抽奖...")
         try:
             chance = client.remain_free_draw_chance(); free_count = int((chance or {}).get("remainFreeDrawChance", 0))
-            log.info("   剩余免费次数: %d" % free_count)
+            log.info("   🎰 剩余免费次数: %d" % free_count)
             for i in range(free_count):
                 try: r = client.draw(); prize = r.get("prize_name") or r.get("name") or r.get("prize") or str(r); log.info("   🎁 第 %d 次：%s" % (i + 1, prize))
                 except RuntimeError as e: log.warning("   ❌ 抽奖失败：%s" % e); break
