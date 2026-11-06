@@ -58,7 +58,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -177,6 +177,11 @@ ACTION_NAMES: Dict[str, str] = {
 }
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qmsdcookie.json")
+
+# 「日打标」：记录今天已完成的账号，当天再次运行时直接跳过，避免重复消耗取码配额。
+# 结构：{ "<server>": {"date": "2026-11-06", "doneTime": "...", "signMsg": "..."} }
+# 跨天自动失效；文件在脚本同目录、非隐藏，面板文件管理里可见/可删。
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qmsd_daily_done.json")
 
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 11; ONEPLUS A6000 Build/RKQ1.201217.002; wv) "
@@ -698,6 +703,70 @@ def set_cached_token(server: str, token: str, expire_time: str) -> None:
     save_token_cache(cache)
 
 
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, sign_msg: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "signMsg": str(sign_msg or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
+
 def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
     """优先使用缓存 token（新版签到详情接口验证），失效自动 code 刷新"""
     cache_token = get_cached_token(server)
@@ -1210,14 +1279,15 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         return result
 
 
-def build_notify(results: List[Dict[str, Any]]) -> str:
+def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str, Any]]] = None) -> str:
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
+    skip_count = len(skipped or [])
 
     content = f"""🌱 全棉时代任务结果
 
 ━━━━━━━━━━━━━━━━━━━━
-🏁 总结：{success_count} 成功 / {fail_count} 失败
+🏁 总结：{success_count} 成功 / {fail_count} 失败{' / %d 跳过（今日已完成）' % skip_count if skip_count else ''}
 🕒 时间：{now_text()}
 ━━━━━━━━━━━━━━━━━━━━
 """
@@ -1246,11 +1316,21 @@ def main() -> None:
     log_title()
 
     results: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
 
     for index, server in enumerate(SERVERS, 1):
+        # 今天已打标的账号直接跳过，不再消耗取码/取号配额
+        if is_done_today(server):
+            log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
+            skipped.append({"server": server})
+            continue
+
         try:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
+            # 只有整个流程走完（success=True）才打标
+            if result.get("success"):
+                mark_done_today(server, result.get("signMsg", ""))
         except Exception as exc:
             err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
@@ -1271,17 +1351,20 @@ def main() -> None:
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
-    log("📊 [执行汇总] 全面时代 · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (len(results), success_count, fail_count))
+    log("📊 [执行汇总] 全面时代 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
+        % (len(SERVERS), success_count, fail_count, len(skipped)))
 
     print()
     log("╔" + "═" * 50 + "╗")
     log("║ 🏁 全棉时代任务执行完成                      ║")
     log(f"║ ✅ 成功: {success_count:<39}║")
     err(f"║ ❌ 失败: {fail_count:<39}║")
+    if skipped:
+        log(f"║ ⏭️ 跳过(今日已完成): {len(skipped):<29}║")
     log(f"║ 🕒 结束时间: {now_text():<32}║")
     log("╚" + "═" * 50 + "╝")
 
-    send_pushplus("🌱 全棉时代任务完成", build_notify(results))
+    send_pushplus("🌱 全棉时代任务完成", build_notify(results, skipped))
     return fail_count
 
 
