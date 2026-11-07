@@ -64,6 +64,10 @@ API_BASE = "https://lop-proxy.jd.com"
 TIMEOUT = 20
 # YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
 YYB_TIMEOUT = 60
+
+# ===================== 日打标（今日完成标记） =====================
+# 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jdkuaidi_daily_done.json")
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
@@ -235,6 +239,75 @@ def acc_banner(idx, total, ident=""):
 def acc_footer(idx, total):
     """打印账号分隔标识（结束）。"""
     log("🔚 账号 %d/%d 处理结束" % (idx, total))
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
+
+def done_key(server: str, ref: str) -> str:
+    """账号唯一标识：地址@账号标识（与 YYB_SERVER 配置口径一致，全局唯一）。"""
+    return "%s@%s" % (server, ref)
 
 
 def parse_accounts() -> List[Tuple[str, str]]:
@@ -690,25 +763,37 @@ def main() -> int:
             warn("⚠️ JDEXPRESS_ACCOUNT_LIMIT 不是有效正整数，已忽略")
     total = len(accounts)
     results: List[Dict[str, Any]] = []
+    skipped = 0
     for index, (server, ref) in enumerate(accounts, 1):
+        # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+        key = done_key(server, ref)
+        if is_done_today(key):
+            log(f"⏭️ [打标] 账号 {index}/{total} 今日任务已完成，跳过")
+            skipped += 1
+            continue
         acc_banner(index, total, "标识：" + mask_ref(ref))
         try:
-            results.append(run_account(index, server, ref))
+            result = run_account(index, server, ref)
+            results.append(result)
+            # 只有整个流程走完（success=True）才算今日完成
+            if result.get("success"):
+                mark_done_today(key, result.get("status", ""))
         except Exception as exc:
             err(f"❌ 账号 {index} 失败：{exc}")
             results.append({"index": index, "ref": mask_ref(ref), "success": False, "error": str(exc)})
         acc_footer(index, total)
     ok = sum(1 for r in results if r.get("success"))
+    fail = len(results) - ok
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] {APP_NAME} · 账号 {total} ｜ 成功 {ok} ｜ 失败 {total - ok}")
+    log(f"📊 [执行汇总] {APP_NAME} · 账号 {total} ｜ 成功 {ok} ｜ 失败 {fail} ｜ 跳过 {skipped}")
     log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "京东快递",
-        f"账号 {total} ｜ 成功 {ok} ｜ 失败 {total - ok}",
+        f"账号 {total} ｜ 成功 {ok} ｜ 失败 {fail} ｜ 跳过 {skipped}",
         logger=log,
     )
-    return 0 if ok == total else 1
+    return 0 if fail == 0 else 1
 
 
 if __name__ == "__main__":

@@ -73,6 +73,9 @@ SCAN_FORWARD = 30
 SCAN_FALLBACK_HIGH = 130
 SCAN_FALLBACK_LOW = 60
 SCAN_LIMIT = 45
+# 日打标文件：今日已完成的账号当天再次运行时直接跳过（不消耗 YYB 取码配额）
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "tastien_daily_done.json")
 
 # ────────────────────────────────────────────
 # 统一日志
@@ -237,6 +240,75 @@ def acc_banner(idx, total, ident=""):
 def acc_footer(idx, total):
     """打印账号分隔标识（结束）。"""
     log("🔚 账号 %d/%d 处理结束" % (idx, total))
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
+
+def done_key(server: str, ref: str) -> str:
+    """账号唯一标识：地址@账号标识（与 YYB_SERVER 配置口径一致）。"""
+    return "%s@%s" % (server, ref)
 
 
 def mask_token(token: str) -> str:
@@ -748,7 +820,14 @@ def main() -> int:
 
     activity_id = 0  # 全局同一活动，第一个账号登录成功后探测一次
     results: List[Dict[str, Any]] = []
+    skipped = 0
     for index, (server, ref, remark) in enumerate(entries, 1):
+        # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+        key = done_key(server, ref)
+        if is_done_today(key):
+            log(f"⏭️ [打标] 账号 {index}/{total} 今日任务已完成，跳过")
+            skipped += 1
+            continue
         acc_banner(index, total, "标识：" + remark)
         try:
             token, login_result = login_account(server, ref)
@@ -757,7 +836,11 @@ def main() -> int:
                 activity_id = resolve_activity(make_session(token))
                 if not activity_id:
                     raise RuntimeError("未找到进行中的签到活动（可写死 FORCE_ACTIVITY_ID 试试）")
-            results.append(run_account(index, token, login_result, activity_id))
+            result = run_account(index, token, login_result, activity_id)
+            results.append(result)
+            # 只有签到流程完整走完（success=True）才算今日完成；异常路径不打标
+            if result.get("success"):
+                mark_done_today(key, result.get("status", ""))
         except Exception as exc:
             message = _TOKEN_INVALID if auth_error(exc) else str(exc)
             err("❌ 账号 %d 失败：%s" % (index, message))
@@ -768,19 +851,23 @@ def main() -> int:
 
     ok = sum(1 for r in results if r.get("success"))
     already = sum(1 for r in results if r.get("status") == "今日已签到")
-    tail = "📊 [执行汇总] %s · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (APP_NAME, total, ok, total - ok)
+    fail = total - ok - skipped
+    tail = "📊 [执行汇总] %s · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (APP_NAME, total, ok, fail)
     if already:
         tail += " ｜ 🟡 已签 %d" % already
+    if skipped:
+        tail += " ｜ 跳过 %d" % skipped
     log(_ACC_RULE)
     log(tail)
     log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         APP_NAME,
-        "账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok, total - ok),
+        "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok, fail, skipped),
         logger=log,
     )
-    return 0 if ok == total else 1
+    # 退出码语义不变：只有真实失败才算失败；全跳过时退出码为 0
+    return 0 if fail == 0 else 1
 
 
 if __name__ == "__main__":

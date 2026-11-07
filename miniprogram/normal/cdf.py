@@ -25,6 +25,7 @@ YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；
 import os, re, time, random, traceback, json
 import requests
 from datetime import datetime
+from typing import Any, Dict
 
 # ============== 新手配置区 ==============
 APP_ID = "wxdf26125d1f97992c"
@@ -40,6 +41,10 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.
 LOGIN_URL       = "https://" + HOST + "/api/session/wxSession/v2"
 SIGN_URL        = "https://" + HOST + "/api/user/sign"
 SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
+
+# 日打标文件：今日已完成的账号当天再次运行时直接跳过（不消耗 YYB 取码配额）
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "cdf_daily_done.json")
 
 # ———————————— 错误通知（可选项，想用则用）————————————
 # 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
@@ -203,6 +208,69 @@ def today_str():
         str(y) + "-" + str(m).zfill(2) + "-" + str(d).zfill(2),
         time.strftime("%Y-%m-%d"),
     )
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
 
 # ———————————— 基础组件 ————————————
 def _common_headers(token=None, page="pages/main/main"):
@@ -377,7 +445,7 @@ def run_account(server, ref):
     if not token:
         brief = " ".join(str(status_msg).split())[:80]
         err("❌ 账号不可用 · 原因: " + brief)
-        return False, "ref " + str(ref) + ": ❌ " + brief
+        return False, "ref " + str(ref) + ": ❌ " + brief, ""
     # 登录状态一行简注（每次都是新登录）
     log("🔑 登录态 · " + status_msg)
     t_short, t_long, _ = today_str()
@@ -401,7 +469,7 @@ def run_account(server, ref):
     # 如果之前没签 / 之后签了，加一行 🎉 高亮
     if before is False and after is True:
         log("🎉 本账号首次签到成功！")
-    return True, "ref " + str(ref) + ": " + emoji + " " + tag
+    return True, "ref " + str(ref) + ": " + emoji + " " + tag, status
 
 def main():
     log_startup()
@@ -422,12 +490,22 @@ def main():
         return
 
     success = 0
+    skipped = 0
     for i, (server, ref, _) in enumerate(entries, start=1):
+        # 今日已成功签到的账号直接跳过，不再消耗 YYB 取码配额
+        key = "%s@%s" % (server, ref)
+        if is_done_today(key):
+            log(f"⏭️ [打标] 账号 {i}/{total} 今日任务已完成，跳过")
+            skipped += 1
+            continue
         acc_banner(i, total, "标识：" + str(ref))
         try:
-            ok, line = run_account(server, ref)
+            ok, line, status = run_account(server, ref)
             if ok:
                 success += 1
+            # 只有服务端明确返回「签到成功 / 今日已签到」才算今日完成
+            if status in ("成功", "已签"):
+                mark_done_today(key, line)
         except Exception as e:
             err("💥 账号异常: " + str(e))
             err(traceback.format_exc())
@@ -437,13 +515,14 @@ def main():
             # 不打印休息，避免啰嗦；真卡住了用户能从执行计时看在等
             time.sleep(wait)
 
+    fail = total - success - skipped
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] 中免会员 · 账号 {total} ｜ 成功 {success} ｜ 失败 {total - success}")
+    log(f"📊 [执行汇总] 中免会员 · 账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}")
     log(_ACC_RULE)
 
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify("中免会员",
-                 f"账号 {total} ｜ 成功 {success} ｜ 失败 {total - success}",
+                 f"账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}",
                  logger=log)
 
 if __name__ == "__main__":

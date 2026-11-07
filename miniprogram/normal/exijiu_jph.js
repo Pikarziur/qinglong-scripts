@@ -165,7 +165,7 @@ request = request.defaults({
 // 级别 INFO/WARN/ERROR；行首自带 emoji 时沿用，否则按级别补默认 emoji
 // （SRC 已在文件顶部定义，供 Env 构造函数使用）
 const _LEVEL_EMOJI = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌' };
-const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
+const _EMOJI_HEAD = /^(?:[\u2600-\u27BF]|[\u2B00-\u2BFF]|[\u23E9-\u23EF]|\u2139|\uFE0F|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|\uD83E[\uDC00-\uDFFF]|\d\uFE0F?\u20E3)/;
 function _levelOfLine(line) {
     if (/^(?:\u274C|\uD83D\uDCA5)/.test(line)) return 'ERROR'; // ❌ 💥
     if (/^\u26A0/.test(line)) return 'WARN';                   // ⚠️
@@ -185,6 +185,71 @@ function emit(level, text) {
 function log(text) { emit(null, text); }
 function warn(text) { emit('WARN', text); }
 function err(text) { emit('ERROR', text); }
+
+// ====================== 日打标（今日完成标记） ======================
+// 记录「今日已完成」的账号，当天再次运行时直接跳过，省下 YYB 取码/取号配额
+// 文件：脚本同目录 exijiu_jph_daily_done.json（复用顶部已 require 的 _qfs / _qpath）
+const DAILY_DONE_FILE = _qpath.join(__dirname, 'exijiu_jph_daily_done.json');
+
+function _today() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function load_daily_done() {
+    try {
+        if (_qfs.existsSync(DAILY_DONE_FILE)) {
+            const data = JSON.parse(_qfs.readFileSync(DAILY_DONE_FILE, 'utf8'));
+            if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+        }
+    } catch (e) {
+        warn(`⚠️ [打标] 读取失败: ${e.message || e}`);
+    }
+    return {};
+}
+
+function save_daily_done(cache) {
+    try {
+        const tmp = `${DAILY_DONE_FILE}.tmp`;
+        _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+        _qfs.renameSync(tmp, DAILY_DONE_FILE);
+    } catch (e) {
+        err(`❌ [打标] 保存失败: ${e.message || e}`);
+    }
+}
+
+function is_done_today(key) {
+    const entry = load_daily_done()[key];
+    if (!entry || typeof entry !== 'object') return false;
+    return String(entry.date || '') === _today();
+}
+
+function mark_done_today(key, note = '') {
+    const cache = load_daily_done();
+    const today = _today();
+    // 只保留当天的记录，跨天自动清理，避免文件无限增长
+    const kept = {};
+    for (const [k, v] of Object.entries(cache)) {
+        if (v && typeof v === 'object' && String(v.date || '') === today) kept[k] = v;
+    }
+    const now = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    kept[key] = {
+        date: today,
+        doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
+        note: String(note || ''),
+    };
+    save_daily_done(kept);
+    log(`✅ [打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function clear_daily_done(key = '') {
+    const cache = load_daily_done();
+    if (key) delete cache[key];
+    else for (const k of Object.keys(cache)) delete cache[k];
+    save_daily_done(cache);
+}
 
 // ==================== 账号分隔标识：便于多账号日志区分定位 ====================
 // 注意：本脚本 emit 会对非 emoji 开头行自动补 ℹ️，故分隔线以 ➖ 开头（宽度≈70 列，与其它脚本一致）
@@ -257,9 +322,26 @@ function parseYybGoEntry(rawValue) {
             log(`【debug】 这是你的全部账号数组:\n ${xjhdArr}`);
         }
 
+        // 今日已完成（日打标）而跳过的账号数
+        let skipped = 0;
+        // 每日已完成标记：按账号下标记录，供汇总渲染用
+        const accSkipped = [];
+        const accBlockIdx = [];
+        // 登录成功的账号数，即 msg 中「✅ 用户手机号获取成功」分块的序号
+        let loginOk = 0;
+
         for (let index = 0; index < xjhdArr.length; index++) {
             let num = index + 1
             xjhd = xjhdArr[index];
+            // 今天已完成的账号直接跳过，不再消耗 YYB 取码/取号配额
+            const yybEntry = parseYybGoEntry(xjhd);
+            const doneKey = `${yybEntry.server}@${yybEntry.ref}`;
+            if (is_done_today(doneKey)) {
+                log(`⏭️ [打标] 账号 ${num}/${xjhdArr.length} 今日任务已完成，跳过`);
+                skipped++;
+                accSkipped[index] = true;
+                continue;
+            }
             accBanner(num, xjhdArr.length, `标识：${xjhd}`);
             xj_code = '';
             xj_token = '';
@@ -278,6 +360,9 @@ function parseYybGoEntry(rawValue) {
                 accFooter(num, xjhdArr.length);
                 continue;
             }
+            // 登录成功：msg 中追加了「✅ 用户手机号获取成功」，据此记录本账号对应的分块序号
+            // （分块按登录成功顺序排列，账号下标与之不一定相同，故单独记录）
+            accBlockIdx[index] = loginOk++;
             await get_setcookie(xj_token);
 
             // 滑块验证（服务端强校验：captcha/check 未通过则签到必被拒「未校验验证码」，故必须重试到位）
@@ -348,7 +433,9 @@ function parseYybGoEntry(rawValue) {
                 addLog(`⚠️ 验证码 ${CAPTCHA_RETRY} 次均未通过，本次签到大概率被服务端拒绝`, true);
             }
 
-            await fillSignIn(xj_cookie, xj_token, xj_code);
+            const signed = await fillSignIn(xj_cookie, xj_token, xj_code);
+            // 签到接口返回成功才算今日完成
+            if (signed) mark_done_today(doneKey, '签到成功');
             if (captchaSamplePayload) {
                 reportCaptchaSample({
                     ...captchaSamplePayload,
@@ -360,15 +447,23 @@ function parseYybGoEntry(rawValue) {
             accFooter(num, xjhdArr.length);
         }
         const okCount = (msg.match(/签到成功/g) || []).length;
+        const failCount = xjhdArr.length - okCount - skipped;
         log('➖'.repeat(35));
-        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${xjhdArr.length - okCount}`);
+        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`);
         // 渲染分账号汇总（简洁精要；账号行含总积分，签到状态 ✔️/❌）
         const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
         const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);
         const summaryOut = [];
         for (let i = 0; i < xjhdArr.length; i++) {
             const em = seqEmoji[i] || `${i + 1}.`;
-            const blk = (blocks[i] || '').trim();
+            if (accSkipped[i]) {
+                // 今日已完成（打标跳过）：无本次执行数据
+                summaryOut.push(`${em} [账号${i + 1}]`);
+                summaryOut.push('⏭️ 今日已完成，跳过');
+                continue;
+            }
+            // 登录成功的账号按其登录序号取分块，避免跳过/失败账号造成错位
+            const blk = (accBlockIdx[i] !== undefined ? (blocks[accBlockIdx[i]] || '') : (blocks[i] || '')).trim();
             const phoneMatch = blk.match(/^(\d{3}\*{4}\d{4})/);
             const phone = phoneMatch ? phoneMatch[1] : `账号${i + 1}`;
             summaryOut.push(`${em} [${phone}]`);
@@ -389,7 +484,7 @@ function parseYybGoEntry(rawValue) {
         // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
         await flushNotify(
             '君品荟',
-            `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${xjhdArr.length - okCount}`,
+            `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`,
             log,
         );
     }
@@ -559,16 +654,18 @@ async function fillSignIn(cookie_, token__, signCode) {
                     pointValue = d.data?.pointValue || 0;
                     //log(`✅ 签到成功，积分：${pointValue}`);
                     addLog(`签到成功，获得积分：${pointValue}`);
+                    resolve(true);
                 } else {
                     addLog(`签到失败：${d.message || '未知'}`);
+                    resolve(false);
                 }
             } catch (e) {
                 addLog(`签到异常`);
+                resolve(false);
             }
-            resolve();
         }).catch(() => {
             addLog(`签到请求失败`);
-            resolve();
+            resolve(false);
         })
     })
 }

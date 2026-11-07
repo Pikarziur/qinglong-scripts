@@ -435,6 +435,11 @@ GROWTH_URL = f"{BASE_URL}/api/app/membervip.php"
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bjycookie.json")
 
+# 「日打标」：记录今天已完成的账号，当天再次运行时直接跳过，避免重复消耗取码配额。
+# 结构：{ "<server>": {"date": "2026-11-07", "doneTime": "...", "note": "..."} }
+# 跨天自动失效；文件在脚本同目录、非隐藏，面板文件管理里可见/可删。
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bjy_daily_done.json")
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 "
@@ -833,6 +838,70 @@ def save_token_cache(cache: Dict[str, Any]) -> None:
         log("✅ [缓存] Token保存成功")
     except Exception as exc:
         err(f"❌ [缓存] 保存失败: {exc}")
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
 
 
 def get_cached_token(server: str) -> Tuple[str | None, str | None]:
@@ -1371,10 +1440,12 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         return result
 
 
-def _finish(total: int, ok_count: int) -> int:
+def _finish(total: int, ok_count: int, skipped: int = 0) -> int:
     """打印尾部 [执行汇总] 并推送错误日志，返回退出码。"""
-    fail_count = total - ok_count
+    fail_count = total - ok_count - skipped
     tail = "账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok_count, fail_count)
+    if skipped:
+        tail += " ｜ 跳过 %d" % skipped
     log(_ACC_RULE)
     log("📊 [执行汇总] 白鲸鱼 · %s" % tail)
     log(_ACC_RULE)
@@ -1406,11 +1477,21 @@ def main() -> int:
     log("♻️ 白鲸鱼旧衣服回收 · 共 %d 个账号" % total)
 
     results: List[Dict[str, Any]] = []
+    skipped = 0
 
     for index, server in enumerate(accounts, 1):
+        # 今天已打标的账号直接跳过，不再消耗取码/取号配额
+        if is_done_today(server):
+            log(f"⏭️ [打标] 账号 {index}/{total} 今日任务已完成，跳过")
+            skipped += 1
+            continue
+
         try:
             result = run_account(index, total, server)
             results.append(result)
+            # 只有整个流程走完（success=True）才打标
+            if result.get("success"):
+                mark_done_today(server, result.get("signMsg", ""))
         except Exception as exc:
             err("❌ [主程序] %s 执行异常: %s" % (server, exc))
             results.append({
@@ -1434,7 +1515,7 @@ def main() -> int:
             sleep(2)
 
     success_count = sum(1 for item in results if item["success"])
-    return _finish(total, success_count)
+    return _finish(total, success_count, skipped)
 
 
 if __name__ == "__main__":

@@ -36,8 +36,10 @@ import random
 import time
 import requests
 import os
+import json
 import traceback
 from datetime import datetime
+from typing import Any, Dict
 
 # ———————————— 错误通知（可选项，想用则用）————————————
 # 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
@@ -185,6 +187,80 @@ _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
+
+# 「日打标」：记录今天已完成的账号，当天再次运行时直接跳过，避免重复消耗取码配额。
+# 结构：{ "<server>@<ref>": {"date": "2026-11-07", "doneTime": "...", "note": "..."} }
+# 跨天自动失效；文件在脚本同目录、非隐藏，面板文件管理里可见/可删。
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ztkuaidi_daily_done.json")
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        print(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        print(f"❌ [打标] 保存失败: {exc}")
+
+
+def done_key(server: str, ref: str) -> str:
+    """账号唯一标识：server@ref（server 已不含 ref 后缀，需自行拼接）。"""
+    return f"{server}@{ref}"
+
+
+def is_done_today(key: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(key)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(key: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[key] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+
+
+def clear_daily_done(key: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if key:
+        cache.pop(key, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
 
 class AutoTask:
     # ========== 启动信息 ==========
@@ -477,6 +553,22 @@ class AutoTask:
                     all_entries = [e for i, e in enumerate(all_entries, 1) if i in wanted]
                     self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(all_entries)} 个账号")
             for index, (server, ref) in enumerate(all_entries, 1):
+                _done_key = done_key(server, ref)
+                # 今天已打标的账号直接跳过，不再消耗取码/取号配额
+                if is_done_today(_done_key):
+                    self.log(f"⏭️ [打标] 账号 {index}/{len(all_entries)} 今日任务已完成，跳过")
+                    self.account_results.append({
+                        "index": index,
+                        "login": "今日已完成，跳过",
+                        "sign": "已跳过",
+                        "initial_points": None,
+                        "final_points": None,
+                        "normal": False,
+                        "skipped": True,
+                    })
+                    self.acc_footer(index, len(all_entries))
+                    continue
+
                 self.acc_banner(index, len(all_entries), "标识：" + str(ref))
 
                 if MULTI_ACCOUNT_PROXY:
@@ -554,14 +646,19 @@ class AutoTask:
                 time.sleep(random.randint(1, 3))
                 final_points = self.get_points(session)
                 self.log_points_change(initial_points, final_points)
+                _done = sign_success or sign_message == "今日已签到"
                 self.account_results.append({
                     "index": index,
                     "login": "认证成功",
                     "sign": sign_message,
                     "initial_points": initial_points,
                     "final_points": final_points,
-                    "normal": sign_success or sign_message == "今日已签到",
+                    "normal": _done,
                 })
+                # 签到成功或今日已签 → 打上「今日已完成」标记
+                if _done:
+                    mark_done_today(_done_key, sign_message)
+                    self.log(f"✅ [打标] 今日任务已完成，已记录（{_today()}）")
 
                 self.acc_footer(index, len(all_entries))
 
@@ -570,13 +667,15 @@ class AutoTask:
         finally:
             _n = len(self.account_results)
             _ok = sum(1 for it in self.account_results if it.get("normal"))
+            _sk = sum(1 for it in self.account_results if it.get("skipped"))
+            _fail = _n - _ok - _sk
             self.log("=" * 70)
-            self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_n - _ok}")
-            self.log("=" * 70)            
+            self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail}" + (f" ｜ 跳过 {_sk}" if _sk else ""))
+            self.log("=" * 70)
             # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
             flush_notify(
                 "中通快递",
-                f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_n - _ok}",
+                f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail}" + (f" ｜ 跳过 {_sk}" if _sk else ""),
                 logger=self.log,
             )
 

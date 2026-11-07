@@ -264,6 +264,10 @@ USER_AGENT_LIST = [
 # 跳过的任务GUID
 SKIP_TASK_GUIDS = {"38C8BBDA3DAE4CD685B270D939E5063D", "36EFECD2AD8C44278317ED567EB24DD9"}
 
+# ===================== 日打标（今日完成标记） =====================
+# 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qc_daily_done.json")
+
 # ===================== 工具函数 =====================
 def sleep(ms: int) -> asyncio.Future:
     return asyncio.sleep(ms / 1000)
@@ -276,6 +280,69 @@ def get_ua() -> str:
 
 def build_direct_transport() -> AsyncHTTPTransport:
     return AsyncHTTPTransport()
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
 
 # ===================== 品赞代理系统 =====================
 def parse_proxy_response(text: str) -> Optional[Dict[str, Any]]:
@@ -703,7 +770,14 @@ async def main():
         global_proxy_info = await get_valid_proxy("全局共用")
 
     results = []
+    skipped = []
     for index, server in enumerate(SERVERS):
+        # 今天已完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
+        if is_done_today(server):
+            log(f"⏭️ [打标] 账号 {index + 1}/{len(SERVERS)} 今日任务已完成，跳过")
+            skipped.append(server)
+            continue
+
         proxy_info = global_proxy_info
         if ENABLE_PER_ACCOUNT_PROXY:
             proxy_info = await get_valid_proxy(server)
@@ -712,6 +786,9 @@ async def main():
         bot = QueChaoBot(server, proxy_info)
         result = await bot.run()
         results.append(result)
+        # 只有整个流程走完（success=True）才算今日完成
+        if result.get("success"):
+            mark_done_today(server, result.get("sign_msg", ""))
 
         if index < len(SERVERS) - 1:
             log(f"\n⏳ 等待2秒后执行下一个账号...")
@@ -740,10 +817,11 @@ async def main():
     log(f"💰 今日总新增: {sum(r['gained_score'] for r in results if r['success'])} 积分")
     log('='*40)
     log(ACC_RULE)
-    log("📊 [执行汇总] 雀巢 · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (
-        len(results),
+    log("📊 [执行汇总] 雀巢 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (
+        len(SERVERS),
         sum(1 for r in results if r["success"]),
-        sum(1 for r in results if not r["success"])))
+        sum(1 for r in results if not r["success"]),
+        len(skipped)))
     log(ACC_RULE)
 
 

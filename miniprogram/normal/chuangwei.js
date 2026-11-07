@@ -245,6 +245,71 @@ function logOk(msg)   { emit('INFO', msg); }
 function logWarn(msg) { emit('WARN', msg); }
 function logErr(msg)  { emit('ERROR', msg); }
 
+// ====================== 日打标（今日完成标记） ======================
+// 记录「今日已完成」的账号，当天再次运行时直接跳过，省下 YYB 取码/取号配额
+// 文件：脚本同目录 chuangwei_daily_done.json（复用顶部已 require 的 path / fs）
+const DAILY_DONE_FILE = path.join(__dirname, 'chuangwei_daily_done.json');
+
+function _today() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function load_daily_done() {
+  try {
+    if (_qfs.existsSync(DAILY_DONE_FILE)) {
+      const data = JSON.parse(_qfs.readFileSync(DAILY_DONE_FILE, 'utf8'));
+      if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+    }
+  } catch (e) {
+    logWarn(`⚠️ [打标] 读取失败: ${e.message || e}`);
+  }
+  return {};
+}
+
+function save_daily_done(cache) {
+  try {
+    const tmp = `${DAILY_DONE_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, DAILY_DONE_FILE);
+  } catch (e) {
+    logErr(`❌ [打标] 保存失败: ${e.message || e}`);
+  }
+}
+
+function is_done_today(key) {
+  const entry = load_daily_done()[key];
+  if (!entry || typeof entry !== 'object') return false;
+  return String(entry.date || '') === _today();
+}
+
+function mark_done_today(key, note = '') {
+  const cache = load_daily_done();
+  const today = _today();
+  // 只保留当天的记录，跨天自动清理，避免文件无限增长
+  const kept = {};
+  for (const [k, v] of Object.entries(cache)) {
+    if (v && typeof v === 'object' && String(v.date || '') === today) kept[k] = v;
+  }
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  kept[key] = {
+    date: today,
+    doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
+    note: String(note || ''),
+  };
+  save_daily_done(kept);
+  logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function clear_daily_done(key = '') {
+  const cache = load_daily_done();
+  if (key) delete cache[key];
+  else for (const k of Object.keys(cache)) delete cache[k];
+  save_daily_done(cache);
+}
+
 function section(title) { logInfo(`━━━ ${title} ━━━`); }
 
 // ========== 账号分隔标识：便于多账号日志区分定位 ==========
@@ -985,10 +1050,19 @@ async function runOne(account, idx) {
   let skipped = 0;
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i] || {};
+    // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额（并入 skipped 统计）
+    const doneKey = `${acc.server}@${acc.ref}`;
+    if (is_done_today(doneKey)) {
+      logInfo(`⏭️ [打标] 账号 ${i + 1}/${accounts.length} 今日任务已完成，跳过`);
+      skipped++;
+      continue;
+    }
     accBanner(i + 1, accounts.length,
       acc.note ? `备注：${acc.note}` : (acc.ref ? `标识：${acc.ref}` : ''));
     try {
       await runOne(accounts[i], i + 1);
+      // 整个流程走完（未抛异常）且确实执行了任务，才算今日完成
+      if (RUN_TASKS) mark_done_today(doneKey, '任务完成');
     } catch (e) {
       if (e?.accountSkipped) {
         logWarn(`⚠️ 账号${i + 1}未注册创维小程序，已跳过`);

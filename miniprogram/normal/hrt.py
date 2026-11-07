@@ -81,6 +81,9 @@ UA = (
     "MicroMessenger/8.0.75(0x18004b21) NetType/WIFI Language/zh_CN"
 )
 CACHE_FILE = Path(os.getenv("HRT_CACHE_FILE", "/ql/data/config/hrt_tokens.json"))
+# ===================== 日打标（今日完成标记） =====================
+# 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hrt_daily_done.json")
 
 
 # ────────────────────────────────────────────
@@ -336,6 +339,70 @@ def save_cache(cache: Dict[str, Any]) -> None:
     os.chmod(CACHE_FILE, 0o600)
 
 
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
+
 class HRT:
     def __init__(self, account: Account):
         self.account = account
@@ -572,7 +639,13 @@ def main() -> int:
     cache = load_cache()
     imported = [x.strip() for x in os.getenv("HRT_TOKEN", "").splitlines() if x.strip()]
     failures = 0
+    skipped = 0
     for pos, account in enumerate(accounts, 1):
+        # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+        if is_done_today(account.ref):
+            log(f"⏭️ [打标] 账号 {pos}/{len(accounts)} 今日任务已完成，跳过")
+            skipped += 1
+            continue
         acc_banner(pos, len(accounts), "标识：" + str(account.ref))
         client = HRT(account)
         try:
@@ -588,17 +661,20 @@ def main() -> int:
             log(f"📊 签到前积分：{result['before']}")
             log(f"🎁 本次增加积分：{result['added']}")
             log(f"📈 签到后积分：{result['after']}")
+            # 只有签到流程完整走完才算今日完成
+            mark_done_today(account.ref, status)
         except Exception as exc:
             failures += 1
             err(f"❌ {account.label}：失败 · 原因：{safe_message(exc)}")
         acc_footer(pos, len(accounts))
+    success = len(accounts) - failures - skipped
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] 华润通 · 账号 {len(accounts)} ｜ 成功 {len(accounts) - failures} ｜ 失败 {failures}")
-    log(_ACC_RULE)    
+    log(f"📊 [执行汇总] 华润通 · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failures} ｜ 跳过 {skipped}")
+    log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "华润通",
-        f"账号 {len(accounts)} ｜ 成功 {len(accounts) - failures} ｜ 失败 {failures}",
+        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failures} ｜ 跳过 {skipped}",
         logger=log,
     )
     return 1 if failures else 0

@@ -32,6 +32,7 @@ import uuid
 import re
 import base64
 from pathlib import Path
+from typing import Any, Dict
 from urllib.parse import quote, urljoin, urlparse
 import requests
 from requests.adapters import HTTPAdapter
@@ -210,6 +211,12 @@ CACHE_PATH = Path(os.getenv("MI_COMMUNITY_CACHE", "/ql/data/config/mi_community_
 if not CACHE_PATH.parent.exists():
     CACHE_PATH = Path(__file__).resolve().with_name(".mi_community_sessions.json")
 
+# 每日任务完成标记：记录「今天这个账号已经完整跑完」，避免同一天重复调用。
+# 结构：{ "<ref>": {"date": "2026-11-07", "doneTime": "...", "note": "签到成功"} }
+# key 口径与会话缓存 CACHE_PATH 一致（微信账号标识 ref）。
+# 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mishequ_daily_done.json")
+
 
 def flow_start(step, message):
     log(f"⏳ [{step}/{FLOW_STEPS}] {message}")
@@ -258,6 +265,70 @@ def save_cached_session(ref, source):
         os.chmod(CACHE_PATH, 0o600)
     except OSError as exc:
         raise RuntimeError(f"小米会话票据保存失败：{exc}") from exc
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期（本地时区），用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(ref: str) -> bool:
+    """该账号今天是否已经完整跑过（是则本次直接跳过）。"""
+    entry = load_daily_done().get(str(ref))
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(ref: str, note: str = "") -> None:
+    """记录该账号今天已完成。"""
+    cache = load_daily_done()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    today = _today()
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[str(ref)] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(ref: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if ref:
+        cache.pop(str(ref), None)
+    else:
+        cache = {}
+    save_daily_done(cache)
 
 
 def entries():
@@ -517,27 +588,44 @@ def main():
                 return 1
 
     failed = 0
+    skipped = 0
     log(f"🚀 {SCRIPT_NAME} 开始 · 共读取到 {len(accounts)} 个 YYB 账号")
     for index, (server, ref) in enumerate(accounts, 1):
+        # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
+        if is_done_today(ref):
+            log(f"⏭️ [打标] 账号 {index}/{len(accounts)} 今日任务已完成，跳过（标识：{ref}）")
+            skipped += 1
+            continue
+
         acc_banner(index, len(accounts), "标识：" + str(ref))
+        done_note = ""
         try:
             code, wx_user_info = get_code(server, ref)
             result = login_and_sign(code, wx_user_info, ref)
             log(f"🏁 账号 {ref} 流程完成：{result}")
+            done_note = str(result or "")
         except Exception as exc:  # 单账号失败不影响其他账号
             failed += 1
             err(f"🛑 账号 {ref} 流程终止：{exc}")
+        else:
+            # 只有整个流程走完（未抛异常）才算今日完成
+            mark_done_today(ref, done_note)
         acc_footer(index, len(accounts))
+
+    executed = len(accounts) - skipped
+    success = executed - failed
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {len(accounts) - failed} ｜ 失败 {failed}")
-    log(_ACC_RULE)    
+    log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failed} ｜ 跳过 {skipped}")
+    log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "小米社区",
-        f"账号 {len(accounts)} ｜ 成功 {len(accounts) - failed} ｜ 失败 {failed}",
+        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failed} ｜ 跳过 {skipped}",
         logger=log,
     )
-    return 1 if failed == len(accounts) else 0
+    # 退出码语义不变：只有「跑了的账号全失败」才算失败；
+    # 跳过的账号等同已完成，因此全跳过时退出码为 0
+    return 1 if executed > 0 and failed == executed else 0
 
 
 if __name__ == "__main__":

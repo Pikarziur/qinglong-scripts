@@ -32,6 +32,7 @@ import sys
 import socket
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
 from urllib.parse import urlsplit
 
 import requests
@@ -42,6 +43,9 @@ BASE = "https://hongke.changhong.com/gw/applet"
 TITLE = "长虹智慧家居签到"
 # YYB 取码用独立超时（连接 10 秒 / 读 60 秒）：取码经常要几十秒，与业务接口分开（统一 60 秒）
 YYB_TIMEOUT = (10, 60)
+# 日打标文件：今日已完成的账号当天再次运行时直接跳过（不消耗 YYB 取码配额）
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "changhong_daily_done.json")
 
 
 # ────────────────────────────────────────────
@@ -200,6 +204,79 @@ def acc_banner(idx, total, ident=""):
 def acc_footer(idx, total):
     """打印账号分隔标识（结束）。"""
     log("🔚 账号 %d/%d 处理结束" % (idx, total))
+
+
+# ====================== 日打标（今日完成标记） ======================
+def _today() -> str:
+    """当天日期，用于跨天判定。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_daily_done() -> Dict[str, Any]:
+    """读取日打标文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(DAILY_DONE_FILE):
+            with open(DAILY_DONE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [打标] 读取失败: {exc}")
+    return {}
+
+
+def save_daily_done(cache: Dict[str, Any]) -> None:
+    """写打标文件（临时文件 + rename 原子替换，避免写坏）。"""
+    try:
+        tmp = DAILY_DONE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DAILY_DONE_FILE)
+    except Exception as exc:
+        err(f"❌ [打标] 保存失败: {exc}")
+
+
+def is_done_today(server: str) -> bool:
+    """该账号今天是否已打过标（是则本次直接跳过）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("date") or "") == _today()
+
+
+def mark_done_today(server: str, note: str = "") -> None:
+    """给该账号打上「今日已完成」标记。"""
+    cache = load_daily_done()
+    today = _today()
+    # 只保留当天的记录，跨天自动清理，避免文件无限增长
+    cache = {k: v for k, v in cache.items()
+             if isinstance(v, dict) and str(v.get("date") or "") == today}
+    cache[server] = {
+        "date": today,
+        "doneTime": now_text(),
+        "note": str(note or ""),
+    }
+    save_daily_done(cache)
+    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def clear_daily_done(server: str = "") -> None:
+    """清除指定账号（或全部）的日打标。"""
+    cache = load_daily_done()
+    if server:
+        cache.pop(server, None)
+    else:
+        cache = {}
+    save_daily_done(cache)
+
+
+def daily_key(line):
+    """账号唯一标识：server@ref（与 YYB_SERVER 行口径一致）。"""
+    try:
+        server, ref = parse_entry(line)
+    except TaskError:
+        return str(line).strip()
+    return "%s@%s" % (server, ref)
 
 
 def configure_network():
@@ -431,11 +508,19 @@ def main():
             lines = [x for i, x in enumerate(lines, 1) if i in wanted]
             log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(lines)))
     results, fail_count = [], 0
+    skipped = 0
     if not lines:
         results.append("未配置 YYB_SERVER")
         fail_count = 1
     log(f"🚀 {TITLE} 开始 · 共 {len(lines)} 个账号")
     for index, line in enumerate(lines, 1):
+        # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+        key = daily_key(line)
+        if is_done_today(key):
+            log(f"⏭️ [打标] 账号 {index}/{len(lines)} 今日任务已完成，跳过")
+            skipped += 1
+            results.append(f"账号{index}：今日任务已完成，已跳过")
+            continue
         acc_banner(index, len(lines), "标识：" + str(entry_ref(line) or line))
         client = None
         failed = False
@@ -456,19 +541,23 @@ def main():
             log("🟡 " + msg)
         else:
             log("✅ " + msg)
+        # 账号流程完整走完（未抛异常）才算今日完成；异常路径不打标
+        if not failed:
+            mark_done_today(key, result)
         results.append(msg)
         acc_footer(index, len(lines))
     if not lines:
         err("🚫 " + results[0])
     # 控制台执行汇总
     _n = len(lines)
+    _ok = _n - fail_count - skipped
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] {TITLE} · 账号 {_n} ｜ 成功 {_n - fail_count} ｜ 失败 {fail_count}")
-    log(_ACC_RULE)    
+    log(f"📊 [执行汇总] {TITLE} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}")
+    log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "长虹智慧家居",
-        f"账号 {_n} ｜ 成功 {_n - fail_count} ｜ 失败 {fail_count}",
+        f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}",
         logger=log,
     )
     return 1 if fail_count else 0

@@ -169,6 +169,71 @@ function logOk(msg)   { emit('INFO', msg); }
 function logWarn(msg) { emit('WARN', msg); }
 function logErr(msg)  { emit('ERROR', msg); }
 
+// ====================== 日打标（今日完成标记） ======================
+// 记录「今日已完成」的账号，当天再次运行时直接跳过，省下 YYB 取码/取号配额
+// 文件：脚本同目录 haixinaj_daily_done.json
+const DAILY_DONE_FILE = path.join(__dirname, 'haixinaj_daily_done.json');
+
+function _today() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function load_daily_done() {
+  try {
+    if (fs.existsSync(DAILY_DONE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DAILY_DONE_FILE, 'utf8'));
+      if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+    }
+  } catch (e) {
+    logWarn(`⚠️ [打标] 读取失败: ${e.message || e}`);
+  }
+  return {};
+}
+
+function save_daily_done(cache) {
+  try {
+    const tmp = `${DAILY_DONE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    fs.renameSync(tmp, DAILY_DONE_FILE);
+  } catch (e) {
+    logErr(`❌ [打标] 保存失败: ${e.message || e}`);
+  }
+}
+
+function is_done_today(key) {
+  const entry = load_daily_done()[key];
+  if (!entry || typeof entry !== 'object') return false;
+  return String(entry.date || '') === _today();
+}
+
+function mark_done_today(key, note = '') {
+  const cache = load_daily_done();
+  const today = _today();
+  // 只保留当天的记录，跨天自动清理，避免文件无限增长
+  const kept = {};
+  for (const [k, v] of Object.entries(cache)) {
+    if (v && typeof v === 'object' && String(v.date || '') === today) kept[k] = v;
+  }
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  kept[key] = {
+    date: today,
+    doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
+    note: String(note || ''),
+  };
+  save_daily_done(kept);
+  logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function clear_daily_done(key = '') {
+  const cache = load_daily_done();
+  if (key) delete cache[key];
+  else for (const k of Object.keys(cache)) delete cache[k];
+  save_daily_done(cache);
+}
+
 // ========== 账号分隔标识 ==========
 // ========== 启动信息 ==========
 function logStartup(total) {
@@ -2842,16 +2907,27 @@ async function main() {
 
   let ok = 0;
   let fail = 0;
+  let skipped = 0;
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     let merged = { remark: entry.remark, yybRef: entry.ref };
+
+    // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+    const doneKey = `${entry.server}@${entry.ref}`;
+    if (is_done_today(doneKey)) {
+      logInfo(`⏭️ [打标] 账号 ${i + 1}/${entries.length} 今日任务已完成，跳过`);
+      skipped++;
+      continue;
+    }
 
     try {
       const fresh = await loginByYYB(entry);
       merged = mergeWithCache(fresh, cache);
       const result = await runOneAccount(merged, i + 1, entries.length);
       ok += 1;
+      // 账号流程完整走完（未抛异常）才算今日完成
+      mark_done_today(doneKey, '任务完成');
 
       const toSave = Object.assign({}, merged, result.account, {
         updateTime: new Date().toISOString(),
@@ -2871,7 +2947,7 @@ async function main() {
     }
   }
 
-  const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 失败 ${fail}`;
+  const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] ${_QN_SITE} · ${tail}`);
   logInfo(ACC_RULE);

@@ -361,6 +361,10 @@ const USER_VERSION = "2.219.11.101";
 const PAGE_VERSION = "49"; // Referer 里的版本号，仅用于伪装来源，不参与校验（214027 抓包实采 servicewechat.com/wx35322299c6492f6e/49/page-frame.html）
 const API_BASE = "https://h5.youzan.com";
 const TOKEN_CACHE_FILE = path.join(__dirname, "wanyazhenxuan_token_cache.json");
+// 每日完成标记：记录「今天这个账号已经完整跑完」，避免同一天重复调用。
+// 结构：{ "<openid>": {"date": "2026-11-07", "doneTime": "...", "note": "签到成功"} }
+// 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
+const DAILY_DONE_FILE = path.join(__dirname, "wanyazhenxuan_daily_done.json");
 const USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF";
 
@@ -394,6 +398,66 @@ function writeTokenCache(cache) {
     } catch (e) {
         err(`写入token缓存失败: ${e.message || e}`);
     }
+}
+
+// ====================== 日打标（今日完成标记） ======================
+function _today() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function load_daily_done() {
+    try {
+        if (!fs.existsSync(DAILY_DONE_FILE)) return {};
+        const data = JSON.parse(fs.readFileSync(DAILY_DONE_FILE, "utf8"));
+        if (data && typeof data === "object" && !Array.isArray(data)) return data;
+    } catch (e) {
+        warn(`⚠️ [打标] 读取失败: ${e.message || e}`);
+    }
+    return {};
+}
+
+function save_daily_done(cache) {
+    try {
+        const tmp = `${DAILY_DONE_FILE}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), "utf8");
+        fs.renameSync(tmp, DAILY_DONE_FILE);
+    } catch (e) {
+        err(`❌ [打标] 保存失败: ${e.message || e}`);
+    }
+}
+
+function is_done_today(key) {
+    const entry = load_daily_done()[key];
+    if (!entry || typeof entry !== "object") return false;
+    return String(entry.date || "") === _today();
+}
+
+function mark_done_today(key, note = "") {
+    const cache = load_daily_done();
+    const today = _today();
+    // 只保留当天的记录，跨天自动清理，避免文件无限增长
+    const kept = {};
+    for (const [k, v] of Object.entries(cache)) {
+        if (v && typeof v === "object" && String(v.date || "") === today) kept[k] = v;
+    }
+    const now = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    kept[key] = {
+        date: today,
+        doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
+        note: String(note || ""),
+    };
+    save_daily_done(kept);
+    log(`[打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function clear_daily_done(key = "") {
+    const cache = load_daily_done();
+    if (key) delete cache[key];
+    else for (const k of Object.keys(cache)) delete cache[k];
+    save_daily_done(cache);
 }
 
 function maskPhone(phone = "") {
@@ -697,23 +761,26 @@ function buildSummaryContent(results) {
     return lines.join("\n");
 }
 
-async function printSummary(results) {
-    if (!results || !results.length) return;
+async function printSummary(results, skipped = 0) {
+    const list = results || [];
+    if (!list.length && !skipped) return;
     let ok = 0, signed = 0;
-    for (const t of results) {
+    for (const t of list) {
         if (t.todayStatus === '签到成功') ok++;
         else if (t.todayStatus === '今日已签') signed++;
     }
+    const total = list.length + skipped;
+    const fail = list.length - ok - signed;
     log('='.repeat(70));
-    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${results.length} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 失败 ${results.length - ok - signed}`);
-    for (const line of buildSummaryContent(results).split('\n')) {
+    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${total} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`);
+    for (const line of buildSummaryContent(list).split('\n')) {
         if (line) log(line);
     }
     log('='.repeat(70));
     // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     await flushNotify(
         '丸丫甄选',
-        `账号 ${results.length} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 失败 ${results.length - ok - signed}`,
+        `账号 ${total} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`,
         log,
     );
 }
@@ -722,15 +789,28 @@ async function printSummary(results) {
   logStartup();
     const results = [];
     await $.checkEnv(ckName);
+    let skipped = 0;
     for (let _i = 0; _i < $.userList.length; _i++) {
         const openid = $.userList[_i];
+        // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+        // key 与 wanyazhenxuan_token_cache.json 缓存口径一致（openid）
+        const doneKey = String(openid || '').trim();
+        if (is_done_today(doneKey)) {
+            log(`[打标] 账号 ${_i + 1}/${$.userList.length} 今日任务已完成，跳过`);
+            skipped++;
+            continue;
+        }
         accBanner(_i + 1, $.userList.length, `标识：${openid}`);
         const task = new Task(openid);
         await task.run();
         results.push(task);
+        // 今日已签到（服务端已签）或本次签到成功，都表示今日任务已完成
+        if (task.todayStatus === '签到成功' || task.todayStatus === '今日已签') {
+            mark_done_today(doneKey, task.todayStatus);
+        }
         accFooter(_i + 1, $.userList.length);
         await $.wait(800);
     }
-    await printSummary(results);
+    await printSummary(results, skipped);
 })()
     .catch((e) => err('💥 ' + (e.message || e)));

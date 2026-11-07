@@ -314,6 +314,71 @@ const LOGIN_PUBKEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRxFgN1vGYDSkfH90SI9Ixr1wxyTah3+ShYIDvEL1cI4XCvXHfnBkGb6dQPsiNj1skENyF9zEEWv0jshvgpgNleDzd6vnJRf8LQtolFv4dWXzJwruGTCq6lYTM/K+4E8iaiXarD9z3fsR4nIUcu5QRRY1m//nLhRtxonva/ubO+QIDAQAB
 -----END PUBLIC KEY-----`;
 const CACHE_FILE = path.join(__dirname, 'PAID_cookies.json');
+// 每日完成标记：记录「今天这个账号已经完整跑完」，避免同一天重复调用。
+// 结构：{ "<openid>": {"date": "2026-11-07", "doneTime": "...", "note": "签到完成"} }
+// 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
+const DAILY_DONE_FILE = path.join(__dirname, 'paid_daily_done.json');
+
+// ====================== 日打标（今日完成标记） ======================
+function _today() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function load_daily_done() {
+  try {
+    if (fs.existsSync(DAILY_DONE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DAILY_DONE_FILE, 'utf8'));
+      if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+    }
+  } catch (e) {
+    logWarn(`⚠️ [打标] 读取失败: ${e.message || e}`);
+  }
+  return {};
+}
+
+function save_daily_done(cache) {
+  try {
+    const tmp = `${DAILY_DONE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    fs.renameSync(tmp, DAILY_DONE_FILE);
+  } catch (e) {
+    logErr(`❌ [打标] 保存失败: ${e.message || e}`);
+  }
+}
+
+function is_done_today(key) {
+  const entry = load_daily_done()[key];
+  if (!entry || typeof entry !== 'object') return false;
+  return String(entry.date || '') === _today();
+}
+
+function mark_done_today(key, note = '') {
+  const cache = load_daily_done();
+  const today = _today();
+  // 只保留当天的记录，跨天自动清理，避免文件无限增长
+  const kept = {};
+  for (const [k, v] of Object.entries(cache)) {
+    if (v && typeof v === 'object' && String(v.date || '') === today) kept[k] = v;
+  }
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  kept[key] = {
+    date: today,
+    doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
+    note: String(note || ''),
+  };
+  save_daily_done(kept);
+  logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function clear_daily_done(key = '') {
+  const cache = load_daily_done();
+  if (key) delete cache[key];
+  else for (const k of Object.keys(cache)) delete cache[k];
+  save_daily_done(cache);
+}
 
 // ============================== 日志 ==============================
 const mask = (o) => (o && o.length > 6 ? o.slice(0, 3) + '***' + o.slice(-3) : o || '');
@@ -653,8 +718,8 @@ async function runOne(account, cache, tkmap){
 }
 
 // ============================== 主流程 ==============================
-async function finishSummary(total, okCount){
-  const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 失败 ${total - okCount}`;
+async function finishSummary(total, okCount, skipped = 0){
+  const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${total - okCount - skipped}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] 平安i动 · ${tail}`);
   logInfo(ACC_RULE);
@@ -690,14 +755,27 @@ async function main(){
   logInfo(`🚀 平安i动 健康币 · 共 ${total} 个账号`);
 
   let okCount = 0;
+  let skipped = 0;
   for (let idx = 0; idx < accounts.length; idx++){
     const account = accounts[idx];
+    // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+    // key 与 PAID_cookies.json 缓存口径一致（openid = account.ref）
+    const doneKey = account.ref;
+    if (is_done_today(doneKey)) {
+      logInfo(`⏭️ [打标] 账号 ${idx + 1}/${total} 今日任务已完成，跳过`);
+      skipped++;
+      continue;
+    }
     logInfo(ACC_RULE);
     logInfo(`👤 账号 ${idx + 1}/${total}${account.note ? ' ｜ 备注：' + account.note : ''}`);
     logInfo(ACC_RULE);
     const r = await runOne(account, cache, tkmap);
     r.line.forEach(logLine);
-    if (r.success) okCount++;
+    if (r.success) {
+      okCount++;
+      // 签到成功（含今日已签到）才算今日完成
+      mark_done_today(doneKey, '签到完成');
+    }
     if (idx < accounts.length - 1){
       const configuredDelay = ACCOUNT_DELAY === undefined ? NaN : Number(ACCOUNT_DELAY);
       const s = Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 10 + Math.floor(Math.random() * 9);
@@ -705,8 +783,9 @@ async function main(){
     }
   }
 
-  await finishSummary(total, okCount);
-  if (okCount !== total) process.exitCode = 1;
+  await finishSummary(total, okCount, skipped);
+  // 跳过不算失败：仅当有真实失败账号时才置退出码
+  if (total - okCount - skipped > 0) process.exitCode = 1;
 }
 
 if (require.main === module) main().catch(async (e) => {
