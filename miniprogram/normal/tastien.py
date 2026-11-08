@@ -355,7 +355,7 @@ def yyb_get_code(server: str, ref: str) -> str:
         sess = requests.Session()
         sess.trust_env = False
         response = sess.post(server + "/wxapp/getCode",
-                             json={"ref": ref, "app_id": MINI_APPID}, timeout=(10, 60))
+                             json={"ref": ref, "app_id": MINI_APPID}, timeout=(10, 90))
         response.raise_for_status()
         body = response.json()
     except Exception as exc:

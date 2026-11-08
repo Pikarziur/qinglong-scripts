@@ -1572,7 +1572,7 @@ async function yybRequest(entry, endpoint, retry = 0) {  // 只请求一次，�
       const { data } = await request('POST', `${entry.server}${endpoint}`, {
         headers: { 'content-type': 'application/json' },
         data: { ref: entry.ref, app_id: CONSTS.WX_APP_ID },
-        timeout: 60000,
+        timeout: 90000,
       });
       const result = data?.data?.result;
       if (Number(data?.code ?? -1) !== 0 || !result || typeof result !== 'object') {

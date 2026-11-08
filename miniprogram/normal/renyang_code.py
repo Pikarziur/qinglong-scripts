@@ -113,6 +113,12 @@ PROXY_FETCH_INTERVAL = 3
 ENABLE_DIRECT_FALLBACK = True
 REQUEST_TIMEOUT = 30
 
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
+
 # ── YYB-GO 熔断（HTTP 429）处理 ────────────────────────────────────────
 # 2026-11-05：YYB-GO 对 (账号, AppID, 操作类型) 做目标层熔断，连续 2 次 -14
 # 就暂停该目标 10 分钟；取码限速也会返回 429。此时请求根本没发往上游，
@@ -1305,7 +1311,7 @@ def _yyb_json_request(server, path, appid, payload=None):
         endpoint + path,
         json={"ref": ref, "app_id": str(appid), **(payload or {})},
         headers=headers,
-        timeout=30,
+        timeout=YYB_TIMEOUT,
     )
     try:
         body = response.json()

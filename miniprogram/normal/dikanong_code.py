@@ -112,6 +112,13 @@ PROXY_FETCH_INTERVAL = 3
 ENABLE_DIRECT_FALLBACK = True
 REQUEST_TIMEOUT = 30
 
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
+
+
 BASE_URL = "https://api-cn.decathlon.com.cn"
 BFF_BASE_URL = "https://mpm-store.decathlon.com.cn"
 LOGIN_URL = f"{BFF_BASE_URL}/wcc_bff/api/v1/auth/simplify/login"
@@ -904,7 +911,7 @@ def _yyb_json_request(server, path, appid, payload=None):
         endpoint + path,
         json={"ref": ref, "app_id": str(appid), **(payload or {})},
         headers=headers,
-        timeout=30,
+        timeout=YYB_TIMEOUT,
     )
     try:
         body = response.json()

@@ -73,8 +73,11 @@ H5_APP_ID = "API_AUTH_H5"
 H5_AUTH_SECRET = "1c6120fd-5ad3-4c2d-8cb7-b87a707f416d"
 SUCCESS = "S0A00000"
 TIMEOUT = 25
-# YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
-YYB_TIMEOUT = 60
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "

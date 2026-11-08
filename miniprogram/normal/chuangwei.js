@@ -159,7 +159,7 @@ const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] = 跑
 // 取 code 的超时与重试：YYB 服务慢响应是常态（实测面板出一次 code 可到 56s），
 // 原 20s 硬上限会把整个账号直接判死，这里放宽到 60s。为不触发 YYB-GO 的 5 分钟限流，
 // 取 code 只请求一次、失败即报错（不再重试）。
-const YYB_TIMEOUT = 60000;  // 取 code 单次请求超时（毫秒）
+const YYB_TIMEOUT = 90000;  // 取 code 单次请求超时（毫秒）
 const YYB_RETRY = 1;        // 取 code 只尝试 1 次（含首次），不重试，避免触发 YYB-GO 5 分钟限流
 
 const ENV_NAME = 'chuangw';

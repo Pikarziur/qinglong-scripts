@@ -41,9 +41,11 @@ import urllib3.util.connection
 APP_ID = "wx36c3413e8fe39263"
 BASE = "https://hongke.changhong.com/gw/applet"
 TITLE = "长虹智慧家居签到"
-# YYB 取码用独立超时（连接 10 秒 / 读 60 秒）：取码经常要几十秒，与业务接口分开（统一 60 秒）
-YYB_TIMEOUT = (10, 60)
-# 日打标文件：今日已完成的账号当天再次运行时直接跳过（不消耗 YYB 取码配额）
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "changhong_daily_done.json")
 

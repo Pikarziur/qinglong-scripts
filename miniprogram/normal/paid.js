@@ -226,7 +226,7 @@ const YYB_ONLY_REFS = [];
 
 // 取 code 单次请求超时（毫秒）。取码经常要几十秒，全仓统一 60 秒；
 // 裸 fetch 不设上限时受 undici 默认管（headersTimeout/bodyTimeout 各 300 秒），最坏能卡 5 分钟。
-const YYB_TIMEOUT = 60000;
+const YYB_TIMEOUT = 90000;
 
 // ============ 纯 JS AES（零依赖，逐字节等同 crypto-js；支持任意「4 的倍数」字节 key） ============
 // 与小程序(模块200 c.c)一致：key = Utf8(degradeToken)，iv = Utf8("123456789aasdfgh")，

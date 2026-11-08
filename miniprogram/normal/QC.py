@@ -214,7 +214,7 @@ async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
 
     url = f"http://{server}/wxapp/getCode"
     try:
-        async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0), trust_env=False) as client:
             response = await client.post(url, json={"ref": ref, "app_id": appid})
             res = response.json()
 

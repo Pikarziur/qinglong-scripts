@@ -122,6 +122,13 @@ except ValueError:
     PROXY_REQUEST_RETRIES = 3
 REQUEST_TIMEOUT = 30
 
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
+
+
 NMP_BASE_URL = "https://nmp.pureh2b.com"
 SG01_BASE_URL = "https://sg01.purcotton.com"
 
@@ -1417,7 +1424,7 @@ def _yyb_json_request(server, path, appid, payload=None):
         endpoint + path,
         json={"ref": ref, "app_id": str(appid), **(payload or {})},
         headers=headers,
-        timeout=30,
+        timeout=YYB_TIMEOUT,
     )
     try:
         body = response.json()

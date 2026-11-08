@@ -226,7 +226,11 @@ DEBUG = os.getenv("HL_DEBUG", "").strip() == "1"
 RANDOM_HEADERS = os.getenv("HL_RANDOM_HEADERS", "1").strip() != "0"
 UA_MODE = (os.getenv("HL_UA_MODE", "run").strip() or "run").lower()
 LOGIN_RETRY = max(1, int(os.getenv("HL_LOGIN_RETRY", "3") or 3))
-YYB_TIMEOUT = float(os.getenv("YYB_REQUEST_TIMEOUT", "60") or 60)
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = float(os.getenv("YYB_REQUEST_TIMEOUT", "90") or 90)
 HTTP_TIMEOUT = float(os.getenv("HL_HTTP_TIMEOUT", "25") or 25)
 
 # --------------------------------------------------------------------------- #

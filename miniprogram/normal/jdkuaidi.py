@@ -62,8 +62,11 @@ JD_PT_RETURN_URL = "https://my.m.jd.com/account/index.html"
 JD_LOGIN_APP_ID = "wx91d27dbf599dff74"
 API_BASE = "https://lop-proxy.jd.com"
 TIMEOUT = 20
-# YYB 取码用独立超时：取码经常要几十秒，与业务接口分开（统一 60 秒）
-YYB_TIMEOUT = 60
+# YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
+# （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
+# （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+# 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
+YYB_TIMEOUT = (10, 90)
 
 # ===================== 日打标（今日完成标记） =====================
 # 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
