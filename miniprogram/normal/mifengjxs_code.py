@@ -412,22 +412,56 @@ def get_code(server: str) -> str | None:
         return None
 
 
-def common_headers(token: str | None = None) -> Dict[str, str]:
-    """有赞系请求头：access_token 放 URL 参数，Extra-Data 带 sid 会话"""
+def common_headers(token: str | None = None, session_id: str | None = None) -> Dict[str, str]:
+    """有赞系请求头：access_token 放 URL 参数，Extra-Data 的 sid 必须是 session_id
+
+    ⚠️ 2026-11-09 修复：此前把 access_token 当作 sid 塞进 Extra-Data，
+    有赞校验的其实是会话 ID，导致所有业务接口一律返回
+    「invalid session」（登录那步却是成功的，所以极具迷惑性）。
+    实测对照（同一 token）：
+        sid=access_token  -> code=-1 invalid session
+        sid=session_id    -> code=0  ok
+        不带 Extra-Data   -> code=0  ok
+    取不到 session_id 时退化为不带 Extra-Data（实测同样通过）。
+    """
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": f"https://servicewechat.com/{APPID}/32/page-frame.html",
         "Accept": "application/json, text/plain, */*",
     }
-    if token:
+    if token and session_id:
         headers["Extra-Data"] = json.dumps({
             "is_weapp": 1,
-            "sid": token,
+            "sid": session_id,
             "version": USER_VERSION,
             "client": "weapp",
             "bizEnv": "wsc",
         }, separators=(",", ":"), ensure_ascii=False)
     return headers
+
+
+def extract_session_id(data: Any) -> str | None:
+    """有赞 authorize 响应：data.session_id（Extra-Data 的 sid 就是它）"""
+    if not isinstance(data, dict):
+        return None
+
+    candidates = [
+        data.get("session_id"),
+        data.get("sessionId"),
+    ]
+
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        candidates.extend([
+            inner.get("session_id"),
+            inner.get("sessionId"),
+        ])
+
+    for item in candidates:
+        if item and item != "null":
+            return str(item)
+
+    return None
 
 
 def extract_token(data: Any) -> str | None:
@@ -471,7 +505,7 @@ def build_url(api_path: str, token: str, query: Dict[str, Any] | None = None) ->
     return f"{API_BASE}/{pathname}?{query_str}"
 
 
-def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
+def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, Dict[str, Any] | None]:
     try:
         log("🔐 [登录] 使用 code 换 accessToken")
         response = request_with_proxy(
@@ -495,23 +529,29 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
             data = {"raw": response.text[:800]}
 
         token = extract_token(data)
+        session_id = extract_session_id(data)
         if token and to_float(data.get("code")) == 0:
             log(f"✅ [登录] accessToken 获取成功: {mask(token)}")
-            return token, data
+            if session_id:
+                log(f"✅ [登录] sessionId 获取成功: {mask(session_id)}")
+            else:
+                warn("⚠️ [登录] 未取到 sessionId，业务请求将不带 Extra-Data")
+            return token, session_id, data
 
         msg = data.get("msg") or data.get("message") or json_preview(data)
         err(f"❌ [登录] 登录失败: {msg}")
-        return None, data
+        return None, None, data
     except Exception as exc:
         err(f"❌ [登录] 请求异常: {exc}")
-        return None, None
+        return None, None, None
 
 
-def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None,
+            session_id: str | None = None) -> Dict[str, Any]:
     response = request_with_proxy(
         "GET",
         url,
-        headers=common_headers(token),
+        headers=common_headers(token, session_id),
         proxies=proxies,
         server=server,
     )
@@ -622,15 +662,30 @@ def get_cached_token(server: str) -> str | None:
     return None
 
 
-def set_cached_token(server: str, token: str, expire_time: str) -> None:
+def set_cached_token(server: str, token: str, expire_time: str, session_id: str | None = None) -> None:
     cache = load_token_cache()
-    cache[server] = {"token": token, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
+    cache[server] = {
+        "token": token,
+        "sessionId": session_id or "",
+        "expireTime": expire_time,
+        "updateTime": datetime.now().isoformat(),
+    }
     save_token_cache(cache)
 
 
-def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: str = "积分") -> str:
+def get_cached_session_id(server: str) -> str | None:
+    """取缓存里的 session_id（Extra-Data 的 sid）；旧缓存没有则返回 None"""
+    data = load_token_cache().get(server)
+    if not isinstance(data, dict):
+        return None
+    sid = data.get("sessionId") or data.get("session_id")
+    return str(sid) if sid else None
+
+
+def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: str = "积分",
+               session_id: str | None = None) -> str:
     """照源脚本 getPoints()：user_points.json 查积分"""
-    resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies)
+    resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies, session_id)
     if to_float(resp.get("code")) != 0:
         msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
         warn(f"⚠️ [积分] {label}获取失败: {msg}")
@@ -645,27 +700,28 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
     return f"{points} 积分"
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
+def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, Dict[str, Any] | None]:
     """优先使用缓存 token（积分接口验证），失效自动 code 刷新"""
     cache_token = get_cached_token(server)
     if cache_token:
+        cache_sid = get_cached_session_id(server)
         log("🔍 [缓存] 验证 token")
         try:
-            resp = api_get(server, build_url("wscump/integral/user_points.json", cache_token), cache_token, proxies)
+            resp = api_get(server, build_url("wscump/integral/user_points.json", cache_token), cache_token, proxies, cache_sid)
             if to_float(resp.get("code")) == 0:
                 log("✅ [缓存] token 有效")
-                return cache_token, None
+                return cache_token, cache_sid, None
         except Exception as exc:
             warn(f"⚠️ [缓存] 验证异常: {exc}")
         warn("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
-        return None, None
+        return None, None, None
 
-    token, raw_login = login_by_code(server, code, proxies)
+    token, session_id, raw_login = login_by_code(server, code, proxies)
     if not token:
-        return None, raw_login
+        return None, None, raw_login
 
     expire_time = None
     if raw_login and isinstance(raw_login, dict):
@@ -679,13 +735,14 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time)
-    return token, raw_login
+    set_cached_token(server, token, expire_time, session_id)
+    return token, session_id, raw_login
 
 
-def do_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> str:
+def do_checkin(server: str, token: str, proxies: Dict[str, str] | None,
+               session_id: str | None = None) -> str:
     """照源脚本 getCheckinInfo + doCheckin：查活动 -> checkinV2 签到"""
-    page_resp = api_get(server, build_url("wscump/checkin/show_checkin_page_v2.json", token), token, proxies)
+    page_resp = api_get(server, build_url("wscump/checkin/show_checkin_page_v2.json", token), token, proxies, session_id)
     if to_float(page_resp.get("code")) != 0:
         msg = page_resp.get("msg") or page_resp.get("message") or json_preview(page_resp, 200)
         warn(f"⚠️ [签到] 获取签到活动失败: {msg}")
@@ -704,7 +761,7 @@ def do_checkin(server: str, token: str, proxies: Dict[str, str] | None) -> str:
     log(f"⏳ [签到] 提交前等待 {wait_time}s")
     sleep(wait_time)
 
-    sign_resp = api_get(server, build_url("wscump/checkin/checkinV2.json", token, {"checkinId": checkin_id}), token, proxies)
+    sign_resp = api_get(server, build_url("wscump/checkin/checkinV2.json", token, {"checkinId": checkin_id}), token, proxies, session_id)
     if to_float(sign_resp.get("code")) == 0:
         sign_data = safe_data(sign_resp)
         award_list = []
@@ -752,7 +809,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, raw_login = login_with_cache(server, proxies)
+    token, session_id, raw_login = login_with_cache(server, proxies)
     if not token:
         result["error"] = f"登录失败: {json_preview(raw_login)}"
         return result
@@ -761,13 +818,13 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     try:
         # 签到前积分
-        points_before = get_points(server, token, proxies, "签到前积分")
+        points_before = get_points(server, token, proxies, "签到前积分", session_id)
 
         # 每日签到
-        result["signMsg"] = do_checkin(server, token, proxies)
+        result["signMsg"] = do_checkin(server, token, proxies, session_id)
 
         # 签到后积分
-        points_after = get_points(server, token, proxies, "签到后积分")
+        points_after = get_points(server, token, proxies, "签到后积分", session_id)
         result["pointsMsg"] = f"{points_before} → {points_after}"
 
         result["success"] = True
