@@ -7343,6 +7343,15 @@ def do_notify(users):
     if notify_content:
         content = "\n".join(notify_content)
         try:
+            # notify.py 放在仓库根目录（本文件在 app/ 子目录），
+            # 裸 import 会 No module named 'notify' —— 先把路径塞进 sys.path。
+            # 与其它脚本（normal/oclean_sign/hktv8 等）保持同一套写法。
+            _qn_here = os.path.dirname(os.path.abspath(__file__))
+            for _p in (_qn_here, os.path.dirname(_qn_here)):
+                if _p and os.path.isfile(os.path.join(_p, "notify.py")):
+                    if _p not in sys.path:
+                        sys.path.insert(0, _p)
+                    break
             from notify import send
             send(f"中国联通 {SCRIPT_VERSION}", content)
             log(f"推送成功 (内容长度: {len(content)})")
