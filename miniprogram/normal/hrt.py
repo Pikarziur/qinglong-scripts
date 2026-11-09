@@ -78,6 +78,27 @@ TIMEOUT = 25
 # （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
 # 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
 YYB_TIMEOUT = (10, 90)
+# ── YYB 取码重试（2026-11-09 新增）────────────────────────────────
+#
+# 现象：YYB-GO 频繁返回 HTTP 502，响应 msg 为
+#       "call failed: context deadline exceeded" 或
+#       "all ShortLink targets failed ... i/o timeout"
+#       （上游长连接节点 8 秒内不响应），属**纯连接层**故障 ——
+#       不是账号/授权问题，也拿不到上游错误码。
+#
+# 为什么必须由脚本自己重试：YYB-GO 的编队转移清单只含「成员被上游推回」
+# 类错误（-14 / 凭据签发拒绝 / 预算耗尽 / 会话不可用 / 账号过期），
+# 连接层超时**不触发 fleet.failover**，所以一个成员超时就整账号失败。
+# 而 YYB-GO 每次新请求会按「最近最少使用」把请求轮转到编队的下一个成员，
+# 重试正好能命中可用成员。
+#
+# 只对「上游连接超时」重试：
+#   - 429（本地限速/熔断）：服务端已在冷却，重试只会加剧风控 → 不重试
+#   - 404 / 409（账号不存在/失效）：不可恢复 → 不重试
+#   - 502 且带上游错误码（-14 等授权拒绝）：重试无用 → 不重试
+# 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
+YYB_RETRY_TIMES = int(os.getenv("HRT_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
+YYB_RETRY_DELAY = int(os.getenv("HRT_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
@@ -229,7 +250,7 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
@@ -406,6 +427,41 @@ def clear_daily_done(server: str = "") -> None:
     save_daily_done(cache)
 
 
+def _yyb_error_detail(body):
+    """从 YYB-GO 错误响应体里提取可安全展示的原因摘要。
+
+    只输出固定措辞，绝不回显服务端原文（可能含 URL、凭据或个人信息）。
+    """
+    if not isinstance(body, dict):
+        return ""
+    msg = str(body.get("message") or body.get("msg") or body.get("error") or "")
+    low = msg.lower()
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 上游明确拒绝（有结构化错误码）—— 这类重试无用
+    upstream = data.get("upstream_errors") or data.get("rejections")
+    if upstream:
+        codes = []
+        for item in upstream:
+            if isinstance(item, dict) and item.get("code") is not None:
+                codes.append(str(item.get("code")))
+        return ("上游拒绝（错误码 %s）" % "/".join(codes)) if codes else "上游拒绝"
+
+    # 本地熔断 / 限速
+    if data.get("circuit_open"):
+        return "服务端熔断中"
+    if "circuit" in low or "熔断" in msg:
+        return "服务端熔断中"
+
+    # 连接层超时（无上游错误码 + 8 秒 deadline）
+    if ("context deadline exceeded" in low or "shortlink" in low
+            or "i/o timeout" in low or "timeout" in low):
+        return "上游连接超时"
+    if "not found" in low:
+        return "账号不存在"
+    return ""
+
+
 class HRT:
     def __init__(self, account: Account):
         self.account = account
@@ -414,23 +470,63 @@ class HRT:
         self.token = ""
 
     def yyb(self, endpoint: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """调用 YYB-GO 的 /wxapp/<endpoint>，连接层失败自动重试。
+
+        仅「上游连接超时」才重试：这类失败是纯连接层的（上游长连接节点偶发
+        不响应，8 秒 deadline 后返回 502，响应体无上游错误码）。YYB-GO 的
+        编队转移清单不含连接层超时，不会自动换成员；但它每次新请求会把请求
+        轮转到编队的下一个成员，重试正好能命中可用成员。
+
+        熔断（429）、账号失效（404）、上游拒绝（-14 等）一律不重试。
+        """
         body: Dict[str, Any] = {"ref": self.account.ref, "app_id": APP_ID}
         if extra:
             body.update(extra)
-        response = self.session.post(self.account.server + endpoint, json=body, timeout=YYB_TIMEOUT)
-        response.raise_for_status()
-        outer = response.json()
-        if int(outer.get("code", -1)) != 0:
-            raise RuntimeError(f"YYB {endpoint}：{safe_message(outer.get('msg') or outer.get('message'))}")
-        result = outer.get("data", {}).get("result")
-        if isinstance(result, str):
+        url = self.account.server + endpoint
+        for attempt in range(YYB_RETRY_TIMES + 1):
             try:
-                result = json.loads(result)
-            except json.JSONDecodeError:
-                pass
-        if not isinstance(result, dict):
-            raise RuntimeError(f"YYB {endpoint} 未返回有效对象")
-        return result
+                response = self.session.post(url, json=body, timeout=YYB_TIMEOUT)
+            except requests.RequestException as exc:
+                # 网络层异常（连接被拒 / 读取超时等）同属连接层故障，可重试
+                if attempt >= YYB_RETRY_TIMES:
+                    raise RuntimeError(f"YYB {endpoint} 请求异常：{safe_message(exc)}") from None
+                log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+                    % (endpoint, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
+                time.sleep(YYB_RETRY_DELAY)
+                continue
+
+            try:
+                outer = response.json()
+            except ValueError:
+                outer = None
+
+            if response.status_code >= 400:
+                detail = _yyb_error_detail(outer)
+                if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
+                    raise RuntimeError(f"YYB {endpoint} 失败：HTTP {response.status_code}"
+                                       + (f"（{detail}）" if detail else ""))
+                log("⏳ [重试] %s 第%d/%d次失败（%s），%d秒后重试"
+                    % (endpoint, attempt + 1, YYB_RETRY_TIMES + 1, detail, YYB_RETRY_DELAY))
+                time.sleep(YYB_RETRY_DELAY)
+                continue
+
+            if not isinstance(outer, dict):
+                raise RuntimeError(f"YYB {endpoint} 失败：响应非 JSON")
+
+            if int(outer.get("code", -1)) != 0:
+                raise RuntimeError(f"YYB {endpoint}：{safe_message(outer.get('msg') or outer.get('message'))}")
+
+            result = outer.get("data", {}).get("result")
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    pass
+            if not isinstance(result, dict):
+                raise RuntimeError(f"YYB {endpoint} 未返回有效对象")
+            return result
+
+        raise RuntimeError(f"YYB {endpoint} 失败：重试次数已用尽")
 
     def encrypted_post(self, path: str, payload: Dict[str, Any], *, mini: bool = False) -> Dict[str, Any]:
         auth_id, secret, public_key = (

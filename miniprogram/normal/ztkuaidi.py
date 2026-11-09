@@ -266,7 +266,7 @@ class AutoTask:
     # ========== 启动信息 ==========
     def log_startup(self, total: int = 0) -> None:
         self.log(ACC_RULE)
-        self.log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+        self.log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, self.wx_appid))
         if total:
             self.log("🔢 账号数量: %d" % total)
         self.log(ACC_RULE)

@@ -172,7 +172,7 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, MINI_APP_ID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
@@ -352,6 +352,9 @@ yyb = _YybCompat()
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# 小程序 AppID —— 版本行要打印它，必须在 log_startup() 调用之前定义
+MINI_APP_ID = "wx08dabaec2783f4e9"
+
 log_startup()
 
 if hasattr(sys.stderr, "reconfigure"):
@@ -360,7 +363,6 @@ if hasattr(sys.stderr, "reconfigure"):
 # ---------------------------------------------------------------------------
 # 常量 (均来自小程序反编译源码, 非机密)
 # ---------------------------------------------------------------------------
-MINI_APP_ID = "wx08dabaec2783f4e9"
 BASE_URL = "https://api.mbr.liquan.com/api"          # vendor.js api_HOST
 SUCCESS_CODE = 200
 SESSION_INVALID_CODE = 401                            # 拦截器: 清 token 并重新登录

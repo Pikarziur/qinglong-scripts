@@ -331,7 +331,7 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)

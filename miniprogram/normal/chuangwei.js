@@ -157,10 +157,24 @@ process.on('uncaughtException', (e) => {
 const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 
 // 取 code 的超时与重试：YYB 服务慢响应是常态（实测面板出一次 code 可到 56s），
-// 原 20s 硬上限会把整个账号直接判死，这里放宽到 60s。为不触发 YYB-GO 的 5 分钟限流，
-// 取 code 只请求一次、失败即报错（不再重试）。
+// 原 20s 硬上限会把整个账号直接判死，这里放宽到 90s。
+//
+// 重试次数 2026-11-09 由 1 改为 3：原注释担心的「YYB-GO 5 分钟取码限流」
+// 已不成立 —— 近 5 天日志里 pacing（限速 429）事件 0 次，同账号相邻取码请求
+// 最小间隔 24.7s（限速阈值仅 3s）。
+//
+// 2026-11-09 诊断：YYB-GO 的连接层超时（上游长连接节点 8s 内不响应，返回 502
+// 且响应体无上游错误码）**不触发编队 failover** —— 编队转移清单只含「成员被
+// 上游推回」类错误（-14 / 凭据签发拒绝 / 预算耗尽 / 会话不可用 / 账号过期）。
+// 所以一个成员超时就整账号失败。而 YYB-GO 每次新请求会按「最近最少使用」把
+// 请求轮转到编队的下一个成员，重试正好能命中可用成员。
+//
+// 实测（创维 appid，ref=1 连打 8 次）：单次成功率 25%，重试 3 次累计 58%。
+//
+// 重试间隔必须 > YYB 取码最小间隔（code_min_gap_ms = 3000），否则会被限速。
+// 原用 2~5 秒随机（有概率落到 2.9s < 3s），这里改为 4~7 秒随机。
 const YYB_TIMEOUT = 90000;  // 取 code 单次请求超时（毫秒）
-const YYB_RETRY = 1;        // 取 code 只尝试 1 次（含首次），不重试，避免触发 YYB-GO 5 分钟限流
+const YYB_RETRY = 5;        // 取 code 最多尝试次数（含首次）
 
 const ENV_NAME = 'chuangw';
 const UC_API = 'https://uc-api.skyallhere.com/miniprogram/api';
@@ -316,7 +330,7 @@ function section(title) { logInfo(`━━━ ${title} ━━━`); }
 // ========== 启动信息 ==========
 function logStartup(total) {
   logInfo(ACC_RULE);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${APPID}`);
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
@@ -469,7 +483,14 @@ async function httpJson(url, { method = 'GET', headers = {}, body, timeout = 200
     const text = await resp.text();
     let data;
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-    if (!resp.ok) throw new Error(`${method} ${url} -> ${resp.status} ${text.slice(0, 400)}`);
+    if (!resp.ok) {
+      // 附上状态码与已解析的响应体，便于上层分类失败类型（连接层超时 / 熔断 / 上游拒绝）；
+      // 错误文案本身仍不带 URL，避免把服务端地址写进日志。
+      const err = new Error(`${method} ${url} -> ${resp.status} ${text.slice(0, 400)}`);
+      err.status = resp.status;
+      err.body = data;
+      throw err;
+    }
     return data;
   } finally {
     clearTimeout(t);
@@ -508,13 +529,48 @@ async function httpText(url, { method = 'GET', headers = {}, body, timeout = 200
   }
 }
 
+// 从 YYB-GO 错误响应体里提取可安全展示的原因摘要。
+// 只输出固定措辞，绝不回显服务端原文（可能含 URL、凭据或个人信息）。
+function safeErrorDetail(status, body) {
+  const msg = String(body?.message || body?.msg || '');
+  const low = msg.toLowerCase();
+  const data = (body?.data && typeof body.data === 'object') ? body.data : {};
+  const upstream = data.upstream_errors || data.rejections;
+
+  // 上游明确拒绝（有结构化错误码）—— 重试无用
+  if (Array.isArray(upstream) && upstream.length) {
+    const codes = upstream
+      .filter(it => it && it.code !== undefined && it.code !== null)
+      .map(it => String(it.code));
+    return codes.length ? `上游拒绝（错误码 ${codes.join('/')}）` : '上游拒绝';
+  }
+  // 本地熔断 / 限速
+  if (data.circuit_open || low.includes('circuit') || msg.includes('熔断')) {
+    return '服务端熔断中';
+  }
+  // 连接层超时（无上游错误码 + 8 秒 deadline）
+  if (low.includes('context deadline exceeded')
+      || low.includes('shortlink')
+      || low.includes('timeout')
+      || low.includes('i/o timeout')) {
+    return '上游连接超时';
+  }
+  if (low.includes('not found')) return '账号不存在';
+  return '';
+}
+
 // 取 code（带超时与重试）
-// YYB-Go-Enhanced 偶发慢响应 / i-o 超时是常态，单次 20s 上限会让整个账号直接判死；
-// 这里统一用 YYB_TIMEOUT 单次超时，失败后最多再试 YYB_RETRY-1 次（间隔 2~5 秒随机）。
+// 仅「上游连接超时」才重试：这类失败是纯连接层的（上游长连接节点偶发不响应，
+// 8 秒 deadline 后返回 502，响应体无上游错误码）。YYB-GO 的编队转移清单不含
+// 连接层超时，不会自动换成员；但它每次新请求会把请求轮转到编队的下一个成员，
+// 重试正好能命中可用成员。
+//
+// 熔断（429）、账号失效（404）、上游拒绝（-14 等）一律不重试。
 async function getWxCode(server, ref, appid = APPID) {
   const url = `${server}/wxapp/getCode`;
   const attempts = Math.max(1, Number(YYB_RETRY) || 1);
   let lastErr = null;
+  let lastDetail = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const ret = await httpJson(url, {
@@ -528,13 +584,39 @@ async function getWxCode(server, ref, appid = APPID) {
       throw new Error(`YYB-Go-Enhanced取code失败: ${brief(ret?.message || ret?.msg || ret, 160)}`);
     } catch (e) {
       lastErr = e;
-      if (attempt >= attempts) break;
-      const wait = 2000 + Math.floor(Math.random() * 3001);  // 2~5 秒随机，避免固定节奏
-      logWarn(`⚠️ 取code第 ${attempt}/${attempts} 次失败（${truncText(e.message || e, 60)}），${(wait / 1000).toFixed(1)}s 后重试`);
+      lastDetail = classifyYybError(e);
+      // 只有「上游连接超时」可重试；其余（熔断/失效/上游拒绝/其它）立即上抛
+      if (lastDetail !== '上游连接超时' || attempt >= attempts) break;
+      // 4~7 秒随机：必须大于 YYB 取码最小间隔（3s），否则会被限速
+      const wait = 4000 + Math.floor(Math.random() * 3001);
+      logWarn(`⚠️ 取code第 ${attempt}/${attempts} 次失败（${lastDetail}），${(wait / 1000).toFixed(1)}s 后重试`);
       await sleep(wait);
     }
   }
-  throw new Error(`${url} 取code失败（已尝试 ${attempts} 次，单次超时 ${Math.round(YYB_TIMEOUT / 1000)}s）：${truncText(lastErr?.message || lastErr, 120)}`);
+  // 报错不含 URL，避免把服务端地址写进日志
+  const tail = lastDetail ? `（${lastDetail}）` : '';
+  throw new Error(`YYB getCode 取code失败（已尝试 ${attempts} 次，单次超时 ${Math.round(YYB_TIMEOUT / 1000)}s）${tail}：${truncText(lastErr?.message || lastErr, 120)}`);
+}
+
+// 从异常里判断失败类型：优先用 httpJson 附带的结构化信息，退回按文案匹配。
+function classifyYybError(e) {
+  const status = e?.status;
+  const body = e?.body;
+  if (status) {
+    const d = safeErrorDetail(status, body);
+    if (d) return d;
+  }
+  const text = String(e?.message || e || '');
+  const low = text.toLowerCase();
+  if (low.includes('context deadline exceeded')
+      || low.includes('shortlink')
+      || low.includes('timeout')
+      || low.includes('i/o timeout')) {
+    return '上游连接超时';
+  }
+  if (low.includes('circuit') || text.includes('熔断')) return '服务端熔断中';
+  if (low.includes('not found')) return '账号不存在';
+  return '';
 }
 
 function scoreSnapshot(profile) {

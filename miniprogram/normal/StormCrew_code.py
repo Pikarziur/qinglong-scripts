@@ -62,7 +62,7 @@ import requests
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
@@ -113,6 +113,28 @@ REQUEST_TIMEOUT = 30
 # （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
 # 取码/取号给 90 秒读超时，业务接口仍用各自的短超时。
 YYB_TIMEOUT = (10, 90)
+
+# ── YYB 取码重试（2026-11-09 新增）────────────────────────────────
+#
+# 现象：YYB-GO 频繁返回 HTTP 502，响应 msg 为
+#       "call failed: context deadline exceeded" 或
+#       "all ShortLink targets failed ... i/o timeout"
+#       （上游长连接节点 8 秒内不响应），属**纯连接层**故障 ——
+#       不是账号/授权问题，也拿不到上游错误码。
+#
+# 为什么必须由脚本自己重试：YYB-GO 的编队转移清单只含「成员被上游推回」
+# 类错误（-14 / 凭据签发拒绝 / 预算耗尽 / 会话不可用 / 账号过期），
+# 连接层超时**不触发 fleet.failover**，所以一个成员超时就整轮失败。
+# 而 YYB-GO 每次新请求会按「最近最少使用」把请求轮转到编队的下一个成员，
+# 重试正好能换到可用成员。
+#
+# 只对「上游连接超时」重试：
+#   - 429（本地限速/熔断）：服务端已在冷却，重试只会加剧风控 → 不重试
+#   - 404 / 409（账号不存在/失效）：不可恢复 → 不重试
+#   - 502 且带上游错误码（-14 等授权拒绝）：重试无用 → 不重试
+# 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
+YYB_RETRY_TIMES = int(os.getenv("STORMCREW_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
+YYB_RETRY_DELAY = int(os.getenv("STORMCREW_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
 
 
 BASE_URL = "https://h5.youzan.com"
@@ -1050,7 +1072,59 @@ def _yyb_appid(args, kwargs):
     return str(appid)
 
 
+def _yyb_error_detail(body):
+    """从 YYB-GO 错误响应体里提取可安全展示的原因摘要。
+
+    只输出固定措辞，绝不回显服务端原文（可能含 URL、凭据或个人信息）。
+    """
+    if not isinstance(body, dict):
+        return ""
+    msg = str(body.get("message") or body.get("msg") or body.get("error") or "")
+    low = msg.lower()
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 上游明确拒绝（有结构化错误码）—— 这类重试无用
+    upstream = data.get("upstream_errors") or data.get("rejections")
+    if upstream:
+        codes = []
+        for item in upstream:
+            if isinstance(item, dict) and item.get("code") is not None:
+                codes.append(str(item.get("code")))
+        return ("上游拒绝（错误码 %s）" % "/".join(codes)) if codes else "上游拒绝"
+
+    # 本地熔断 / 限速
+    if data.get("circuit_open"):
+        return "服务端熔断中"
+    if "circuit" in low or "熔断" in msg:
+        return "服务端熔断中"
+
+    # 连接层超时（无上游错误码 + 8 秒 deadline）
+    if ("context deadline exceeded" in low or "shortlink" in low
+            or "i/o timeout" in low or "timeout" in low):
+        return "上游连接超时"
+    if "not found" in low:
+        return "账号不存在"
+    return ""
+
+
+class _YybError(RuntimeError):
+    """YYB-GO 调用失败。detail 存放可安全展示的原因摘要。"""
+
+    def __init__(self, message, detail=""):
+        super().__init__(message)
+        self.detail = detail
+
+
 def _yyb_json_request(server, path, appid, payload=None):
+    """调用 YYB-GO 的 /wxapp/<path>，连接层失败时自动重试。
+
+    仅「上游连接超时」才重试：这类失败是纯连接层的（上游长连接节点偶发
+    不响应，8 秒 deadline 后返回 502，响应体无上游错误码）。YYB-GO 的
+    编队转移清单不含连接层超时，不会自动换成员；但它每次新请求会把请求
+    轮转到编队的下一个成员，重试正好能命中可用成员。
+
+    熔断（429）、账号失效（404）、上游拒绝（-14 等）一律不重试。
+    """
     import requests
     endpoint, ref = _yyb_parts(server)
     if not endpoint or not ref or not appid:
@@ -1059,19 +1133,47 @@ def _yyb_json_request(server, path, appid, payload=None):
     api_key = _yyb_os.getenv("YYB_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    response = requests.post(
-        endpoint + path,
-        json={"ref": ref, "app_id": str(appid), **(payload or {})},
-        headers=headers,
-        timeout=YYB_TIMEOUT,
-    )
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RuntimeError("YYB 返回非 JSON") from exc
-    if response.status_code >= 400:
-        raise RuntimeError(str(body.get("message") or body.get("msg") or body))
-    return body
+
+    for attempt in range(YYB_RETRY_TIMES + 1):
+        try:
+            response = requests.post(
+                endpoint + path,
+                json={"ref": ref, "app_id": str(appid), **(payload or {})},
+                headers=headers,
+                timeout=YYB_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            # 网络层异常（连接被拒/读取超时等）同样属于可重试的连接层故障
+            if attempt >= YYB_RETRY_TIMES:
+                raise _YybError("YYB 请求异常：%s" % exc, "上游连接超时") from None
+            log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+                % (path, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
+            time.sleep(YYB_RETRY_DELAY)
+            continue
+
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+
+        if response.status_code >= 400:
+            detail = _yyb_error_detail(body)
+            if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
+                raise _YybError(
+                    "YYB %s 失败：HTTP %d%s"
+                    % (path, response.status_code,
+                       ("（%s）" % detail) if detail else ""),
+                    detail)
+            log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+                % (path, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
+            time.sleep(YYB_RETRY_DELAY)
+            continue
+
+        if body is None:
+            raise _YybError("YYB 返回非 JSON")
+        return body
+
+    raise _YybError("YYB %s 失败：重试次数已用尽" % path)
 
 
 def _yyb_find_code(value):

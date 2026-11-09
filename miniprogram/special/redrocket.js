@@ -276,7 +276,7 @@ function err(text) { emit('ERROR', text); }
 // ========== 启动信息 ==========
 function logStartup(total) {
   log(ACC_RULE);
-  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${APPID}`);
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }

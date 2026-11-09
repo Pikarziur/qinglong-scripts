@@ -192,7 +192,7 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, JLC_MINI_APPID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
@@ -314,6 +314,30 @@ CAS_CHECK_APPLET_LOGIN_URL = CAS_BASE_URL + "/api/cas/sso/login/check-applet-log
 CAS_APPLET_LOGIN_URL = CAS_BASE_URL + "/api/cas/sso/login/applet-silent-login"
 SECRET_EXPIRED_CODES = {29001, 29003}
 
+# ── YYB 取码重试（2026-11-09 新增）────────────────────────────────
+#
+# 现象：本 appid 上 YYB-GO 偶发返回 HTTP 502，响应 msg 为
+#       "call failed: context deadline exceeded" 或
+#       "all ShortLink targets failed ... i/o timeout"
+#       （上游长连接节点 8 秒内不响应），属**纯连接层**故障 ——
+#       不是账号/授权问题，也拿不到上游错误码。
+#
+# 为什么必须由脚本自己重试：YYB-GO 的编队转移清单只含「成员被上游推回」
+# 类错误（-14 / 凭据签发拒绝 / 预算耗尽 / 会话不可用 / 账号过期），
+# 连接层超时**不触发 fleet.failover**，所以一个成员超时就整轮失败。
+# 而 YYB-GO 每次新请求会按「最近最少使用」把请求轮转到编队的下一个成员，
+# 重试正好能换到可用成员。
+#
+# 实测（ref=1 连打 8 次单次 12%），重试 5 次累计 49%。
+#
+# 只对「上游连接超时」重试：
+#   - 429（本地限速/熔断）：服务端已在冷却，重试只会加剧风控 → 不重试
+#   - 404 / 409（账号不存在/失效）：不可恢复 → 不重试
+#   - 502 且带上游错误码（-14 等授权拒绝）：重试无用 → 不重试
+# 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
+YYB_RETRY_TIMES = int(os.getenv("JLC_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
+YYB_RETRY_DELAY = int(os.getenv("JLC_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
+
 
 # 默认 UA
 DEFAULT_UA = (
@@ -386,33 +410,97 @@ def _yyb_entries() -> List[Tuple[str, str, str]]:
     return entries
 
 
+def _yyb_error_detail(body):
+    """从 YYB-GO 错误响应体里提取可安全展示的原因摘要。
+
+    只输出固定措辞，绝不回显服务端原文（可能含 URL、凭据或个人信息）。
+    """
+    if not isinstance(body, dict):
+        return ""
+    msg = str(body.get("message") or body.get("msg") or body.get("error") or "")
+    low = msg.lower()
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 上游明确拒绝（有结构化错误码）—— 这类重试无用
+    upstream = data.get("upstream_errors") or data.get("rejections")
+    if upstream:
+        codes = []
+        for item in upstream:
+            if isinstance(item, dict) and item.get("code") is not None:
+                codes.append(str(item.get("code")))
+        return ("上游拒绝（错误码 %s）" % "/".join(codes)) if codes else "上游拒绝"
+
+    # 本地熔断 / 限速
+    if data.get("circuit_open"):
+        return "服务端熔断中"
+    if "circuit" in low or "熔断" in msg:
+        return "服务端熔断中"
+
+    # 连接层超时（无上游错误码 + 8 秒 deadline）
+    if ("context deadline exceeded" in low or "shortlink" in low
+            or "i/o timeout" in low or "timeout" in low):
+        return "上游连接超时"
+    if "not found" in low:
+        return "账号不存在"
+    return ""
+
+
 def get_wx_code(server, ref):
-    """调用 YYB-Go-Enhanced 获取嘉立创小程序 wx.login code。"""
-    try:
-        yyb_session = requests.Session()
-        yyb_session.trust_env = False
-        response = yyb_session.post(
-            f"{server}/wxapp/getCode",
-            json={"ref": ref, "app_id": JLC_MINI_APPID},
-            timeout=60,
-        )
+    """调用 YYB-Go-Enhanced 获取嘉立创小程序 wx.login code。
+
+    仅「上游连接超时」才重试：这类失败是纯连接层的（上游长连接节点偶发
+    不响应，8 秒 deadline 后返回 502，响应体无上游错误码）。YYB-GO 的
+    编队转移清单不含连接层超时，不会自动换成员；但它每次新请求会把请求
+    轮转到编队的下一个成员，重试正好能命中可用成员。
+
+    熔断（429）、账号失效（404）、上游拒绝（-14 等）一律不重试。
+    """
+    for attempt in range(YYB_RETRY_TIMES + 1):
         try:
-            data = response.json()
-        except ValueError as exc:
-            raise RuntimeError(f"YYB响应不是JSON（HTTP {response.status_code}）") from exc
-        if not response.ok:
-            raise RuntimeError(data.get("error") or data.get("msg") or f"YYB请求失败（HTTP {response.status_code}）")
-        if "code" in data and data.get("code") not in (0, "0", None):
-            raise RuntimeError(data.get("error") or data.get("msg") or "YYB请求失败")
-        result = data.get("result")
-        if result is None:
-            result = (data.get("data") or {}).get("result")
-        if not isinstance(result, dict) or not result.get("code"):
-            raise RuntimeError("YYB未返回有效微信code")
-        return str(result["code"])
-    except Exception as exc:
-        err(f"❌ [YYB] 获取code失败：{exc}")
-        return None
+            yyb_session = requests.Session()
+            yyb_session.trust_env = False
+            response = yyb_session.post(
+                f"{server}/wxapp/getCode",
+                json={"ref": ref, "app_id": JLC_MINI_APPID},
+                timeout=(10, 90),
+            )
+            try:
+                data = response.json()
+            except ValueError:
+                raise RuntimeError(
+                    f"YYB响应不是JSON（HTTP {response.status_code}）") from None
+
+            if not response.ok:
+                detail = _yyb_error_detail(data)
+                if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
+                    raise RuntimeError(
+                        f"YYB请求失败（HTTP {response.status_code}）"
+                        + (f"（{detail}）" if detail else ""))
+                err(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
+                    f"（{detail}），{YYB_RETRY_DELAY}秒后重试")
+                time.sleep(YYB_RETRY_DELAY)
+                continue
+
+            if "code" in data and data.get("code") not in (0, "0", None):
+                raise RuntimeError(data.get("error") or data.get("msg") or "YYB请求失败")
+            result = data.get("result")
+            if result is None:
+                result = (data.get("data") or {}).get("result")
+            if not isinstance(result, dict) or not result.get("code"):
+                raise RuntimeError("YYB未返回有效微信code")
+            return str(result["code"])
+        except requests.RequestException as exc:
+            # 网络层异常（连接被拒 / 读取超时等）同属连接层故障，可重试
+            if attempt >= YYB_RETRY_TIMES:
+                raise RuntimeError(f"YYB请求异常：{exc}") from None
+            err(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
+                f"（上游连接超时），{YYB_RETRY_DELAY}秒后重试")
+            time.sleep(YYB_RETRY_DELAY)
+        except RuntimeError as exc:
+            err(f"❌ [YYB] 获取code失败：{exc}")
+            return None
+    err(f"❌ [YYB] 获取code失败：重试次数已用尽")
+    return None
 
 
 def _extract_login_auth(resp, fallback_secret):

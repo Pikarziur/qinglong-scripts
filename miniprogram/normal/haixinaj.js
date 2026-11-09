@@ -238,7 +238,7 @@ function clear_daily_done(key = '') {
 // ========== 启动信息 ==========
 function logStartup(total) {
   logInfo(ACC_RULE);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${CONSTS.WX_APP_ID}`);
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }

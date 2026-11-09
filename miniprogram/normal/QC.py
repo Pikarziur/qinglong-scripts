@@ -114,7 +114,7 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, now_text()))
+    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
@@ -166,6 +166,31 @@ if env_YYB_SERVER:
     SERVERS = [line.strip() for line in raw_lines if line.strip()]
 _all_servers = list(SERVERS)
 
+# ── YYB 取码重试（2026-11-09 新增）────────────────────────────────
+#
+# 现象：YYB-GO 频繁返回 HTTP 502，响应 msg 为
+#       "call failed: context deadline exceeded" 或
+#       "all ShortLink targets failed ... i/o timeout"
+#       （上游长连接节点 8 秒内不响应），属**纯连接层**故障 ——
+#       不是账号/授权问题，也拿不到上游错误码。
+#
+# 为什么必须由脚本自己重试：YYB-GO 的编队转移清单只含「成员被上游推回」
+# 类错误（-14 / 凭据签发拒绝 / 预算耗尽 / 会话不可用 / 账号过期），
+# 连接层超时**不触发 fleet.failover**，所以一个成员超时就整账号失败。
+# 而 YYB-GO 每次新请求会按「最近最少使用」把请求轮转到编队的下一个成员，
+# 重试正好能命中可用成员。
+#
+# 只对「上游连接超时」重试：
+#   - 429（本地限速/熔断）：服务端已在冷却，重试只会加剧风控 → 不重试
+#   - 404 / 409（账号不存在/失效）：不可恢复 → 不重试
+#   - 502 且带上游错误码（-14 等授权拒绝）：重试无用 → 不重试
+# 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
+YYB_RETRY_TIMES = int(os.getenv("QC_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
+YYB_RETRY_DELAY = int(os.getenv("QC_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
+
+# 小程序 AppID —— 版本行要打印它，必须在 log_startup() 调用之前定义
+APPID = "wxc5db704249c9bb31"
+
 # 无有效地址直接退出并提示
 log_startup()
 
@@ -203,6 +228,41 @@ def parse_yyb_go_entry(raw_value: str) -> Tuple[str, str]:
     return server, ref
 
 
+def _yyb_error_detail(body):
+    """从 YYB-GO 错误响应体里提取可安全展示的原因摘要。
+
+    只输出固定措辞，绝不回显服务端原文（可能含 URL、凭据或个人信息）。
+    """
+    if not isinstance(body, dict):
+        return ""
+    msg = str(body.get("message") or body.get("msg") or body.get("error") or "")
+    low = msg.lower()
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+
+    # 上游明确拒绝（有结构化错误码）—— 这类重试无用
+    upstream = data.get("upstream_errors") or data.get("rejections")
+    if upstream:
+        codes = []
+        for item in upstream:
+            if isinstance(item, dict) and item.get("code") is not None:
+                codes.append(str(item.get("code")))
+        return ("上游拒绝（错误码 %s）" % "/".join(codes)) if codes else "上游拒绝"
+
+    # 本地熔断 / 限速
+    if data.get("circuit_open"):
+        return "服务端熔断中"
+    if "circuit" in low or "熔断" in msg:
+        return "服务端熔断中"
+
+    # 连接层超时（无上游错误码 + 8 秒 deadline）
+    if ("context deadline exceeded" in low or "shortlink" in low
+            or "i/o timeout" in low or "timeout" in low):
+        return "上游连接超时"
+    if "not found" in low:
+        return "账号不存在"
+    return ""
+
+
 async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
     server, ref = parse_yyb_go_entry(server_entry)
     if not server:
@@ -213,10 +273,40 @@ async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
         return None
 
     url = f"http://{server}/wxapp/getCode"
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0), trust_env=False) as client:
-            response = await client.post(url, json={"ref": ref, "app_id": appid})
-            res = response.json()
+    for attempt in range(YYB_RETRY_TIMES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0), trust_env=False) as client:
+                response = await client.post(url, json={"ref": ref, "app_id": appid})
+                try:
+                    res = response.json()
+                except ValueError:
+                    res = None
+        except httpx.RequestError as exc:
+            # 网络层异常（连接被拒 / 读取超时等）同属连接层故障，可重试
+            if attempt >= YYB_RETRY_TIMES:
+                err(f"❌ [{server_entry}] 获取code异常 | 原因: {str(exc)}")
+                return None
+            log(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败（上游连接超时），{YYB_RETRY_DELAY}秒后重试")
+            await asyncio.sleep(YYB_RETRY_DELAY)
+            continue
+
+        except Exception as e:
+            err(f"❌ [{server_entry}] 获取code异常 | 原因: {str(e)}")
+            return None
+
+        if response.status_code >= 400:
+            detail = _yyb_error_detail(res)
+            if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
+                err(f"❌ [{server_entry}] 获取code失败 | HTTP {response.status_code}"
+                    + (f"（{detail}）" if detail else ""))
+                return None
+            log(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败（{detail}），{YYB_RETRY_DELAY}秒后重试")
+            await asyncio.sleep(YYB_RETRY_DELAY)
+            continue
+
+        if not isinstance(res, dict):
+            err(f"❌ [{server_entry}] 获取code失败 | 响应不是JSON格式")
+            return None
 
         code = (((res.get("data") or {}).get("result") or {}).get("code"))
         if res.get("code") != 0 or not code:
@@ -225,12 +315,9 @@ async def get_code_via_yyb(server_entry: str, appid: str) -> Optional[str]:
 
         log(f"✅ [{server}] 获取code成功")
         return code
-    except json.JSONDecodeError:
-        err(f"❌ [{server_entry}] 获取code失败 | 响应不是JSON格式")
-        return None
-    except Exception as e:
-        err(f"❌ [{server_entry}] 获取code异常 | 原因: {str(e)}")
-        return None
+
+    err(f"❌ [{server_entry}] 获取code失败 | 重试次数已用尽")
+    return None
 
 
 PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
@@ -247,7 +334,6 @@ PROXY_FETCH_INTERVAL = 3000
 ENABLE_DIRECT_FALLBACK = True
 
 # 固定配置
-APPID = "wxc5db704249c9bb31"
 APP_VERSION = "491"
 XWEB_VERSION = "19823"
 TOKEN_CLIENT_ID = "wechatMini"
