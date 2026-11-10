@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  认养一头牛官方商城
-# version: 2026-10-29a
+# version: 2026-11-10a
 # cron: 0 6,16 * * *
 # 积分有效期：
 # =========================================================
@@ -27,7 +27,7 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   3. 每日签到（签到并返回等级/手机号/积分）
   4. 自动申请可申请的试用商品（按等级匹配）
   5. 查询中奖记录
-  6. 社区每日答题（随机选项作答）
+  6. 社区每日答题（缓存命中优先；未命中用知识表启发式打分，未覆盖则随机）
   7. 社区发帖种草后自动删帖
   8. PushPlus 推送
   9. 品赞代理，业务请求优先代理，失败直连兜底
@@ -62,6 +62,32 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
+
+# ========== 答题知识表（可选依赖，缺失时自动降级为随机） ==========
+# ryytn_quiz_knowledge.py 与本脚本同目录，存放「成分 → 公认生理功能」的静态字典。
+# 加载失败不影响主流程：社区答题会自动退化为随机作答（= 无知识表时的行为）。
+try:
+    import importlib.util as _imp_util
+
+    _KB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryytn_quiz_knowledge.py")
+    _KB = {}
+    if os.path.exists(_KB_PATH):
+        _spec = _imp_util.spec_from_file_location("ryytn_quiz_knowledge", _KB_PATH)
+        if _spec and _spec.loader:
+            _mod = _imp_util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _KB = {
+                "knowledge": getattr(_mod, "QUIZ_KNOWLEDGE", {}) or {},
+                "qtype_rules": getattr(_mod, "QUIZ_QTYPE_RULES", ()) or (),
+                "ratio_range": getattr(_mod, "QUIZ_RATIO_RANGE", (1.0, 3.0)) or (1.0, 3.0),
+                "safe_words": getattr(_mod, "QUIZ_SAFE_WORDS", ()) or (),
+                "danger_words": getattr(_mod, "QUIZ_DANGER_WORDS", ()) or (),
+                "absurd_words": getattr(_mod, "QUIZ_ABSURD_WORDS", ()) or (),
+            }
+except Exception as _kb_exc:  # noqa: BLE001
+    _KB = {}
+    print("⚠️ [答题知识表] 加载失败，答题将退化为随机: %s" % _kb_exc)
+
 # ========== 账号分隔标识 ==========
 # 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
 # ========== 启动信息 ==========
@@ -71,7 +97,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-10a"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [RY] message ==========
@@ -857,6 +883,147 @@ def resolve_correct_value(answer: Any, options: List[Dict[str, Any]]) -> str:
     return ""
 
 
+# ====================== 答题启发式（纯规则，无 AI） ======================
+# 背景（2026-11-10 实测）：
+#   - 每题只有 2 个选项，随机作答期望命中率仅 50%
+#   - 当天第一个答题的账号是"试验品"，答错拿 0 积分；
+#     但服务端在答错时仍回传 correctAnswer → 照样学 → 写缓存 →
+#     后续账号命中缓存稳拿积分（所以现状是"1 个号吃亏，2 个号稳赚"）
+#   - 目标：把首个账号的命中率从 50% 抬到 90%+
+#
+# 原理：题目集中在奶粉营养领域，且答案有公认标准（全站答对率 84~90%）。
+#       用一张静态知识表（成分 → 公认生理功能）给选项打分即可，
+#       纯查表 + 关键词匹配，**不涉及任何 AI / 模型 / 网络调用**。
+#
+# 安全性：知识表未覆盖时退化为随机（= 改动前行为）；
+#         且服务端答错仍回传正确选项 → 最坏情况与现状完全相同，绝不会更差。
+
+def quiz_detect_qtype(title: str) -> str:
+    """按题干关键词判断题型。"""
+    for keywords, qtype in _KB.get("qtype_rules", ()):
+        for kw in keywords:
+            if kw in title:
+                return qtype
+    return "unknown"
+
+
+def quiz_extract_entity(title: str) -> str:
+    """从题干抽取成分/主题词，用于查知识表。"""
+    import re
+
+    match = re.search(r"添加(.+?)的", title)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"为什么.*添加(.+?)[？?]", title)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"^(.+?)与(.+?)的主要区别", title)
+    if match:
+        return (match.group(1) + match.group(2)).strip()
+    return ""
+
+
+def quiz_score_options(
+    title: str,
+    options: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], List[Tuple[str, float, str]]]:
+    """给每个选项打分。
+
+    返回 (best_option, [(key, score, reason), ...])；
+    best_option 为 None 表示知识表/规则都没命中 → 调用方应随机选。
+    """
+    if not _KB.get("knowledge"):
+        return None, []
+
+    qtype = quiz_detect_qtype(title)
+    knowledge = _KB.get("knowledge", {})
+    title_lower = title.lower()
+
+    # 命中的知识条目 + 其功能词（去重，避免多个条目贡献同一词导致重复计分）
+    matched_words: List[str] = []
+    for entity, words in knowledge.items():
+        if not entity:
+            continue
+        ent_lower = entity.lower()
+        if ent_lower in title_lower:
+            for w in words:
+                w = str(w)
+                if w and w not in matched_words:
+                    matched_words.append(w)
+
+    scored: List[Tuple[str, float, str]] = []
+    for opt in options:
+        key = str(opt.get("key") or "")
+        value = str(opt.get("value") or "")
+        if not key:
+            # 异常选项（缺 key）→ 不参与打分
+            continue
+        value_lower = value.lower()
+        score = 0.0
+        reasons: List[str] = []
+
+        # 规则 1：知识表命中（权重最高，解决"促进骨骼发育"这类词频误判）
+        if matched_words:
+            hits = []
+            for w in matched_words:
+                if not w:
+                    continue
+                wl = w.lower()
+                if wl in value_lower and w not in hits:
+                    hits.append(w)
+            if hits:
+                score += 6.0 * len(hits)
+                reasons.append("知识命中:" + "/".join(hits[:3]))
+            else:
+                score -= 3.0
+                reasons.append("知识排除")
+
+        # 规则 2：题型相关
+        if qtype == "time":
+            import re
+
+            nums = [int(x) for x in re.findall(r"\d+", value)]
+            if nums:
+                score += -min(nums) * 0.1
+                reasons.append("时长%d" % min(nums))
+        elif qtype == "ratio" and ":" in value:
+            try:
+                ratio = float(value.split(":")[0].split("-")[0])
+            except (ValueError, IndexError):
+                ratio = None
+            if ratio is not None:
+                low, high = _KB.get("ratio_range", (1.0, 3.0))
+                if low <= ratio <= high:
+                    score += 1.0
+                    reasons.append("比值%.1f合理" % ratio)
+                else:
+                    score -= 3.0
+                    reasons.append("比值%.1f异常" % ratio)
+        elif qtype == "yesno":
+            if any(w in value for w in _KB.get("absurd_words", ())):
+                score -= 5.0
+                reasons.append("反常识")
+        elif qtype == "safe":
+            if any(w in value for w in _KB.get("safe_words", ())):
+                score += 4.0
+                reasons.append("合规表述")
+            if any(w in value for w in _KB.get("danger_words", ())):
+                score -= 5.0
+                reasons.append("危险建议")
+
+        scored.append((key, score, "，".join(reasons)))
+
+    if not scored:
+        return None, []
+
+    best_score = max(item[1] for item in scored)
+    winners = [item for item in scored if item[1] == best_score]
+    if len(winners) != 1:
+        # 同分 → 无法判断，交给调用方随机（退化为现状）
+        return None, scored
+    return {"key": winners[0][0], "score": best_score}, scored
+
+
 def run_quiz(server: str, token: str, proxies: Dict[str, str] | None) -> str:
     quiz_resp = api_get(server, QUIZ_ACTIVITIES_URL, token, proxies)
     if quiz_resp.get("code") != 200:
@@ -893,8 +1060,19 @@ def run_quiz(server: str, token: str, proxies: Dict[str, str] | None) -> str:
             log(f"♻️ [答题] 命中历史答案: {cached_value}")
 
     if selected is None:
-        selected = random.choice(options)
-        log("🎲 [答题] 无历史答案，随机作答")
+        # 缓存未命中 → 先用启发式打分；知识表未覆盖 / 同分则退回随机
+        best, scored = quiz_score_options(question_title, options)
+        if best is not None:
+            for key, score, reason in scored:
+                log("   🧠 [答题启发式] 选项%s「%s」得分 %.1f %s"
+                    % (key, str(next((o.get("value") for o in options if str(o.get("key")) == key), "")),
+                       score, ("(" + reason + ")") if reason else ""))
+            selected = next((o for o in options if str(o.get("key")) == best["key"]), None)
+            if selected is not None:
+                log("🧠 [答题启发式] 知识表命中，选用选项%s（%.1f 分）" % (best["key"], best["score"]))
+        if selected is None:
+            selected = random.choice(options)
+            log("🎲 [答题] 无历史答案，知识表未覆盖，随机作答")
 
     selected_key = selected.get("key")
     log(f"📝 [答题] 准备提交答案{selected_key}: {selected.get('value')}")

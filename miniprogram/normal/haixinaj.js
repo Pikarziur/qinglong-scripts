@@ -242,8 +242,19 @@ function logStartup(total) {
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-10-29a';
+const SCRIPT_VER = '2026-11-10a';
 const ACC_RULE = '='.repeat(70);
+
+// ── YYB-GO 取码参数 ────────────────────────────────────────────────
+// YYB_TIMEOUT：YYB-GO 内部会轮询多个上游长连接节点（实测候选 6 个），
+//              失败路径约 40 秒才返回。超时太紧会把真实错误码
+//              （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
+//              取码/取号给 90 秒读超时。
+const YYB_TIMEOUT = 90000;
+// YYB_RETRY：取 code / 手机号的最大尝试次数（含首次）。
+//              仅「上游连接超时」才重试；熔断(429)/账号失效(404,409)/
+//              上游拒绝(-14 等)一律不重试。
+const YYB_RETRY = 5;
 
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];
@@ -1566,35 +1577,97 @@ function parseYYBServer(raw) {
     .filter(Boolean);
 }
 
-async function yybRequest(entry, endpoint, retry = 0) {  // 只请求一次，不重试，避免触发 YYB-GO 5 分钟限流
-  for (let attempt = 1; attempt <= retry + 1; attempt++) {
+// 从异常/响应里判断 YYB 失败类型。
+// 只区分「可重试的连接层超时」与「不可重试的业务/授权错误」。
+//   上游连接超时 —— 纯连接层（上游长连接节点偶发不响应，8 秒 deadline 后返回，
+//                   响应体无上游错误码）。可重试。
+//   上游拒绝     —— 有结构化错误码（-14 / -10 等），是账号授权问题，重试无用。
+//   熔断 / 限速  —— HTTP 429，服务端冷却中，重试只会加剧风控。
+//   账号不存在   —— HTTP 404 / 409，需要重新扫码。
+function classifyYybError(status, body, message) {
+  const text = String(message || '').toLowerCase();
+  const data = (body && typeof body === 'object' ? body.data : null) || {};
+  const msg = String((body && (body.msg || body.message)) || '');
+
+  // 熔断 / 限速
+  if (status === 429 || data.circuit_open || /circuit|熔断|限速/.test(msg)) {
+    return '服务端熔断中';
+  }
+  // 账号失效
+  if (status === 404 || status === 409 || /not found/.test(text)) {
+    return '账号不存在';
+  }
+  // 上游明确拒绝（带结构化错误码）—— 重试无用
+  // upstream 可能在 body.data.upstream，也可能在 body.upstream
+  const upstreamCandidates = [];
+  if (Array.isArray(data.upstream)) upstreamCandidates.push(...data.upstream);
+  if (body && typeof body === 'object' && Array.isArray(body.upstream)) upstreamCandidates.push(...body.upstream);
+  if (upstreamCandidates.length) {
+    const codes = upstreamCandidates
+      .filter((it) => it && it.code !== undefined && it.code !== null)
+      .map((it) => String(it.code));
+    return codes.length ? `上游拒绝（错误码 ${codes.join('/')}）` : '上游拒绝';
+  }
+  // 上游拒绝也可能是出现在文案里的 code=-14
+  if (/code\s*=\s*-\d+/.test(text)) {
+    const m = text.match(/code\s*=\s*(-\d+)/);
+    return `上游拒绝（错误码 ${m ? m[1] : '-'}）`;
+  }
+  // 纯连接层超时
+  if (/context deadline exceeded|shortlink|i\/o timeout|timeout|etimedout|econnreset|econnrefused|eai_again|socket hang up|fetch failed|network/.test(text)) {
+    return '上游连接超时';
+  }
+  return '';
+}
+
+// 取 code / 手机号授权数据（带超时与重试）
+// 仅「上游连接超时」才重试：
+//   - YYB-GO 的编队转移清单不含连接层超时，一个成员超时就整轮失败；
+//     但它每次新请求会把请求轮转到编队的下一个成员，重试正好能命中可用成员。
+//   - 熔断（429）、账号失效（404/409）、上游拒绝（-14 等）一律不重试。
+//
+// ⚠️ 2026-11-10 修正：
+//   旧版注释写的是「只请求一次，避免触发 YYB-GO 5 分钟限流」——那是 YYB-GO
+//   早期的取码限流策略，现在的 YYB-GO 已按「最近最少使用」轮转编队成员。
+//   11-10 实战日志：账号1/账号3 都是 `context deadline exceeded`（纯连接层抖动）
+//   直接放弃，3 个账号只成 1 个；同期 renyang/chuangwei 加重试后均救回账号。
+//   重试间隔必须 > YYB 取码最小间隔（3s），否则会被限速。
+async function yybRequest(entry, endpoint, retry = YYB_RETRY - 1) {
+  const attempts = Math.max(1, Number(retry) + 1);
+  let lastErr = null;
+  let lastDetail = '';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const { data } = await request('POST', `${entry.server}${endpoint}`, {
+      const { status, data } = await request('POST', `${entry.server}${endpoint}`, {
         headers: { 'content-type': 'application/json' },
         data: { ref: entry.ref, app_id: CONSTS.WX_APP_ID },
-        timeout: 90000,
+        timeout: YYB_TIMEOUT,
       });
       const result = data?.data?.result;
       if (Number(data?.code ?? -1) !== 0 || !result || typeof result !== 'object') {
-        throw new Error(`${endpoint}失败: ${data?.msg || data?.message || safeJsonPreview(data)}`);
+        const detail = classifyYybError(status, data, data?.msg || data?.message || '');
+        const err = new Error(`${endpoint}失败: ${data?.msg || data?.message || safeJsonPreview(data)}`);
+        err.yybDetail = detail;
+        err.status = status;
+        err.body = data;
+        throw err;
       }
       return result;
     } catch (err) {
-      const msg = String((err && err.message) || err || '');
-      // YYB-Go 偶发「刷新协议号账号凭证」超时等瞬时网络错误（常见文案:
-      // call failed: refresh account credentials: Post ".../pc_yyb_refresh_token_auth":
-      // context deadline exceeded）。为不触发 YYB-GO 5 分钟限流，此处只请求一次、失败即抛出，不再重试。
-      const transient = /deadline exceeded|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|network/i.test(msg);
-      if (!transient) throw err;
-      if (attempt > retry) {
-        logInfo(`  - ${endpoint} 连续 ${attempt} 次因瞬时网络错误失败, 放弃: ${msg.slice(0, 90)}`);
-        throw err;
-      }
-      const waitMs = 3000 * attempt;
-      logInfo(`  - ${endpoint} 第${attempt}次因瞬时网络错误失败, ${waitMs / 1000}s 后重试: ${msg.slice(0, 90)}`);
+      lastErr = err;
+      lastDetail = err?.yybDetail || classifyYybError(err?.status, err?.body, err?.message || err);
+      // 只有「上游连接超时」可重试；其余（熔断/失效/上游拒绝/其它）立即上抛
+      if (lastDetail !== '上游连接超时' || attempt >= attempts) break;
+      // 4~7 秒随机：必须大于 YYB 取码最小间隔（3s），否则会被限速
+      const waitMs = 4000 + Math.floor(Math.random() * 3001);
+      logWarn(`  - ${endpoint} 第${attempt}/${attempts}次失败（${lastDetail}），${(waitMs / 1000).toFixed(1)}s 后重试: ${String(err?.message || err).slice(0, 90)}`);
       await sleep(waitMs);
     }
   }
+  const tail = lastDetail ? `（${lastDetail}）` : '';
+  // 报错不含 URL，避免把服务端地址写进日志
+  logInfo(`  - ${endpoint} 连续 ${attempts} 次失败${tail}: ${String(lastErr?.message || lastErr).slice(0, 90)}`);
+  throw lastErr || new Error(`${endpoint}失败${tail}`);
 }
 
 async function loginByYYB(entry) {
@@ -2854,7 +2927,14 @@ async function runOneAccount(acc, idx, total) {
     try {
       await doLottery(account, LOTTERY_TIMES);
     } catch (err) {
-      logErr(`抽奖异常: ${err.message}`);
+      // 抽奖失败不影响主流程（签到/任务/积分都已完成），降级为 WARN。
+      // 2026-11-10 实测：服务端 jfsc 网关对 draw 路径返回
+      //   {"resultCode":1,"errorCode":"404","errorDesc":"api not found"}
+      // 即抽奖接口已下线/改名（正确路径是 jf.hisense.com 的
+      // activity-manage/activityUser/participate，需要另一个小程序
+      // wx3b97b20380656267 的微信登录态，当前 YYB 账号池没有该小程序授权）。
+      // 这是服务端接口变更，不是账号/网络问题，重试无意义。
+      logWarn(`抽奖异常(不影响主流程): ${err.message}`);
     }
   }
 

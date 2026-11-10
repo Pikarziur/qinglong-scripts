@@ -46,12 +46,15 @@
 # 内部配置：直接改这里，省去去面板设环境变量
 # 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
 YYB_ONLY_REFS = [1,2]
-# YYB 协议服务调用（取 code / login_buffer 等）：上游节点池「概率性可用」，
-# 但为避免短时间多次打 YYB-GO 触发其 5 分钟限流，这里只请求一次、失败即报错、不重试。
-#   YYB_RETRY   = 1 关闭重试（只请求一次）；3 次约可把成功率抬到 ~87% 但会多打接口
+# YYB 协议服务调用（取 code / login_buffer 等）：上游节点池「概率性可用」——
+# 实测（2026-11-10）同一个 ref 连续打 operateWxData：
+#   ref=1 → 502 / 200 / 200 / 200 / 200；ref=2 → 200 / 502 / 200
+# 说明 502 是「随机抽到死节点」，重试一次基本就能救回，且 YYB-GO 会把请求
+# 轮转到编队的下一个成员（fleet_member 实测在 4~9 之间轮转）。
+#   YYB_RETRY   = 尝试次数（含首次）。3 次足够覆盖「首个节点死」的场景
 #   YYB_TIMEOUT = 单次 HTTP 超时（秒）。YYB 内部会逐个试节点、最坏 ~55s 才回 502，
 #                 设成 30 会在它出结果前就断开、白费一次机会，故留足余量
-YYB_RETRY = 1
+YYB_RETRY = 3
 YYB_TIMEOUT = 60
 
 import os
@@ -277,7 +280,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log.info("🔢 账号数量: %d" % total)
     log.info(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-10a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -2018,10 +2021,21 @@ if __name__ == "__main__":
         log.info("   📅 下次执行: %s" % next_run_time.strftime("%Y-%m-%d %H:%M:%S"))
         update_ql_cron_time(cron_schedule)
         print("NEXT_RUN_SECS=%s" % default_secs)
-    log.info(_sum_rule)    
+    log.info(_sum_rule)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    failed_count = len(accounts) - completed_count
     flush_notify(
         "习酒花园",
-        "账号 %d ｜ 完成 %d ｜ 失败 %d" % (len(accounts), completed_count, len(accounts) - completed_count),
+        "账号 %d ｜ 完成 %d ｜ 失败 %d" % (len(accounts), completed_count, failed_count),
         logger=log.info,
     )
+    # ── 退出码 ──────────────────────────────────────────────────────
+    # 只要有账号没跑成功，就必须以非 0 退出，让青龙把本次任务标记为失败。
+    # 2026-11-10 修正：此前脚本末尾没有任何退出码逻辑，即使账号全部失败
+    # 退出码也是 0 → 青龙显示「成功」，失败被静默吞掉。
+    if failed_count > 0:
+        log.error("❌ 有 %d 个账号未完成，本次任务以失败退出（完成 %d / %d）"
+                  % (failed_count, completed_count, len(accounts)))
+        sys.exit(1)
+    else:
+        log.info("✅ 全部 %d 个账号执行成功" % len(accounts))
