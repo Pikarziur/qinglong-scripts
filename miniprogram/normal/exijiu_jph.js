@@ -449,7 +449,7 @@ function parseYybGoEntry(rawValue) {
         const okCount = (msg.match(/签到成功/g) || []).length;
         const failCount = xjhdArr.length - okCount - skipped;
         log('➖'.repeat(35));
-        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`);
+        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${failCount} ｜ 跳过 ${skipped}`);
         // 渲染分账号汇总（简洁精要；账号行含总积分，签到状态 ✔️/❌）
         const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
         const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);

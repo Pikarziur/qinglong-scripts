@@ -670,12 +670,12 @@ class AutoTask:
             _sk = sum(1 for it in self.account_results if it.get("skipped"))
             _fail = _n - _ok - _sk
             self.log("=" * 70)
-            self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail}" + (f" ｜ 跳过 {_sk}" if _sk else ""))
+            self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail} ｜ 跳过 {_sk}")
             self.log("=" * 70)
             # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
             flush_notify(
                 "中通快递",
-                f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail}" + (f" ｜ 跳过 {_sk}" if _sk else ""),
+                f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail} ｜ 跳过 {_sk}",
                 logger=self.log,
             )
 

@@ -719,7 +719,7 @@ async function runOne(account, cache, tkmap){
 
 // ============================== 主流程 ==============================
 async function finishSummary(total, okCount, skipped = 0){
-  const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${total - okCount - skipped}`;
+  const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 失败 ${total - okCount - skipped} ｜ 跳过 ${skipped}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] 平安i动 · ${tail}`);
   logInfo(ACC_RULE);

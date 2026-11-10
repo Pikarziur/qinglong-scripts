@@ -1101,10 +1101,10 @@ def main():
                 log("✅ 今日任务已全部完成（任务页无可申请项目）")
                 _res = "今日已全部完成"
                 log("=" * 70)
-                log("📊 [执行汇总] 南+ ｜ %s" % _res)
+                log("📊 [执行汇总] 南+ · 账号 1 ｜ 成功 0 ｜ 失败 0 ｜ 跳过 1 ｜ %s" % _res)
                 log("=" * 70)
                 # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-                flush_notify("南+", "任务 %s" % _res, logger=log)
+                flush_notify("南+", "账号 1 ｜ 成功 0 ｜ 失败 0 ｜ 跳过 1 ｜ %s" % _res, logger=log)
                 return
             # 页面既无任务又无任务表表头 ⇒ 结构异常（或 CF 挑战页），不能静默当成"无任务"
             warn("⚠️ 未能从任务页解析出任务列表（页面结构可能已变），回退兜底清单 %s"
@@ -1184,6 +1184,7 @@ def main():
 
         # ── [执行汇总] ── 逐任务列结果，杜绝"只报日常、漏报周常"的假完成
         parts = []
+        _all_ok = True
         for n, a, b in results:
             if a == "done":
                 st = "今日已完成"
@@ -1191,19 +1192,30 @@ def main():
                 st = "申请+领奖成功"
             elif a == "ok" and b == "fail":
                 st = "已申请/领奖未成功"
+                _all_ok = False
             elif a == "fail":
                 st = "申请失败"
+                _all_ok = False
             else:
                 st = "未完全成功"
+                _all_ok = False
             parts.append("%s:%s" % (n, st))
         _res = " ｜ ".join(parts) or "无任务"
+        # 统一格式：账号维度（成功/失败/跳过）+ 逐任务明细补在尾部
+        # 当前南+ 是单账号模型（SOUTHPLUS_ACCOUNT 单个「账号#密码」），
+        # 汇总口径按多账号预留，后续加账号循环时只需改这三个计数。
+        _succ = 1 if (_all_ok and parts) else 0
+        _fail = 0 if _succ else 1
+        _skip = 0
         log("=" * 70)
-        log("📊 [执行汇总] 南+ ｜ %s" % _res)
+        log("📊 [执行汇总] 南+ · 账号 1 ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ %s"
+            % (_succ, _fail, _skip, _res))
         log("=" * 70)
         # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
         flush_notify(
             "南+",
-            "任务 %s" % _res,
+            "账号 1 ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ %s"
+            % (_succ, _fail, _skip, _res),
             logger=log,
         )
         return

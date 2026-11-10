@@ -1666,6 +1666,7 @@ async function main() {
     log('📋 账号数: ' + accounts.length);
 
     let successCount = 0;
+    let skippedCount = 0;
     for (let i = 0; i < accounts.length; i++) {
         const _acc = accounts[i] || {};
         accBanner(i + 1, accounts.length, `备注：${_acc.note || _acc.wxid || ''}`);
@@ -1692,7 +1693,7 @@ async function main() {
 
     // 汇总输出
     log('➖'.repeat(35));
-    log(`📊 [执行汇总] 红色火箭 · 账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount}`);
+    log(`📊 [执行汇总] 红色火箭 · 账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount - skippedCount} ｜ 跳过 ${skippedCount}`);
 
     // 输出每个账号的汇总信息
     let totalClaimed = 0;

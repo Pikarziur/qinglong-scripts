@@ -1693,7 +1693,7 @@ def main() -> int:
     err(f"结果汇总：✅ 成功 {ok_n} ｜ ⚠️ 需人工 {warn_n} ｜ ❌ 失败 {fail_n}（共 {total}）")
     log(line)
     log(ACC_RULE)
-    log("📊 [执行汇总] 京东Cookie · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok_n, fail_n))
+    log("📊 [执行汇总] 京东Cookie · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0 ｜ 需人工 %d" % (total, ok_n, fail_n, warn_n))
     log(ACC_RULE)
     return 1 if fail_n else 0
 

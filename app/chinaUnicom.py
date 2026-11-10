@@ -7360,6 +7360,20 @@ def do_notify(users):
     else:
         log("无推送内容")
 
+def _print_unicom_summary(ok_count, fail_count, skip_count):
+    """统一格式的执行汇总：📊 [执行汇总] 中国联通 · 账号 N ｜ 成功 X ｜ 失败 Y ｜ 跳过 Z
+
+    本脚本有多个提前返回分支（测试模式 / 查询模式 / 抢购模式 / 串行模式），
+    统一走这个函数输出，保证任何路径都有同样格式的汇总行。
+    """
+    total = ok_count + fail_count + skip_count
+    line = ("📊 [执行汇总] 中国联通 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
+            % (total, ok_count, fail_count, skip_count))
+    log("=" * 70)
+    log(line)
+    log("=" * 70)
+
+
 def main():
     log_startup()
     global GRAB_AMOUNT
@@ -7387,6 +7401,10 @@ def main():
         GRAB_AMOUNT = int(env_amount)
     test_mode = os.environ.get("UNICOM_TEST_MODE", "").strip().lower()
     query_only = test_mode == "query"
+    # 账号维度计数：登录成功=成功，登录失败=失败
+    _ok_n = 0
+    _fail_n = 0
+    _skip_n = 0
     if test_mode in ('login', 'sign'):
         log('[Test Mode] ' + ('仅登录验证' if test_mode == 'login' else '仅首页签到'))
         for user in users:
@@ -7398,10 +7416,13 @@ def main():
                         user.sign_getContinuous(is_query_only=True)
                     else:
                         user.log('登录验证通过，不执行活动任务')
+                    _ok_n += 1
                 else:
                     user.log('登录流程失败，跳过该账号')
+                    _fail_n += 1
             finally:
                 user.session.close()
+        _print_unicom_summary(_ok_n, _fail_n, _skip_n)
         return
     if query_only:
         warn("[Test Mode] 仅查询模式，跳过任务执行")
@@ -7494,13 +7515,18 @@ def main():
                 u.log("登录流程失败，跳过该账号")
 
         log(f"🚀 [并发模式] 启动 {len(accounts)} 个账号同时抢兑...")
+        _grab_ok = []
+        _grab_fail = []
         with ThreadPoolExecutor(max_workers=len(accounts)) as executor:
             futures = [executor.submit(run_grab_task, u) for u in users]
-            for future in futures:
+            for future, u in zip(futures, users):
                 try:
                     future.result()
+                    _grab_ok.append(u)
                 except Exception as e:
                     err(f"[-] Thread Error: {e}")
+                    _grab_fail.append(u)
+        _print_unicom_summary(len(_grab_ok), len(_grab_fail), _skip_n)
         do_notify(users)
         return
     log("🚀 开始串行执行日常任务...")
@@ -7515,9 +7541,12 @@ def main():
              log("")
              u.execute_daily_tasks(query_only=query_only)
              log("⏳ 账号处理完毕，等待 2 秒...")
+             _ok_n += 1
              time.sleep(2)
         else:
              u.log("登录流程失败，跳过该账号")
+             _fail_n += 1
+    _print_unicom_summary(_ok_n, _fail_n, _skip_n)
     if not query_only:
         cross_view_security_share_keys(users)
         do_notify(users)

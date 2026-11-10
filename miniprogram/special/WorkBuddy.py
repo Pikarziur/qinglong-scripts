@@ -3632,9 +3632,15 @@ def build_summary(summaries):
     summaries.sort(key=lambda x: x.get("idx", 0))
     total_done = sum(sm.get("done", 0) for sm in summaries)
     total_tasks = sum(sm.get("total", 0) for sm in summaries)
+    # 统一格式：账号维度（成功/失败/跳过），任务完成数补在尾部
+    # 有 error 记为失败；无 error 且已完成全部任务记为成功；否则记为跳过（部分完成）
+    ok_cnt = sum(1 for sm in summaries if not sm.get("error"))
+    fail_cnt = sum(1 for sm in summaries if sm.get("error"))
+    skip_cnt = len(summaries) - ok_cnt - fail_cnt
     lines = []
     lines.append("➖" * 35)
-    lines.append("📊 [执行汇总] WorkBuddy · 账号 %d ｜ 完成 %d/%d" % (len(summaries), total_done, total_tasks))
+    lines.append("📊 [执行汇总] WorkBuddy · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ 任务完成 %d/%d"
+                 % (len(summaries), ok_cnt, fail_cnt, skip_cnt, total_done, total_tasks))
     lines.append("")
     for sm in summaries:
         idx = sm.get("idx", 0)

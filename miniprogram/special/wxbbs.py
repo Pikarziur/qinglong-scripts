@@ -461,6 +461,7 @@ class AutoTask:
                 self.log("🚫 没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
                 return
             ok_cnt = 0
+            skip_cnt = 0
             for index, wx_id in enumerate(entries, 1):
                 # 清理账号信息
                 self.nickname = f"账号{index}"
@@ -486,12 +487,14 @@ class AutoTask:
                 code = self.wechat_code_adapter.get_code(wx_id)
                 if not code:
                     self.log(f"❌ [{self.nickname}] YYB取码失败，跳过该账号", level="error")
+                    skip_cnt += 1
                     session.close()
                     self.acc_footer(index, total_accounts)
                     continue
                 token = self.login(session, code)
                 if not token:
                     self.log(f"❌ [{self.nickname}] 登录失败，跳过该账号", level="error")
+                    skip_cnt += 1
                     session.close()
                     self.acc_footer(index, total_accounts)
                     continue
@@ -503,12 +506,14 @@ class AutoTask:
                     code = self.wechat_code_adapter.get_code(wx_id)
                     if not code:
                         self.log(f"❌ [{self.nickname}] 授权失败，跳过该账号", level="error")
+                        skip_cnt += 1
                         session.close()
                         self.acc_footer(index, total_accounts)
                         continue
                     token = self.login(session, code)
                     if not token:
                         self.log(f"❌ [{self.nickname}] 重新登录失败，跳过该账号", level="error")
+                        skip_cnt += 1
                         session.close()
                         self.acc_footer(index, total_accounts)
                         continue
@@ -529,12 +534,12 @@ class AutoTask:
                 self.acc_footer(index, total_accounts)
             # 不落盘：每次运行的 token 均为临时登录获取，不写入本地文件
             self.log("=" * 70)
-            self.log(f"📊 [执行汇总] {self.script_name} · 账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt}")
-            self.log("=" * 70)            
+            self.log(f"📊 [执行汇总] {self.script_name} · 账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt - skip_cnt} ｜ 跳过 {skip_cnt}")
+            self.log("=" * 70)
             # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
             flush_notify(
                 "微信支付提现笔笔省",
-                f"账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt}",
+                f"账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt - skip_cnt} ｜ 跳过 {skip_cnt}",
                 logger=self.log,
             )
         except Exception as e:

@@ -1443,9 +1443,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 def _finish(total: int, ok_count: int, skipped: int = 0) -> int:
     """打印尾部 [执行汇总] 并推送错误日志，返回退出码。"""
     fail_count = total - ok_count - skipped
-    tail = "账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok_count, fail_count)
-    if skipped:
-        tail += " ｜ 跳过 %d" % skipped
+    tail = "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok_count, fail_count, skipped)
     log(_ACC_RULE)
     log("📊 [执行汇总] 白鲸鱼 · %s" % tail)
     log(_ACC_RULE)

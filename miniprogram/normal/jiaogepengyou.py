@@ -661,12 +661,12 @@ def main() -> int:
         else:
             err(f"❌ {_acct} 签到失败：{r.get('msg') or ''}")
     log(_ACC_RULE)
-    log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 已签 {signed} ｜ 失败 {fail_count} ｜ 跳过 {skip_count}")
+    log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {fail_count} ｜ 跳过 {skip_count} ｜ 已签 {signed}")
     log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "交个朋友",
-        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 已签 {signed} ｜ 失败 {fail_count} ｜ 跳过 {skip_count}",
+        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {fail_count} ｜ 跳过 {skip_count} ｜ 已签 {signed}",
         logger=log,
     )
     return 1 if any_fail else 0

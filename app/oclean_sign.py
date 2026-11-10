@@ -307,16 +307,16 @@ def main():
         if i < total:
             time.sleep(1)
 
-    tail = f"📊 [执行汇总] Oclean · 账号 {total} ｜ 成功 {ok_count} ｜ 失败 {total - ok_count}"
+    tail = f"📊 [执行汇总] Oclean · 账号 {total} ｜ 成功 {ok_count} ｜ 失败 {total - ok_count} ｜ 跳过 0"
     if expired_count:
         tail += f" ｜ 🔴 失效 {expired_count}"
     log(_ACC_RULE)
     log(tail)
-    log(_ACC_RULE)    
+    log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "Oclean",
-        "账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok_count, total - ok_count),
+        "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0" % (total, ok_count, total - ok_count),
         logger=log,
     )
 

@@ -1241,14 +1241,22 @@ def main():
             dump_resp("签到", sresp)
 
         # ── [执行汇总] ──
+        # 统一格式：账号维度（成功/失败/跳过）+ 原明细信息补在尾部
+        # 当前 HKTV8 是单账号模型（HKTV8_ACCOUNT 单个「账号#密码」），
+        # 但汇总口径按多账号预留，后续加账号循环时只需改这三个计数。
         _res = {"success": "签到成功", "already": "今日已签到"}.get(kind, str(kind))
+        _succ = 1 if kind == "success" else 0
+        _skip = 1 if kind == "already" else 0
+        _fail = 0 if kind in ("success", "already") else 1
         log("=" * 70)
-        log("📊 [执行汇总] HKTV8 ｜ %s" % _res)
-        log("=" * 70)        
+        log("📊 [执行汇总] HKTV8 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ %s"
+            % (1, _succ, _fail, _skip, _res))
+        log("=" * 70)
         # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
         flush_notify(
             "HKTV8",
-            "签到 %s" % _res,
+            "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ %s"
+            % (1, _succ, _fail, _skip, _res),
             logger=log,
         )
         return

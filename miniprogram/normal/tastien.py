@@ -852,11 +852,9 @@ def main() -> int:
     ok = sum(1 for r in results if r.get("success"))
     already = sum(1 for r in results if r.get("status") == "今日已签到")
     fail = total - ok - skipped
-    tail = "📊 [执行汇总] %s · 账号 %d ｜ 成功 %d ｜ 失败 %d" % (APP_NAME, total, ok, fail)
+    tail = "📊 [执行汇总] %s · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (APP_NAME, total, ok, fail, skipped)
     if already:
-        tail += " ｜ 🟡 已签 %d" % already
-    if skipped:
-        tail += " ｜ 跳过 %d" % skipped
+        tail += " ｜ 已签 %d" % already
     log(_ACC_RULE)
     log(tail)
     log(_ACC_RULE)

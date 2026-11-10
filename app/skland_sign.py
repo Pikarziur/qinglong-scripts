@@ -1142,10 +1142,10 @@ def main():
         all_lines += lines_p
 
     log("=" * 70)
-    log("📊 [执行汇总] 森空岛 ｜ 签到成功 %d ｜ 失败 %d" % (total_ok, total_fail))
+    log("📊 [执行汇总] 森空岛 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0" % (total_ok + total_fail, total_ok, total_fail))
     for line in all_lines:
         log("  · %s" % line)
-    flush_notify(_QN_SITE, "成功 %d ｜ 失败 %d" % (total_ok, total_fail))
+    flush_notify(_QN_SITE, "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0" % (total_ok + total_fail, total_ok, total_fail))
     return 0 if total_fail == 0 else 1
 
 

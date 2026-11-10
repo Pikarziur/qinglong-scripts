@@ -1157,12 +1157,12 @@ async function runOne(account, idx) {
     accFooter(i + 1, accounts.length);
   }
   logInfo('='.repeat(70));
-  logInfo(`📊 [执行汇总] 创维 · 账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 跳过 ${skipped} ｜ 失败 ${failed}`);
+  logInfo(`📊 [执行汇总] 创维 · 账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`);
   logInfo('='.repeat(70));
   // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
   await flushNotify(
       '创维',
-      `账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 跳过 ${skipped} ｜ 失败 ${failed}`,
+      `账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`,
       logInfo,
   );
   if (failed > 0) process.exitCode = 1;

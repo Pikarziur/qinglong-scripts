@@ -1984,7 +1984,7 @@ if __name__ == "__main__":
     # ── [执行汇总] ──
     _sum_rule = "➖" * 35
     log.info(_sum_rule)
-    log.info("📊 [执行汇总] 习酒花园 · 账号 %d ｜ 完成 %d ｜ 失败 %d",
+    log.info("📊 [执行汇总] 习酒花园 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0",
              len(accounts), completed_count, len(accounts) - completed_count)
     # 全账号本月酿酒合计
     try:
@@ -2026,7 +2026,7 @@ if __name__ == "__main__":
     failed_count = len(accounts) - completed_count
     flush_notify(
         "习酒花园",
-        "账号 %d ｜ 完成 %d ｜ 失败 %d" % (len(accounts), completed_count, failed_count),
+        "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0" % (len(accounts), completed_count, failed_count),
         logger=log.info,
     )
     # ── 退出码 ──────────────────────────────────────────────────────

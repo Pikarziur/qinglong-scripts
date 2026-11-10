@@ -1099,18 +1099,23 @@ async function main() {
     else if (signResult === 'already') okLog(`✅ 今天已签到${signEcho ? `（服务器：${signEcho}）` : ''}`);
 
     // 3. [执行汇总]
+    // 统一格式：账号维度（成功/失败/跳过）+ 原明细信息补在尾部
+    // 当前福利吧是单账号模型，汇总口径按多账号预留。
     const wnOk = summaryLines.some(l => /签到成功|已签到/.test(l));
     const lastLine = summaryLines.filter(l => l.trim()).slice(-1)[0] || '';
     const summary = wnOk
         ? '签到成功'
         : '签到失败' + (lastLine ? '：' + lastLine.replace(/^[^\s]*\s/, '').slice(0, 50) : '');
+    const wnSucc = wnOk ? 1 : 0;
+    const wnFail = wnOk ? 0 : 1;
+    const wnSkip = 0;
     log('='.repeat(70));
-    log(`📊 [执行汇总] 福利吧 ｜ ${summary}`);
+    log(`📊 [执行汇总] 福利吧 · 账号 1 ｜ 成功 ${wnSucc} ｜ 失败 ${wnFail} ｜ 跳过 ${wnSkip} ｜ ${summary}`);
     log('='.repeat(70));
     // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     await flushNotify(
         '福利吧',
-        `${summary}`,
+        `账号 1 ｜ 成功 ${wnSucc} ｜ 失败 ${wnFail} ｜ 跳过 ${wnSkip} ｜ ${summary}`,
         log,
     );
 }

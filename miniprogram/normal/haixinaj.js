@@ -3027,7 +3027,7 @@ async function main() {
     }
   }
 
-  const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`;
+  const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] ${_QN_SITE} · ${tail}`);
   logInfo(ACC_RULE);

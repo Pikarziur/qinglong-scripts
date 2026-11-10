@@ -772,7 +772,7 @@ async function printSummary(results, skipped = 0) {
     const total = list.length + skipped;
     const fail = list.length - ok - signed;
     log('='.repeat(70));
-    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${total} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`);
+    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${total} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped} ｜ 已签 ${signed}`);
     for (const line of buildSummaryContent(list).split('\n')) {
         if (line) log(line);
     }
@@ -780,7 +780,7 @@ async function printSummary(results, skipped = 0) {
     // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     await flushNotify(
         '丸丫甄选',
-        `账号 ${total} ｜ 成功 ${ok} ｜ 已签 ${signed} ｜ 跳过 ${skipped} ｜ 失败 ${fail}`,
+        `账号 ${total} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped} ｜ 已签 ${signed}`,
         log,
     );
 }
