@@ -228,19 +228,18 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
 
 def log_title() -> None:
     print()
-    log("╔" + "═" * 50 + "╗")
-    log("║ ☁️ 无影云电脑动态 code 版                    ║")
-    log(f"║ 🕒 启动时间: {now_text():<32}║")
-    log(f"║ 🔢 账号数量: {len(SERVERS):<34}║")
-    log("╚" + "═" * 50 + "╝")
+    log(ACC_RULE)
+    log("☁️ 无影云电脑动态 code 版")
+    log(f"🕒 启动时间: {now_text()}")
+    log(f"🔢 账号数量: {len(SERVERS)}")
+    log(ACC_RULE)
 
 
 def log_account_header(index: int, total: int, server: str) -> None:
     print()
-    log("┌" + "─" * 50 + "┐")
-    log(f"│ 🧩 账号 {index} / {total:<37}│")
-    log(f"│ 🌍 来源 {server:<40}│")
-    log("└" + "─" * 50 + "┘")
+    log(ACC_RULE)
+    log(f"👤 账号 {index}/{total} ｜ 来源 {server}")
+    log(ACC_RULE)
 
 
 def direct_session() -> requests.Session:
@@ -958,7 +957,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
         icon = "✅" if res["success"] else "❌"
 
         content += f"""
-🧩 账号 {idx}
+👤 账号 {idx}
 📝 签到：{res["signMsg"]}
 {icon} 结果：{"成功" if res["success"] else "失败"}
 """
@@ -1021,14 +1020,17 @@ def main() -> None:
         % (len(SERVERS), success_count, fail_count, len(skipped)))
 
     print()
-    log("╔" + "═" * 50 + "╗")
-    log("║ 🏁 无影云电脑任务执行完成                    ║")
-    log(f"║ ✅ 成功: {success_count:<39}║")
-    err(f"║ ❌ 失败: {fail_count:<39}║")
+    log(ACC_RULE)
+    log("🏁 无影云电脑任务执行完成")
+    log(f"✅ 成功: {success_count}")
+    if fail_count:
+        err(f"❌ 失败: {fail_count}")
+    else:
+        log(f"✅ 失败: 0")
     if skipped:
-        log(f"║ ⏭️ 跳过(今日已完成): {len(skipped):<29}║")
-    log(f"║ 🕒 结束时间: {now_text():<32}║")
-    log("╚" + "═" * 50 + "╝")
+        log(f"⏭️ 跳过(今日已完成): {len(skipped)}")
+    log(f"🕒 结束时间: {now_text()}")
+    log(ACC_RULE)
 
     send_pushplus("☁️ 无影云电脑任务完成", build_notify(results, skipped))
     return fail_count
