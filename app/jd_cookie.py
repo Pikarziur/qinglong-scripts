@@ -60,6 +60,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 import sqlite3
 import time
+import random
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -133,6 +134,17 @@ CONFIG_ACCOUNTS = []
 # 留空 [] = 全部运行；非空时只跑列表内序号，且优先于上述所有账号来源的筛选。
 # 例：YYB_ONLY_REFS = [1] 只跑第 1 个账号；[1, 3] 跑第 1 和第 3 个。
 YYB_ONLY_REFS = [1]
+
+# ========== YYB 请求重试 ==========
+# YYB-Go 的节点池是「概率性可用」的，实测（2026-11-13，容器内连打）：
+#   · 好时段：连续 8 次只有 1 次 502（失败率 ~12%），且 502 后 2 秒就能成功
+#   · 坏时段：连续 10 次全部 502，耗时从 2s 到 8s 不等
+# → 502 有明显的「时段聚集性」：某些时刻整个节点池不健康，短间隔重试也救不回来。
+# 因此这里只做有限重试，用来覆盖「单点故障 / 短暂抖动」，
+# 坏时段只能等下一个调度周期 —— 重试不是万能药，别指望它 100% 救回。
+# 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
+YYB_RETRY = 3       # 尝试次数（含首次）
+YYB_RETRY_WAIT = 5  # 重试间隔基数（秒），实际取 5~8 秒随机
 
 
 # ========== 运行配置 ==========
@@ -287,6 +299,18 @@ def response_message(payload: Any) -> str:
     return str(value or "").strip()[:300]
 
 
+def _is_upstream_rejected(message: str) -> bool:
+    """判断错误信息是否属于「上游明确拒绝」。
+
+    上游拒绝（rejected / code=-14 / code=-12030 等）重试没有意义，
+    只有连接层故障（超时 / 节点失效）才值得换节点重试。
+    """
+    text = str(message or "").lower()
+    if "reject" in text:
+        return True
+    return bool(re.search(r"code\s*=\s*-\d+", text))
+
+
 def request_json(
     method: str,
     url: str,
@@ -294,21 +318,49 @@ def request_json(
     data: Any = None,
     opener: Optional[CookieOpener] = None,
 ) -> Dict[str, Any]:
-    status, _headers, raw = request_text(method, url, headers, data, opener)
-    payload = parse_jsonish(raw)
-    if status < 200 or status >= 300:
-        message = response_message(payload)
-        if status == 409 and "login_buffer expired" in message.lower():
-            message = "应用宝账号登录缓存已过期，请打开 /scan 重新扫码"
-        suffix = f"：{message}" if message else ""
-        raise RuntimeError(
-            f"HTTP {status} {method.upper()} {redact_url(url)}{suffix}"
-        )
-    if not payload and raw.strip():
-        raise RuntimeError(
-            f"接口未返回 JSON：{method.upper()} {redact_url(url)}"
-        )
-    return payload
+    """发起 JSON 请求。
+
+    2026-11-13 修正：原先只请求一次，YYB-Go 返回 502（连接层超时/节点失效）
+    就直接判失败。YYB 节点池是概率性可用的，换节点重试通常第二次就成功。
+    这里按错误性质区分：
+      可重试   —— HTTP 5xx 且内层 msg 不是 rejected（连接层故障）
+      不可重试 —— 上游明确拒绝（rejected / code=-NN）、4xx、业务码异常
+    """
+    attempts = max(1, int(YYB_RETRY))
+    for attempt in range(1, attempts + 1):
+        try:
+            status, _headers, raw = request_text(method, url, headers, data, opener)
+        except Exception as exc:
+            # 网络层异常（连接超时 / 读超时 / DNS 失败）同样可重试
+            if attempt < attempts:
+                wait = YYB_RETRY_WAIT + random.randint(0, 3)
+                warn(f"   ⚠️ 请求异常（第 {attempt}/{attempts} 次）：{exc}，{wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"HTTP 请求失败：{exc}") from exc
+
+        payload = parse_jsonish(raw)
+        if status < 200 or status >= 300:
+            message = response_message(payload)
+            # 5xx 且不是上游明确拒绝 → 连接层故障，换节点重试
+            if status >= 500 and not _is_upstream_rejected(message) and attempt < attempts:
+                wait = YYB_RETRY_WAIT + random.randint(0, 3)
+                warn(f"   ⚠️ HTTP {status}（第 {attempt}/{attempts} 次）：{message[:120] or 'Server Error'}，"
+                     f"{wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            if status == 409 and "login_buffer expired" in message.lower():
+                message = "应用宝账号登录缓存已过期，请打开 /scan 重新扫码"
+            suffix = f"：{message}" if message else ""
+            raise RuntimeError(
+                f"HTTP {status} {method.upper()} {redact_url(url)}{suffix}"
+            )
+        if not payload and raw.strip():
+            raise RuntimeError(
+                f"接口未返回 JSON：{method.upper()} {redact_url(url)}"
+            )
+        return payload
+    raise RuntimeError(f"HTTP {method.upper()} {redact_url(url)} 重试 {attempts} 次仍失败")
 
 
 def unwrap_service_payload(payload: Any) -> Dict[str, Any]:

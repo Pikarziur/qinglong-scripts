@@ -195,22 +195,54 @@ async function yybPost(identifier, appId, route, payload) {
     const item = selectYybEntry(identifier);
     const body = { ref: item.ref, app_id: appId };
     if (payload !== undefined) body.payload = payload;
-    const response = await axios.post(`${item.server}${route}`, body, {
-        timeout: 60000,
-        proxy: false,
-        validateStatus: () => true,
-        headers: _yybAuthHeaders(),
-    });
-    const data = response.data || {};
-    if (response.status < 200 || response.status >= 300) {
-        throw new Error(data.error || data.msg || `YYB请求失败（HTTP ${response.status}）`);
+    // 2026-11-13 修正：原先只请求一次，YYB-Go 返回 502（连接层超时/节点失效）
+    // 就直接抛错。重试策略与 getPhoneCodeInfo 保持一致：
+    //   可重试   —— HTTP 5xx 且内层 msg 不是 rejected（连接层故障）
+    //   不可重试 —— 上游明确拒绝（rejected / code=-NN）、4xx
+    const attempts = Math.max(1, YYB_RETRY);
+    let lastErr = '';
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        let response;
+        try {
+            response = await axios.post(`${item.server}${route}`, body, {
+                timeout: 60000,
+                proxy: false,
+                validateStatus: () => true,
+                headers: _yybAuthHeaders(),
+            });
+        } catch (e) {
+            lastErr = String(e && e.message ? e.message : e).slice(0, 160);
+            if (attempt < attempts) {
+                const wait = YYB_RETRY_WAIT + randomInt(0, 3);
+                log(`  ⚠️ [YYB] 请求异常（第 ${attempt}/${attempts} 次）：${lastErr}，${wait}s 后重试...`);
+                await sleep(wait * 1000);
+                continue;
+            }
+            throw new Error(lastErr);
+        }
+        const data = response.data || {};
+        const msg = String(data.msg || data.message || '');
+        if (response.status < 200 || response.status >= 300) {
+            if (response.status >= 500 && !/reject/i.test(msg) && !/code\s*=\s*-\d+/.test(msg)) {
+                lastErr = `HTTP ${response.status}: ${msg.slice(0, 140) || 'Server Error'}`;
+                if (attempt < attempts) {
+                    const wait = YYB_RETRY_WAIT + randomInt(0, 3);
+                    log(`  ⚠️ [YYB] HTTP ${response.status}（第 ${attempt}/${attempts} 次）：${lastErr}，${wait}s 后重试...`);
+                    await sleep(wait * 1000);
+                    continue;
+                }
+                throw new Error(lastErr);
+            }
+            throw new Error(data.error || msg || `YYB请求失败（HTTP ${response.status}）`);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'code') && ![0, '0', null, undefined].includes(data.code)) {
+            throw new Error(data.error || msg || 'YYB请求失败');
+        }
+        const result = data.result || (data.data && data.data.result);
+        if (!result || typeof result !== 'object') throw new Error('YYB响应缺少result');
+        return result;
     }
-    if (Object.prototype.hasOwnProperty.call(data, 'code') && ![0, '0', null, undefined].includes(data.code)) {
-        throw new Error(data.error || data.msg || 'YYB请求失败');
-    }
-    const result = data.result || (data.data && data.data.result);
-    if (!result || typeof result !== 'object') throw new Error('YYB响应缺少result');
-    return result;
+    throw new Error(lastErr || 'YYB请求失败');
 }
 
 async function getSingleCode(appId, identifier) {
@@ -243,7 +275,8 @@ const AUTO_CLAIM_H5_RED_PACKET = process.env.HSJJ_AUTO_CLAIM_H5 !== '0';
 const FETCH_MOBILE_IF_MISSING = !['0', 'false', 'off', 'no'].includes(String(process.env.HSJJ_FETCH_MOBILE || '').trim().toLowerCase());
 // YYB 取码重试：上游节点池「概率性可用」，实测同一 ref 连打会随机 502
 // （2026-11-13 实测 ref=1 连打 5 次：502 / 200 / 200 / 200 / 200），
-// 502 多数是「随机抽到死节点」，换节点重试即可救回。
+// 502 有明显的「时段聚集性」（实测：好时段失败率 ~12%，坏时段连续 10 次全挂），
+// 重试只能覆盖单点故障/短暂抖动，坏时段要等下一个调度周期。
 // 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
 const YYB_RETRY = 3;       // 取码尝试次数（含首次）
 const YYB_RETRY_WAIT = 4;  // 重试间隔基数（秒），实际取 4~7 秒随机
@@ -694,9 +727,21 @@ async function fillCachedMobileIfMissing(wxid, cache, cacheKey) {
 async function refreshProtocolSession(wxid, cache, cacheKey, reason = '') {
     if (reason) log('  🔄 准备重新协议登录: ' + reason);
     const code = await getWxCode(wxid, APPID);
+    // 2026-11-13 修正：取码失败（502 等）时 getSingleCode 返回 null，
+    // 原先不检查就继续 getOpenIdAndUnionId(null) —— 服务端返回
+    // 「code=200 / 获取数据成功 / data:{}」，报错信息指向 openId，掩盖了
+    // 真实原因「取码失败」。这里直接中止，并给出准确原因。
+    if (!code) {
+        log('  ❌ 重新协议登录中止：微信 code 获取失败（取码失败），不再继续请求');
+        return null;
+    }
     const ids = await getOpenIdAndUnionId(code);
     const phoneInfo = await getPhoneCodeInfo(wxid);
     const phoneCode = phoneInfo.phoneCode;
+    if (!phoneCode) {
+        log('  ❌ 重新协议登录中止：手机号授权 code 获取失败');
+        return null;
+    }
     const loginData = await login(phoneCode, ids.openId, ids.unionId);
     if (!loginData) return null;
     putCache(cache, cacheKey, {
@@ -743,10 +788,23 @@ async function login(phoneCode, openId, unionId) {
 }
 
 async function getOpenIdAndUnionId(code) {
+    // 2026-11-13 修正：原先不校验 code 是否为空就发请求。
+    // 取码失败时 code=null，服务端会「礼貌地」返回
+    //   {"code":"200","message":"获取数据成功","data":{}}
+    // —— 业务 code 是 200、message 也写着「获取数据成功」，但 data 是空的，
+    // openId 根本不存在，于是被当成「获取openId失败」。
+    // 真相是：code 无效/为空，换多少次都是空 data。必须在本地就拦下来。
+    if (!code || typeof code !== 'string') {
+        throw new Error('获取openId失败：微信 code 为空（取码失败），未发起请求');
+    }
     const headers = buildHeaders({ code }, '', '');
     const resp = await axios.post(BASE_URL + '/fundex-uc/uc/v1/getWxOpenIdAndUnionId', { code }, { headers });
     if (resp.data?.code === '200' && resp.data?.data?.openId) {
         return { openId: resp.data.data.openId, unionId: resp.data.data.unionId };
+    }
+    // 业务 code=200 但 data 为空 → 说明服务端没给到 openId（code 失效/被用过一次）
+    if (String(resp.data?.code) === '200' && !resp.data?.data?.openId) {
+        throw new Error('获取openId失败：服务端返回成功但 data 为空（code 可能已失效或被重复使用）');
     }
     throw new Error('获取openId失败: ' + JSON.stringify(resp.data));
 }
@@ -1512,6 +1570,13 @@ async function runTask(accountInfo) {
 
             // 2. 获取微信code
             const code = await getWxCode(wxid, APPID);
+            // 2026-11-13 修正：原先无条件打印「✅ wx.login code获取成功」，
+            // 取码失败（502）时 code=null 也照打，日志与实际不符，
+            // 且会把 null 传给 getOpenIdAndUnionId → 服务端回
+            // 「code=200 / 获取数据成功 / data:{}」→ 误报成「获取openId失败」。
+            if (!code) {
+                throw new Error('wx.login code 获取失败（YYB 取码失败），中止本账号');
+            }
             log('  ✅ wx.login code获取成功');
 
             // 3. 获取openId和unionId
