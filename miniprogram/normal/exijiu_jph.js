@@ -278,6 +278,12 @@ const OCR_SERVER = (($.isNode() ? process.env.OCR_SERVER : $.getdata("OCR_SERVER
 const CAPTCHA_RETRY = 3;          // 单账号最多尝试次数（识别失败 / 校验未通过 都会重试）
 const CAPTCHA_RETRY_DELAY = 1500; // 两次尝试之间的等待毫秒数，避免连击触发风控
 const CAPTCHA_OCR_TIMEOUT = 8000; // 调用 OCR_SERVER 的单次超时毫秒数
+// YYB 取码重试：上游节点池「概率性可用」，实测同一 ref 连打会随机 502
+// （2026-11-13 实测 ref=1 连打 5 次：502 / 200 / 200 / 200 / 200），
+// 502 多数是「随机抽到死节点」，换节点重试即可救回。
+// 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
+const YYB_RETRY = 3;       // 取码尝试次数（含首次）
+const YYB_RETRY_WAIT = 4;  // 重试间隔基数（秒），实际取 4~7 秒随机
 const YYB_SERVER = ($.isNode() ? process.env.YYB_SERVER : $.getdata("YYB_SERVER")) || "";
 let xjhd = '';
 let xjhdArr = [];
@@ -327,6 +333,12 @@ function parseYybGoEntry(rawValue) {
         // 每日已完成标记：按账号下标记录，供汇总渲染用
         const accSkipped = [];
         const accBlockIdx = [];
+        // 失败账号标记：按账号下标记录失败原因。
+        // 2026-11-13 修正：此前取码/登录失败的账号既没进 accSkipped、也没有
+        // accBlockIdx，渲染时落到 fallback `blocks[i]`，导致把「下一个成功账号」
+        // 的数据错位显示成失败账号的成绩（账号1 取码 502 失败，却显示账号2 的
+        // 153****4814 ✔️签到成功+5积分）。失败账号必须单独标记并直接输出失败行。
+        const accFailed = [];
         // 登录成功的账号数，即 msg 中「✅ 用户手机号获取成功」分块的序号
         let loginOk = 0;
 
@@ -352,11 +364,13 @@ function parseYybGoEntry(rawValue) {
 
             if (!(await get_code(xjhd))) {
                 addLog(`❌ 第 ${num} 个账号获取微信 code 失败，跳过`, true);
+                accFailed[index] = '获取微信 code 失败';
                 accFooter(num, xjhdArr.length);
                 continue;
             }
             if (!(await wxMiniSilentLogin(xj_code))) {
                 addLog(`❌ 第 ${num} 个账号业务登录失败，跳过`, true);
+                accFailed[index] = '业务登录失败';
                 accFooter(num, xjhdArr.length);
                 continue;
             }
@@ -462,8 +476,15 @@ function parseYybGoEntry(rawValue) {
                 summaryOut.push('⏭️ 今日已完成，跳过');
                 continue;
             }
+            if (accFailed[i]) {
+                // 取码/登录失败：本账号没有任何分块数据，绝不能去取 blocks[i]
+                // （否则会把下一个成功账号的成绩错位显示到本账号上）
+                summaryOut.push(`${em} [账号${i + 1}]`);
+                summaryOut.push(`❌ ${accFailed[i]}`);
+                continue;
+            }
             // 登录成功的账号按其登录序号取分块，避免跳过/失败账号造成错位
-            const blk = (accBlockIdx[i] !== undefined ? (blocks[accBlockIdx[i]] || '') : (blocks[i] || '')).trim();
+            const blk = (accBlockIdx[i] !== undefined ? (blocks[accBlockIdx[i]] || '') : '').trim();
             const phoneMatch = blk.match(/^(\d{3}\*{4}\d{4})/);
             const phone = phoneMatch ? phoneMatch[1] : `账号${i + 1}`;
             summaryOut.push(`${em} [${phone}]`);
@@ -473,6 +494,9 @@ function parseYybGoEntry(rawValue) {
             } else if (/签到失败|签到异常|签到请求失败/.test(blk)) {
                 const reason = (blk.match(/签到(?:失败|异常|请求失败)[：:]?\s*(.*)/) || [])[1] || '';
                 summaryOut.push('❌ 签到失败' + (reason ? '：' + reason.slice(0, 40) : ''));
+            } else if (!blk) {
+                // 登录成功但没有分块数据（异常情况），不能默认判成功
+                summaryOut.push('❌ 未获取到签到结果');
             } else {
                 summaryOut.push('✔️ 签到成功');
             }
@@ -487,6 +511,16 @@ function parseYybGoEntry(rawValue) {
             `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`,
             log,
         );
+        // ── 退出码 ─────────────────────────────────────────────────
+        // 2026-11-13 修正：此前无条件以 0 退出，账号失败时青龙仍显示「完成 ✅」。
+        // $.done() 在 Node 环境不会调用 $done（那是 Surge/QuanX/Loon 专用），
+        // 因此 process.exitCode 会被保留到进程结束。
+        if (failCount > 0) {
+            err(`❌ 有 ${failCount} 个账号未完成，本次任务以失败退出（成功 ${okCount} / 跳过 ${skipped} / 共 ${xjhdArr.length}）`);
+            process.exitCode = 1;
+        } else {
+            log(`✅ 全部 ${xjhdArr.length} 个账号执行成功`);
+        }
     }
 })()
     .catch((e) => err(e && e.stack ? e.stack : e))
@@ -500,27 +534,48 @@ async function get_code(hd) {
         log(`❌ YYB_SERVER 格式错误，应为 地址@账号标识`);
         return false;
     }
-    try {
-        const response = await axios.post(`${server}/wxapp/getCode`, {
-            ref,
-            app_id: WX_APPID
-        }, {
-            timeout: 90000,
-            proxy: false,
-            validateStatus: () => true
-        });
-        const result = response.data;
-        xj_code = result && result.data && result.data.result && result.data.result.code;
-        if (xj_code) {
-            log(`✅ YYB-Go-Enhanced 获取 code 成功`);
-            return true;
-        } else {
-            const detail = JSON.stringify(result || {}).slice(0, 300);
-            log(`❌ YYB-Go-Enhanced 获取 code 失败（HTTP ${response.status}）：${detail}`);
+    // 2026-11-13 修正：原先只请求一次，YYB-Go 返回 502 就直接判失败。
+    // 现在区分两类错误：
+    //   可重试   —— HTTP 5xx 且内层 msg 不是 rejected（连接层故障 / 节点失效）
+    //   不可重试 —— 上游明确拒绝（rejected / code=-NN）或业务码非 0
+    let lastErr = '';
+    for (let attempt = 1; attempt <= Math.max(1, YYB_RETRY); attempt++) {
+        try {
+            const response = await axios.post(`${server}/wxapp/getCode`, {
+                ref,
+                app_id: WX_APPID
+            }, {
+                timeout: 90000,
+                proxy: false,
+                validateStatus: () => true
+            });
+            const result = response.data || {};
+            const msg = String(result.msg || result.message || '');
+            if (response.status >= 500) {
+                if (/reject/i.test(msg) || /code\s*=\s*-\d+/.test(msg)) {
+                    log(`❌ YYB-Go-Enhanced 上游拒绝（HTTP ${response.status}）：${msg.slice(0, 140)}`);
+                    return false;
+                }
+                lastErr = `HTTP ${response.status}: ${msg.slice(0, 140) || 'Server Error'}`;
+            } else {
+                xj_code = result && result.data && result.data.result && result.data.result.code;
+                if (xj_code) {
+                    log(`✅ YYB-Go-Enhanced 获取 code 成功`);
+                    return true;
+                }
+                log(`❌ YYB-Go-Enhanced 获取 code 失败（HTTP ${response.status}）：${JSON.stringify(result).slice(0, 300)}`);
+                return false;
+            }
+        } catch (err) {
+            lastErr = String(err.message || err).slice(0, 160);
         }
-    } catch (err) {
-        log(`❌ YYB-Go-Enhanced 请求异常：${err.message || err}`);
+        if (attempt < YYB_RETRY) {
+            const wait = YYB_RETRY_WAIT + Math.floor(Math.random() * 4);
+            log(`⚠️ [取码] 第 ${attempt}/${YYB_RETRY} 次失败：${lastErr}，${wait}s 后重试...`);
+            await $await(wait * 1000);
+        }
     }
+    log(`❌ YYB-Go-Enhanced 获取 code 失败（重试 ${YYB_RETRY} 次）：${lastErr}`);
     return false;
 }
 

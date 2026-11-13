@@ -22,6 +22,13 @@
 
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
+# YYB 取码重试：上游节点池「概率性可用」，实测同一 ref 连打会随机 502
+# （2026-11-13 实测 ref=1 连打 5 次：502 / 200 / 200 / 200 / 200），
+# 502 多数是「随机抽到死节点」，换节点重试即可救回。
+# 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
+YYB_RETRY = 3      # 取码尝试次数（含首次）
+YYB_RETRY_WAIT = 4 # 重试间隔基数（秒），实际取 4~7 秒随机
+
 
 def _yyb_clean_ref(value):
     """去除 ref 的备注(# 后缀)与协议前缀(wx:/yyb:/wmpf:/syzs:)，用于白名单比对。"""
@@ -281,6 +288,7 @@ class AutoTask:
         self.proxy_url = os.getenv("PROXY_API_URL") # 代理api，返回一条txt文本，内容为代理ip:端口
         self.wx_appid = "wx7ddec43d9d27276a" # 微信小程序id
         self.account_results = []
+        self.exit_code = 0  # 0=全部成功，1=有账号失败（供 __main__ 决定退出码）
         self.host = "hdgateway.zto.com"
         self._cache_obj = None
         self._last_token = ""
@@ -357,26 +365,67 @@ class AutoTask:
         self.log("🔚 账号 %d/%d 处理结束" % (idx, total))
 
     def get_wx_code(self, server, ref):
+        """取微信 code。
+
+        2026-11-13 修正：原先只请求一次，YYB-Go 返回 502 就直接判失败，
+        导致 3 个账号全军覆没且脚本仍以「成功」退出。
+        现在区分两类错误：
+          可重试 —— HTTP 5xx 且内层 msg 不是 rejected（连接层故障/节点失效）
+          不可重试 —— 上游明确拒绝（rejected / code=-NN）或业务码非 0
+        """
         try:
             host = server.rstrip("/")
             if not host.startswith(("http://", "https://")):
                 host = f"http://{host}"
-            response = requests.post(
-                f"{host}/wxapp/getCode",
-                json={"ref": ref, "app_id": self.wx_appid},
-                timeout=60,
-            )
-            response.raise_for_status()
-            body = response.json()
-            code = ((body.get("data") or {}).get("result") or {}).get("code")
-            if body.get("code") != 0 or not code:
-                self.log(f"❌ [获取 code] 失败，YYB-Go 响应码: {body.get('code')}", level="error")
-                return None
-            self.log("🔑 [获取 code] 成功")
-            return code
         except Exception as e:
-            self.log(f"❌ 获取 code 失败: {e}", level="error")
+            self.log(f"❌ 取码参数异常: {e}", level="error")
             return None
+
+        last_err = None
+        for attempt in range(1, max(1, YYB_RETRY) + 1):
+            try:
+                response = requests.post(
+                    f"{host}/wxapp/getCode",
+                    json={"ref": ref, "app_id": self.wx_appid},
+                    timeout=60,
+                )
+                body = {}
+                try:
+                    body = response.json()
+                except Exception:
+                    body = {}
+                msg = str(body.get("msg") or body.get("message") or "")
+
+                if response.status_code >= 500:
+                    # 5xx：区分「上游拒绝」与「连接层故障」
+                    if "reject" in msg.lower() or "code=-" in msg:
+                        self.log(f"❌ [获取 code] 上游拒绝: {msg[:120]}", level="error")
+                        return None
+                    last_err = f"HTTP {response.status_code}: {msg[:120] or 'Server Error'}"
+                else:
+                    response.raise_for_status()
+                    code = ((body.get("data") or {}).get("result") or {}).get("code")
+                    if body.get("code") != 0 or not code:
+                        self.log(f"❌ [获取 code] 失败，YYB-Go 响应码: {body.get('code')} {msg[:80]}",
+                                 level="error")
+                        return None
+                    self.log("🔑 [获取 code] 成功")
+                    return code
+
+            except requests.exceptions.RequestException as e:
+                last_err = str(e)[:160]
+            except Exception as e:
+                self.log(f"❌ 获取 code 失败: {e}", level="error")
+                return None
+
+            if attempt < YYB_RETRY:
+                wait = YYB_RETRY_WAIT + random.randint(0, 3)
+                self.log(f"⚠️ [获取 code] 第 {attempt}/{YYB_RETRY} 次失败：{last_err}，"
+                         f"{wait}s 后重试...", level="warning")
+                time.sleep(wait)
+
+        self.log(f"❌ 获取 code 失败（重试 {YYB_RETRY} 次）: {last_err}", level="error")
+        return None
 
     def get_proxy(self):
         """
@@ -678,8 +727,19 @@ class AutoTask:
                 f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail} ｜ 跳过 {_sk}",
                 logger=self.log,
             )
+            # ── 退出码 ──────────────────────────────────────────────
+            # 2026-11-13 修正：此前 run() 不返回退出码、__main__ 也不检查，
+            # 即使 3 个账号全部失败，青龙仍显示「完成 ✅」。
+            self.exit_code = 1 if _fail else 0
+            if _fail:
+                self.log(f"❌ 有 {_fail} 个账号未完成，本次任务以失败退出"
+                         f"（成功 {_ok} / 跳过 {_sk} / 共 {_n}）", level="error")
+            else:
+                self.log(f"✅ 全部 {_n} 个账号执行成功")
 
 if __name__ == "__main__":
     auto_task = AutoTask("中通快递")
     auto_task.log_startup()
     auto_task.run()
+    # 2026-11-13 修正：此前无条件以 0 退出，账号全失败时青龙仍显示「完成 ✅」
+    _sys.exit(auto_task.exit_code)

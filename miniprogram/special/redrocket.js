@@ -1,7 +1,7 @@
 ﻿/*=========================================================
 # name:  红色火箭
 # version: 2026-10-29a
-# cron: 0 9,13,16 * * *
+# cron: 2 9,13 * * *
 # 积分有效期：
 =========================================================*/
 
@@ -241,6 +241,12 @@ const AUTO_CLAIM_H5_RED_PACKET = process.env.HSJJ_AUTO_CLAIM_H5 !== '0';
 // 手机号只用于日志展示，不参与认证。主动补取会额外打一次 getPhoneNumber，
 // 上游 -14 时纯属浪费配额（还会被 YYB-GO 计入熔断/限速），默认关闭，需要时置 1。
 const FETCH_MOBILE_IF_MISSING = !['0', 'false', 'off', 'no'].includes(String(process.env.HSJJ_FETCH_MOBILE || '').trim().toLowerCase());
+// YYB 取码重试：上游节点池「概率性可用」，实测同一 ref 连打会随机 502
+// （2026-11-13 实测 ref=1 连打 5 次：502 / 200 / 200 / 200 / 200），
+// 502 多数是「随机抽到死节点」，换节点重试即可救回。
+// 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
+const YYB_RETRY = 3;       // 取码尝试次数（含首次）
+const YYB_RETRY_WAIT = 4;  // 重试间隔基数（秒），实际取 4~7 秒随机
 
 // 缓存目录固定在脚本同级 .cache：青龙执行时 cwd 未必是脚本目录，用 cwd 会让缓存位置漂移。
 const CACHE_DIR = pathMod.join(__dirname, '.cache');
@@ -568,27 +574,62 @@ async function getPhoneCodeInfo(wxid) {
     const isYyb = Boolean(findYybEntry(cleanWxid)) || /^\d+$/.test(cleanWxid) || /^o[a-zA-Z0-9_-]{20,}$/.test(cleanWxid);
 
     let respData;
-    if (isYyb) {
-        // 使用 YYB 协议获取手机号 code
-        const entry = selectYybEntry(cleanWxid);
-        const resolvedRef = entry.ref;
-        const url = entry.server + '/wxapp/getPhoneNumber';
+    let lastErr = '';
+    // 2026-11-13 修正：原先只请求一次，YYB-Go 返回 502（连接层故障/节点失效）
+    // 就直接判「手机号授权code获取失败」，账号白丢一次。
+    // 现在区分：上游明确拒绝（rejected / code=-NN）不重试，其余 5xx 重试。
+    for (let attempt = 1; attempt <= Math.max(1, YYB_RETRY); attempt++) {
+        try {
+            if (isYyb) {
+                // 使用 YYB 协议获取手机号 code
+                const entry = selectYybEntry(cleanWxid);
+                const resolvedRef = entry.ref;
+                const url = entry.server + '/wxapp/getPhoneNumber';
 
-        if (debug) log(`[YYB] 请求手机号code: ref=${resolvedRef}, app_id=${APPID}`);
-        const resp = await axios.post(url, { ref: resolvedRef, app_id: APPID }, {
-            headers: _yybAuthHeaders(),
-            timeout: 30000,
-            validateStatus: () => true
-        });
-        respData = resp.data;
-    } else {
-        const resp = await axios.post(WECHAT_SERVER + '/api/v1/wx/app/get/all/mobile', {
-            wxid: cleanWxid,
-            appid: APPID,
-            data: JSON.stringify({ api_name: 'webapi_getuserwxphone', with_credentials: true }),
-            opt: 1
-        });
-        respData = resp.data;
+                if (debug) log(`[YYB] 请求手机号code: ref=${resolvedRef}, app_id=${APPID}`);
+                const resp = await axios.post(url, { ref: resolvedRef, app_id: APPID }, {
+                    headers: _yybAuthHeaders(),
+                    timeout: 30000,
+                    validateStatus: () => true
+                });
+                respData = resp.data;
+            } else {
+                const resp = await axios.post(WECHAT_SERVER + '/api/v1/wx/app/get/all/mobile', {
+                    wxid: cleanWxid,
+                    appid: APPID,
+                    data: JSON.stringify({ api_name: 'webapi_getuserwxphone', with_credentials: true }),
+                    opt: 1
+                });
+                respData = resp.data;
+            }
+        } catch (e) {
+            lastErr = String(e && e.message ? e.message : e).slice(0, 160);
+            respData = null;
+        }
+
+        // YYB 5xx 且 msg 含拒绝标记 → 上游明确拒绝，重试无用
+        if (respData && respData.code >= 500) {
+            const msg = String(respData.msg || respData.message || '');
+            if (/reject/i.test(msg) || /code\s*=\s*-\d+/.test(msg)) {
+                log('  ⚠️ 获取手机号code失败（上游拒绝）: ' + msg.slice(0, 140));
+                return { phoneCode: '', mobile: '' };
+            }
+            lastErr = `HTTP ${respData.code}: ${msg.slice(0, 140) || 'Server Error'}`;
+            respData = null;
+        }
+
+        if (respData) break;   // 拿到响应（成功或业务拒绝），跳出重试循环
+
+        if (attempt < YYB_RETRY) {
+            const wait = YYB_RETRY_WAIT + randomInt(0, 3);
+            log(`  ⚠️ 获取手机号code失败（第 ${attempt}/${YYB_RETRY} 次）：${lastErr}，${wait}s 后重试...`);
+            await sleep(wait * 1000);
+        }
+    }
+
+    if (!respData) {
+        log('  ⚠️ 获取手机号code失败: ' + (lastErr || 'null'));
+        return { phoneCode: '', mobile: '' };
     }
 
     if (respData && (respData.Code === 0 || respData.code === 0 || respData.Success === true || respData.Data || respData.result || respData.openid)) {
@@ -713,7 +754,11 @@ async function getOpenIdAndUnionId(code) {
 // 校验缓存登录态：能正常访问轻量接口就认为 token/openId/userId 可用。
 async function checkCachedLogin(cached) {
     if (!cached?.token || !cached?.openId || !cached?.userId) return false;
-    const resp = await apiRequest('GET', '/fundex-activity/point/sign/getRecordList', {}, cached.token, '', cached.openId, cached.userId, '', 0);
+    // 2026-11-13 修正：原先 retries=0（完全不重试），
+    // 上游接口抖动（11-12 13:00 实测 /fundex-activity/point/sign/getRecordList
+    // 请求失败）就直接判「无法判定」→ 抛异常放弃整个账号。
+    // 探活是只读 GET，重试安全；上游明确 401/403/407 才算失效需重登。
+    const resp = await apiRequest('GET', '/fundex-activity/point/sign/getRecordList', {}, cached.token, '', cached.openId, cached.userId, '', 2);
     if (!resp) return null;   // 网络/服务异常：无法判定，保留缓存，别做无谓重登
     if (String(resp.code) === '200') return true;
     if (/^(401|403|407)$/.test(String(resp.code))) return false;  // 明确失效才重登
@@ -1692,8 +1737,9 @@ async function main() {
     }
 
     // 汇总输出
+    const failCount = accounts.length - successCount - skippedCount;
     log('➖'.repeat(35));
-    log(`📊 [执行汇总] 红色火箭 · 账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount - skippedCount} ｜ 跳过 ${skippedCount}`);
+    log(`📊 [执行汇总] 红色火箭 · 账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${failCount} ｜ 跳过 ${skippedCount}`);
 
     // 输出每个账号的汇总信息
     let totalClaimed = 0;
@@ -1712,9 +1758,18 @@ async function main() {
     // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     await flushNotify(
         '红色火箭',
-        `账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${accounts.length - successCount}`,
+        `账号 ${accounts.length} ｜ 成功 ${successCount} ｜ 失败 ${failCount} ｜ 跳过 ${skippedCount}`,
         log,
     );
+    // ── 退出码 ──────────────────────────────────────────────────────
+    // 2026-11-13 修正：此前无条件以 0 退出，账号全失败时青龙仍显示「完成 ✅」
+    //（11-12 13:00 实测：3 个账号全失败，青龙显示「完成 ✅」）。
+    if (failCount > 0) {
+        err(`❌ 有 ${failCount} 个账号未完成，本次任务以失败退出（成功 ${successCount} / 跳过 ${skippedCount} / 共 ${accounts.length}）`);
+        process.exitCode = 1;
+    } else {
+        log(`✅ 全部 ${accounts.length} 个账号执行成功`);
+    }
 }
 
 main().catch(e => { err('脚本异常: ' + e.message); err(e.stack); });
