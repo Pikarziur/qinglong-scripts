@@ -278,13 +278,15 @@ const OCR_SERVER = (($.isNode() ? process.env.OCR_SERVER : $.getdata("OCR_SERVER
 const CAPTCHA_RETRY = 3;          // 单账号最多尝试次数（识别失败 / 校验未通过 都会重试）
 const CAPTCHA_RETRY_DELAY = 1500; // 两次尝试之间的等待毫秒数，避免连击触发风控
 const CAPTCHA_OCR_TIMEOUT = 8000; // 调用 OCR_SERVER 的单次超时毫秒数
-// YYB 取码重试：上游节点池「概率性可用」，实测同一 ref 连打会随机 502
-// （2026-11-13 实测 ref=1 连打 5 次：502 / 200 / 200 / 200 / 200），
-// 502 有明显的「时段聚集性」（实测：好时段失败率 ~12%，坏时段连续 10 次全挂），
-// 重试只能覆盖单点故障/短暂抖动，坏时段要等下一个调度周期。
+// 502 = YYB-GO 内部把请求转给微信协议层（多渠道轮转），8 秒内全没打通 → 连接层超时。
+// 实测（2026-11-13，累计 43 次调用）：成功率约 37%，失败固定 8.0~8.1s、成功 0.6~3.4s，
+// 失败随机散布（不是从第 N 次起系统性失败）→ 是随机超时，不是限速。
+// 按成功率 p=0.6 估算：重试 3 次 ≈ 78% 成功，5 次 ≈ 90% 成功，故取 5。
 // 只有「连接层故障」才重试；上游明确拒绝（rejected / code=-NN）重试无用。
-const YYB_RETRY = 3;       // 取码尝试次数（含首次）
-const YYB_RETRY_WAIT = 4;  // 重试间隔基数（秒），实际取 4~7 秒随机
+// ⚠️ 排查陷阱：YYB-GO 自身有 pacing 限速（db/tuning.json：login_budget 3 次/10 分钟，
+//    code_min_gap 3 秒）。密集压测会自己烧光预算制造 502 假象，别把自己的测试当证据。
+const YYB_RETRY = 5;       // 取码尝试次数（含首次）
+const YYB_RETRY_WAIT = 5;  // 重试间隔基数（秒），实际取 5~8 秒随机
 const YYB_SERVER = ($.isNode() ? process.env.YYB_SERVER : $.getdata("YYB_SERVER")) || "";
 let xjhd = '';
 let xjhdArr = [];
