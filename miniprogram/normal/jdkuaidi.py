@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  京东快递
-# version: 2026-10-29a
+# version: 2026-11-14a
 # cron: 6 5,15 * * *
 # 积分有效期：京豆规则
 # =========================================================
@@ -14,6 +14,11 @@
   JDEXPRESS_NOTIFY  1 推送错误（默认），0 关闭推送
   JDEXPRESS_ACCOUNT_LIMIT  可选，仅运行前 N 个账号（用于测试）
   JDEXPRESS_REF_FILTER  可选，仅运行指定账号标识（用于测试）
+  JDKUAIDI_USE_QL_COOKIE  可选，默认 1：优先复用青龙现有的 JD_COOKIE 跑签到，
+                          用只读接口验证有效后跳过 YYB-GO 取码；无效/异常自动回退原取码登录。
+                          设 0 完全关闭，恢复纯取码行为
+  JDKUAIDI_CK_ENV   可选，现成 CK 的变量名，默认 JD_COOKIE
+  QL_DB_PATH        可选，环境变量读不到 CK 时改从青龙数据库读，指定 sqlite 路径
 
 内部配置（直接改下面常量，省得去面板设环境变量）：
   YYB_ONLY_REFS  账号序号白名单（1 起），仅运行指定序号；留空 [] 运行全部，
@@ -34,12 +39,17 @@
   2026-09-04 v1.2  增加全参数登录回退，区分未绑定京东账号与风控账号
   2026-10-01 v1.3  接入青龙 notify.py（只推错误）+ atexit / 异常兜底；新增 YYB_ONLY_REFS 白名单；
                    日志改为 [LEVEL] [JDEXPRESS] 规范，补账号分隔标识与尾部 [执行汇总]
+  2026-11-14 v1.4  新增「优先复用青龙 JD_COOKIE」开关（JDKUAIDI_USE_QL_COOKIE，默认 1）：
+                   先读环境变量（读不到回退读青龙 sqlite），按账号序号取对应 CK，
+                   用只读 signInList 验证有效后直接签到，跳过 YYB-GO 的 403 / getCode 超时；
+                   任何环节失败均自动回退原有 YYB-GO 取码登录，不改变原行为
 """
 
 import html
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import uuid
@@ -88,6 +98,17 @@ YYB_TIMEOUT = (10, 90)
 # 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
 YYB_RETRY_TIMES = int(os.getenv("JDKUAIDI_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
 YYB_RETRY_DELAY = int(os.getenv("JDKUAIDI_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
+
+# ── 优先复用青龙现有 JD_COOKIE（2026-11-14 v1.4）──────────────────
+# YYB-GO 取码常因「网站应用 AppID 403」或「上游连接超时」整轮失败，签到还没开始就被中止。
+# 青龙里已有的 JD_COOKIE（由 app/jd_cookie.py 同步）与本脚本登录所得的 pt_key/pt_pin
+# 是同一套京东凭证，可直接用于 lop-proxy 签到接口。
+# 开启后：读现成 CK → 用只读 signInList 验证 → 有效就跳过全部取码；
+#         读取失败 / 验证失败 / 任何异常 → 自动回退原 YYB-GO 取码登录，不影响原行为。
+# 设 JDKUAIDI_USE_QL_COOKIE=0 可完全关闭，恢复纯取码行为。
+USE_QL_COOKIE = os.getenv("JDKUAIDI_USE_QL_COOKIE", "1").strip().lower() not in {"0", "false", "no", "off"}
+CK_ENV_NAME = os.getenv("JDKUAIDI_CK_ENV", "JD_COOKIE").strip() or "JD_COOKIE"
+QL_DB_CANDIDATES = ("/ql/data/db/database.sqlite", "/ql/db/database.sqlite")
 
 # ===================== 日打标（今日完成标记） =====================
 # 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
@@ -249,7 +270,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-14a"
 _ACC_RULE = "=" * 70
 
 
@@ -651,7 +672,69 @@ def html_redirect(base_url: str, body: str) -> str:
     return ""
 
 
-def login(server: str, ref: str) -> Tuple[requests.Session, str]:
+def _split_ck(raw: str) -> List[str]:
+    """把青龙里可能的多账号 CK 拆成标准的 pt_key;pt_pin; 片段。"""
+    result: List[str] = []
+    for chunk in re.split(r"[&\r\n]+", str(raw or "")):
+        key = re.search(r"(?:^|[;\s])pt_key=([^;\s]+)", chunk)
+        pin = re.search(r"(?:^|[;\s])pt_pin=([^;\s]+)", chunk)
+        if key and pin:
+            result.append("pt_key=%s;pt_pin=%s;" % (key.group(1), pin.group(1)))
+    return result
+
+
+def read_ql_cookies() -> Tuple[List[str], str]:
+    """先读进程环境变量（青龙会注入启用的变量），读不到再只读青龙 sqlite。"""
+    raw = os.getenv(CK_ENV_NAME, "").strip()
+    if raw:
+        return _split_ck(raw), "环境变量"
+    configured = os.getenv("QL_DB_PATH", "").strip()
+    paths = [configured] if configured else list(QL_DB_CANDIDATES)
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=3)
+            try:
+                rows = conn.execute(
+                    "SELECT value FROM Envs WHERE name=? AND status=0", (CK_ENV_NAME,)
+                ).fetchall()
+            finally:
+                conn.close()
+            raw = "\n".join(str(row[0] or "") for row in rows)
+            if raw:
+                return _split_ck(raw), "青龙数据库"
+        except Exception:
+            continue
+    return [], "无"
+
+
+def cookie_login(account_index: int) -> Tuple[requests.Session, str, str]:
+    """用现成 CK 构造 session 并以只读接口验证；失败一律抛给调用方回退。"""
+    cookies, source = read_ql_cookies()
+    if not cookies:
+        raise RuntimeError("未读到含 pt_key/pt_pin 的 %s" % CK_ENV_NAME)
+    if account_index > len(cookies):
+        raise RuntimeError("第 %d 个账号无对应 CK（共 %d 条）" % (account_index, len(cookies)))
+    cookie = cookies[account_index - 1] if len(cookies) > 1 else cookies[0]
+    pin = unquote(re.search(r"pt_pin=([^;]+)", cookie).group(1))
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(business_headers(cookie))
+    query_calendar(session)  # 只读探测：CK 失效会在这里抛错，由 login() 回退
+    return session, pin, source
+
+
+def login(server: str, ref: str, account_index: int = 1) -> Tuple[requests.Session, str]:
+    if USE_QL_COOKIE:
+        try:
+            session, pin, source = cookie_login(account_index)
+            log("✅ 复用%s的 %s（pt_pin 尾号 %s），跳过 YYB-GO 取码"
+                % (source, CK_ENV_NAME, pin[-4:]))
+            return session, pin
+        except Exception as exc:
+            warn("⚠️ 现有 %s 不可用（%s），回退 YYB-GO 取码登录"
+                 % (CK_ENV_NAME, str(exc)[:90]))
     try:
         code = get_wx_code(server, ref, JD_PT_APP_ID)
     except Exception as exc:
@@ -794,8 +877,8 @@ def mask_ref(ref: str) -> str:
 
 def run_account(index: int, server: str, ref: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {"index": index, "ref": mask_ref(ref), "success": False}
-    session, pin = login(server, ref)
-    log("✅ 微信 code 登录成功")
+    session, pin = login(server, ref, index)
+    log("✅ 登录态就绪")
     before = query_balance(session, pin)
     calendar_before = query_calendar(session)
     today_before = today_item(calendar_before)
