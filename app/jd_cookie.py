@@ -7,9 +7,12 @@
 # 积分有效期：
 # =========================================================
 """
-version: 2.4.4
+version: 2.4.7
 
 通过 YYB-Go-Enhanced 取微信 code 登录jd小程序，获取jd cookie
+
+2026-11-14 合并上游 lcmovie/YYB-GO-Script-i 2.4.6 的京东快递静默登录兜底
+（exchange_pt_cookie_express）+ 业务码 35 提示；保留本地 502 重试与 PT 增强。
 把jd Cookie 写入青龙环境变量；默认写本地变量，配置远程青龙后自动写远程。
 
 青龙环境变量（非空环境变量优先于下方 CONFIG_*）：
@@ -30,6 +33,13 @@ version: 2.4.4
   JD_COOKIE_MODE      可选，pt（默认，仅 pt_key/pt_pin）/ all（同时保留已取得的其他 Cookie）
   JD_SHOW_CK          可选，默认 0；仅获取模式设 1 才在标准输出显示完整 CK
                       青龙可能保存标准输出为运行日志；写入模式始终不打印完整 CK
+  JD_EXPRESS_APPID    可选，京东快递小程序 AppID（默认 wx73247c7819d61796）
+                      主路径 login_lt 拿不到 PT 时的兜底：京东快递小程序 code → 静默登录换 PT
+  JD_EID_TOKEN        可选，覆盖京东快递设备指纹（finger_tk）
+  JD_HOSTSIGN_NONCESTR / JD_HOSTSIGN_TIMESTAMP / JD_HOSTSIGN_SIGNATURE
+                      可选，覆盖京东快递 HOSTSIGN 签名的三个字段
+  JD_SILENT_USER_AGENT / JD_SILENT_REFERER
+                      可选，一起覆盖内置的京东快递静默登录 UA / Referer
   REQUEST_TIMEOUT     可选，单次请求超时秒数，默认 30，范围 5～90
 
 内部配置（直接改脚本顶部常量区，省得去面板设环境变量）：
@@ -111,6 +121,16 @@ CONFIG_QL_CLIENT_SECRET = ""  # 青龙应用 Client Secret
 CONFIG_JD_LOGIN_MODE = "auto"
 CONFIG_JD_COOKIE_MODE = "pt"
 CONFIG_JD_APPID = "wx91d27dbf599dff74"
+# 京东快递小程序（2026-11-14 合入上游 lcmovie/YYB-GO-Script-i 2.4.6）：
+# 主路径 login_lt 失败时的兜底 —— 用京东快递小程序 code 调京东静默登录换 PT。
+# 关键：它是**小程序** AppID，不会被 YYB-GO 的「网站应用 AppID 保护」403 拒绝；
+# 而老的 JD_PT_APPID(wx2f5d8f9715c59d10) 是网站应用，取码必被拒 → 那条兜底是死路。
+# 设备指纹 / HOSTSIGN 签名沿用上游内置值（2026-11-14 实测 err_code=0，签名仍有效）。
+CONFIG_JD_EXPRESS_APPID = "wx73247c7819d61796"
+CONFIG_JD_EID_TOKEN = 'jdd01w4AS6CD7CIG2JXB54AQC4LIR2Q4FVGKFUEXPCCJXKWDK5PSSQBQL6AAZWY5ZWC7WUBUMFGMKGKQG5EOSJBPAZCTFDEPQUM56YZYXXMDSXXEIBZ7CIICDGXISQRWFXSKN4VO'
+CONFIG_JD_HOSTSIGN_NONCESTR = '4311023ad04719e963d52022c370a83e'
+CONFIG_JD_HOSTSIGN_TIMESTAMP = '1781869158'
+CONFIG_JD_HOSTSIGN_SIGNATURE = 'd16be9475d2349e7694aeb38299e5c9e8e87ba63'
 CONFIG_QL_COOKIE_ENV_NAME = "JD_COOKIE"  # 本地/远程通用变量名
 CONFIG_QL_DB_PATH = ""  # 留空自动寻找青龙 DB；仅本地模式使用
 CONFIG_YYB_SERVER = ""  # 一般通过青龙共享 YYB_SERVER 配置
@@ -167,6 +187,12 @@ if YYB_SERVER and '@' in YYB_SERVER.splitlines()[0]:
 JD_PT_APPID = _env("JD_PT_APPID", CONFIG_JD_PT_APPID)
 JD_PT_APP = _env("JD_PT_APP", CONFIG_JD_PT_APP)
 JD_PT_RETURN_URL = _env("JD_PT_RETURN_URL", CONFIG_JD_PT_RETURN_URL)
+# 京东快递兜底（2026-11-14 合入上游 2.4.6）
+JD_EXPRESS_APPID = _env("JD_EXPRESS_APPID", CONFIG_JD_EXPRESS_APPID)
+JD_EID_TOKEN = _env("JD_EID_TOKEN", CONFIG_JD_EID_TOKEN)
+JD_HOSTSIGN_NONCESTR = _env("JD_HOSTSIGN_NONCESTR", CONFIG_JD_HOSTSIGN_NONCESTR)
+JD_HOSTSIGN_TIMESTAMP = _env("JD_HOSTSIGN_TIMESTAMP", CONFIG_JD_HOSTSIGN_TIMESTAMP)
+JD_HOSTSIGN_SIGNATURE = _env("JD_HOSTSIGN_SIGNATURE", CONFIG_JD_HOSTSIGN_SIGNATURE)
 QL_URL = _env("QL_URL", CONFIG_QL_URL).rstrip("/")
 QL_CLIENT_ID = _env("QL_CLIENT_ID", CONFIG_QL_CLIENT_ID)
 QL_CLIENT_SECRET = _env("QL_CLIENT_SECRET", CONFIG_QL_CLIENT_SECRET)
@@ -942,10 +968,94 @@ def jd_pt_cookie_login(code: str) -> str:
     )
 
 
+def exchange_pt_cookie_express(account: Dict[str, str]) -> str:
+    """京东快递小程序静默登录换 PT（2026-11-14 合入上游 lcmovie 2.4.6）。
+
+    走京东快递小程序（小程序 AppID，不会被 YYB-GO 的网站应用保护拒绝）取 code，
+    再 POST 京东 wxapplogin 静默登录接口换 pt_key/pt_pin。
+    sign 字段用当前时间动态算 MD5；X-WECHAT-HOSTSIGN 里的设备签名沿用上游内置值。
+    """
+    device_fields = {
+        "noncestr": JD_HOSTSIGN_NONCESTR,
+        "timestamp": JD_HOSTSIGN_TIMESTAMP,
+        "signature": JD_HOSTSIGN_SIGNATURE,
+    }
+    try:
+        device_fields["timestamp"] = int(device_fields["timestamp"])
+    except ValueError:
+        raise RuntimeError("JD_HOSTSIGN_TIMESTAMP 必须是整数") from None
+    code = get_yyb_code(account, app_id=JD_EXPRESS_APPID)
+    ts = str(int(time.time()))
+    appid, client_ver = "599", "2.0.2"
+    cmd, sub_cmd, salt = "52", "1", "sb2cwlYyaCSN1KUv5RHG3tmqxfEb8NKN"
+    sign_input = appid + JD_EXPRESS_APPID + client_ver + ts + cmd + sub_cmd + salt
+    form = {
+        "code": code,
+        "eid_token": JD_EID_TOKEN,
+        "goToLogin": "true",
+        "returnurl": "/pages/login/web-view/web-view",
+        "wxappid": JD_EXPRESS_APPID,
+        "appid": appid,
+        "client_ver": client_ver,
+        "ts": ts,
+        "sign": hashlib.md5(sign_input.encode("utf-8")).hexdigest(),
+    }
+    session = CookieOpener()
+    headers = {
+        "X-WECHAT-HOSTSIGN": json.dumps(device_fields, separators=(",", ":")),
+        "User-Agent": _env(
+            "JD_SILENT_USER_AGENT",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_5 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.74(0x18004a30) NetType/WIFI Language/zh_CN",
+        ),
+        "Referer": _env(
+            "JD_SILENT_REFERER",
+            "https://servicewechat.com/%s/870/page-frame.html" % JD_EXPRESS_APPID,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": "guid=; pt_pin=; pt_key=; pt_token=",
+    }
+    status, response_headers, raw = request_text(
+        "POST", "https://wxapplogin.m.jd.com/cgi-bin/jxpp/silentauthlogin",
+        headers=headers, data=urllib.parse.urlencode(form), opener=session, json_body=False,
+    )
+    payload = parse_jsonish(raw)
+    business_code = nested_value(payload, ("err_code", "errCode"))
+    if not 200 <= status < 300 or str(business_code) != "0":
+        safe_code = str(business_code) if re.fullmatch(r"-?[0-9]{1,8}", str(business_code)) else "未知"
+        # 业务码 35 = 微信与京东账号未绑定，属配置问题，别和 502 混为一谈
+        hint = "，请核对微信与京东账号的绑定" if safe_code == "35" else ""
+        raise RuntimeError(f"京东静默登录失败（HTTP {status}，业务码 {safe_code}{hint}）")
+    cookie = (
+        cookie_from_payload(payload)
+        or normalize_pt_cookie(nested_string(payload, ("cookie", "jdCookie")))
+        or normalize_pt_cookie(session.cookie_jar)
+        or cookie_from_headers(response_headers)
+    )
+    if not cookie:
+        raise RuntimeError("京东静默登录未返回 pt_key/pt_pin")
+    return cookie
+
+
 def exchange_pt_cookie(account: Dict[str, str]) -> str:
-    """使用旧 8000 yyb_go 重新取 PT 专用 code，再执行 jdpt.go 的 OAuth 链。"""
-    pt_code = get_yyb_code(account, app_id=JD_PT_APPID)
-    return jd_pt_cookie_login(pt_code)
+    """主路径拿不到 PT 时的兜底链。
+
+    2026-11-14 调整顺序：**先走京东快递静默登录**（实测可用，err_code=0），
+    再退回老的 JD_PT_APPID 链 —— 后者用的是网站应用 AppID(wx2f5d8f9715c59d10)，
+    会被 YYB-GO 的「网站应用 AppID 保护」403 拒绝，实际上是条死路，
+    保留只为将来该 AppID 被放行时仍能用。
+    """
+    errors = []
+    try:
+        return exchange_pt_cookie_express(account)
+    except Exception as exc:
+        errors.append("京东快递静默登录: %s" % exc)
+    try:
+        pt_code = get_yyb_code(account, app_id=JD_PT_APPID)
+        return jd_pt_cookie_login(pt_code)
+    except Exception as exc:
+        errors.append("JD_PT OAuth 链: %s" % exc)
+    raise RuntimeError("PT 兜底全部失败｜" + "｜".join(errors))
 
 
 def attempt_code_login(account: Dict[str, str], full: bool = False) -> str:
