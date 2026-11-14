@@ -55,9 +55,10 @@ HKTV论坛 www.hktv8.com 每日签到 - 青龙脚本 (Discuz! + dsu_paulsign 签
   HKTV8_MIN_INTERVAL_MS 可选。请求最小间隔毫秒，默认 1000（站点有 WAF，放慢一点更稳）
   HKTV8_CHALLENGE_RETRY 可选。WAF 挑战页最大重试次数，默认 3
   MY_PROXY           可选。HTTP/HTTPS 代理（CONNECT 隧道），如 http://192.168.31.233:7890
-                     ⚠️ 本机实测**直连可用**（首页 200 / 0.21s），故不强制；容器内不通再配
+                     ⚠️ **2026-11-14 起默认不走代理**（直接直连），原因见下方实现注释
   HKTV8_PROXY        可选。同 MY_PROXY，仅本脚本的覆盖别名；两者都配时以它为准
-  HKTV8_NO_PROXY     可选。=1 忽略上述代理强制直连
+  HKTV8_NO_PROXY     可选。=1 忽略上述代理强制直连（默认已是直连，设了更保险）
+  HKTV8_USE_PROXY    可选。=1 恢复走代理（默认直连；需要代理出口时才设）
   HKTV8_SITE         可选。站点地址，默认 https://www.hktv8.com；仅供本地 mock 回归测试
 
 依赖 (青龙依赖管理里加一行):  curl_cffi
@@ -264,13 +265,25 @@ QDXQ = _qdxq if _qdxq in QDXQ_ALLOWED else "kx"
 
 # 代理：HKTV8_PROXY（本脚本覆盖别名）> MY_PROXY（与 southplus.py / xsijishe.py 统一）
 # ⚠️ 本站实测本机直连可用，故**不强制**代理；未配置 = 纯直连
-NO_PROXY = _truthy(os.environ.get("HKTV8_NO_PROXY"))
+#
+# 2026-11-14 改为**默认强制直连**（不再依赖青龙面板加 HKTV8_NO_PROXY 变量）：
+#   · 起因：论坛三个脚本（hktv8 / southplus / wnflb2023）原本都是 `10 0 * * *` 同刻启动，
+#     且都走同一个 MY_PROXY 出口 → 同一出口 IP 在几秒内承受多个并发来源，
+#     11-11 与 11-14 两次 00:10 均被站点 WAF 拦成 403 挑战页（12 次请求全挂）。
+#   · 实测（青龙容器内）：直连首页 200 / 31116 字节，3 连打全过，0.4~3.4s；
+#     走代理 20 连打也全过 —— 说明 WAF 是**状态性**触发，不是 IP 长期黑名单。
+#   · 现在默认走 N1 直连出口，与 southplus / wnflb2023 的代理出口错开，
+#     避免同 IP 集中被标记。
+# 需要恢复走代理时：显式设 HKTV8_USE_PROXY=1（HKTV8_NO_PROXY=1 仍然有效，优先级更高）
+_USE_PROXY = _truthy(os.environ.get("HKTV8_USE_PROXY"))
+NO_PROXY = _truthy(os.environ.get("HKTV8_NO_PROXY")) or not _USE_PROXY
 _env_proxy = (os.environ.get("HKTV8_PROXY") or "").strip()
 _my_proxy = (os.environ.get("MY_PROXY") or "").strip()
 PROXY = "" if NO_PROXY else (_env_proxy or _my_proxy)
 PROXY_SRC = "HKTV8_PROXY" if _env_proxy else ("MY_PROXY" if _my_proxy else "")
-PROXY_DESC = ("已按 HKTV8_NO_PROXY=1 强制直连" if NO_PROXY
-              else ((PROXY + "（来源 " + PROXY_SRC + "）") if PROXY else "未配置（直连）"))
+PROXY_DESC = ("已强制直连（默认行为；设 HKTV8_USE_PROXY=1 可恢复走代理）" if NO_PROXY and not _USE_PROXY
+              else ("已按 HKTV8_NO_PROXY=1 强制直连" if NO_PROXY
+                    else ((PROXY + "（来源 " + PROXY_SRC + "）") if PROXY else "未配置（直连）")))
 
 
 # ========== HTTP 后端（优先 curl_cffi，缺失则退回 requests）==========
@@ -615,7 +628,6 @@ class Client(object):
         hdrs = dict(self.base_headers)
         if headers:
             hdrs.update(headers)
-        hdrs["Cookie"] = (cookies if cookies is not None else self.jar_str())
         to = timeout or TIMEOUT
         last = None
         # no_retry：不重发（用于 Discuz 会「累计失败次数」的接口，如登录 POST）
@@ -625,6 +637,11 @@ class Client(object):
             self._throttle()
             t0 = time.time()
             try:
+                # 2026-11-14 修正：Cookie 头改为**每轮重发前重新生成**。
+                # 原来只在循环外算一次（hdrs["Cookie"] = ...），
+                # 外层第 2 次重试和内层挑战页重发都带着旧 Cookie 快照，
+                # 而 absorb() 收到的新 cookie 根本没进请求头 → 「带新 cookie 重发」形同虚设。
+                hdrs["Cookie"] = (cookies if cookies is not None else self.jar_str())
                 kw = dict(headers=hdrs, data=data, timeout=to, allow_redirects=allow_redirects)
                 if self.proxy:
                     kw["proxies"] = {"http": self.proxy, "https": self.proxy}
@@ -645,6 +662,12 @@ class Client(object):
                             chal, CHALLENGE_RETRY))
                     self._throttle()
                     t0 = time.time()
+                    # 2026-11-14 修正：absorb() 把 WAF 下发的随机名 cookie 收进了 self.jar，
+                    # 但**没有回写 kw["headers"]["Cookie"]** —— kw 是请求前构造的快照，
+                    # 于是重发时仍然带旧 Cookie，等于「拿新 cookie 重发」从未真正生效，
+                    # 白白重试 3 次（11-11 / 11-14 的 12 次 403 全是这样耗掉的）。
+                    # 浏览器能过是因为它执行 JS 跳回时带着新 cookie；这里补上同一件事。
+                    kw["headers"]["Cookie"] = self.jar_str()
                     r = _http.request(method, url, **kw)
                     self._last_ts = time.time()
                     r._x_elapsed = self._last_ts - t0
