@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  京东Cookie
-# version: 2026-10-29a
+# version: 2026-11-14a
 # cron: 0 */3 * * *
 # 积分有效期：
 # =========================================================
 """
-version: 2.4.7
+version: 2.4.8
 
 通过 YYB-Go-Enhanced 取微信 code 登录jd小程序，获取jd cookie
 
 2026-11-14 合并上游 lcmovie/YYB-GO-Script-i 2.4.6 的京东快递静默登录兜底
 （exchange_pt_cookie_express）+ 业务码 35 提示；保留本地 502 重试与 PT 增强。
+2026-11-14b 成功日志同时明示 pt_key 与 pt_pin 均已取得/写入（脱敏摘要，不打印凭证）。
 把jd Cookie 写入青龙环境变量；默认写本地变量，配置远程青龙后自动写远程。
 
 青龙环境变量（非空环境变量优先于下方 CONFIG_*）：
@@ -33,6 +34,8 @@ version: 2.4.7
   JD_COOKIE_MODE      可选，pt（默认，仅 pt_key/pt_pin）/ all（同时保留已取得的其他 Cookie）
   JD_SHOW_CK          可选，默认 0；仅获取模式设 1 才在标准输出显示完整 CK
                       青龙可能保存标准输出为运行日志；写入模式始终不打印完整 CK
+                      成功日志一律输出脱敏摘要（pt_key 位数+前 6 位 / pt_pin 尾号），
+                      用来明示两个字段都已取得并写入，不会泄露完整 pt_key
   JD_EXPRESS_APPID    可选，京东快递小程序 AppID（默认 wx73247c7819d61796）
                       主路径 login_lt 拿不到 PT 时的兜底：京东快递小程序 code → 静默登录换 PT
   JD_EID_TOKEN        可选，覆盖京东快递设备指纹（finger_tk）
@@ -89,7 +92,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-14a"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [JD] message ==========
@@ -729,6 +732,18 @@ def normalize_pt_cookie(cookie: Any) -> str:
     if not key_match or not pin_match:
         return ""
     return f"pt_key={key_match.group(1)};pt_pin={pin_match.group(1)};"
+
+
+def ck_fields_brief(cookie: Any) -> str:
+    """CK 字段脱敏摘要：明示 pt_key / pt_pin 均已取得，不打印完整凭证。"""
+    text = str(cookie or "")
+    key_match = re.search(r"(?:^|[;?,\s])pt_key=([^;?,\s]+)", text)
+    pin_match = re.search(r"(?:^|[;?,\s])pt_pin=([^;?,\s]+)", text)
+    key = key_match.group(1) if key_match else ""
+    pin = pin_match.group(1) if pin_match else ""
+    key_part = "pt_key[%d位 %s…]" % (len(key), key[:6]) if key else "pt_key[缺失]"
+    pin_part = "pt_pin[尾号 %s]" % pin[-4:] if pin else "pt_pin[缺失]"
+    return key_part + " + " + pin_part
 
 
 def cookie_from_headers(headers: Dict[str, Any]) -> str:
@@ -1816,15 +1831,10 @@ def main() -> int:
             err("   ❌ 失败：" + brief_failure(exc))
             time.sleep(1)
             continue
-        pin = ""
-        for part in cookie.split(";"):
-            if part.strip().startswith("pt_pin="):
-                pin = part.strip().split("=", 1)[1]
-                break
-        pin_tail = pin[-4:] if pin else "????"
+        fields = ck_fields_brief(cookie)
         try:
             if mode == "acquire":
-                log(f"   ✅ 成功：取CK通过（pt_pin 尾号 {pin_tail}），仅获取模式未写入")
+                log(f"   ✅ 成功：取CK通过（{fields}），仅获取模式未写入")
                 if SHOW_CK:
                     log(cookie)
                 ok_n += 1
@@ -1833,12 +1843,12 @@ def main() -> int:
                     writer = (RemoteQingLong(QL_URL, QL_CLIENT_ID, QL_CLIENT_SECRET)
                               if mode == "remote" else LocalQingLong())
                 action = writer.sync(account, cookie)
-                print(f"   ✅ 成功：pt_pin 尾号 {pin_tail}，{labels[mode]}变量已"
+                print(f"   ✅ 成功：{fields} 均已写入，{labels[mode]}变量已"
                       + ("更新" if action == "update" else "创建") + "，读回核验通过")
                 ok_n += 1
         except Exception as exc:
             warn_n += 1
-            warn(f"   ⚠️ 需人工：取CK通过（pt_pin 尾号 {pin_tail}）但写入失败：" + brief_failure(exc))
+            warn(f"   ⚠️ 需人工：取CK通过（{fields}）但写入失败：" + brief_failure(exc))
         # 附加流程：每账号每天一次，进度即时落盘；中断后当天重跑只补未完成账号。
         # 结果不进入日志与退出码。
         if ref not in warm_done:
