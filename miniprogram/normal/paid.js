@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  平安i动
-# version: 2026-10-29a
+# version: 2026-11-15b
 # cron: 42 5,15 * * *
 # 积分有效期：未知
 =========================================================*/
@@ -35,7 +35,10 @@
  *   ① 兜底 TOKEN(PAID_TOKENS, JSON) 命中→直接复用，跳过登录且不写缓存
  *   ② 缓存(PAID_cookies.json) 有效→复用
  *   ③ 无兜底/缓存→YYB-Go-Enhanced(wxapp/getCode) 取 code→业务登录→写缓存
- *   ④ 都失败→判失败跳下一账号（同轮内对某账号 YYB 仅取一次 code）
+ *      取码层最多尝试 YYB_CODE_RETRY 次、间隔 ≥3 秒；只重试 5xx/429/超时/空 code，
+ *      403/400/409 等明确拒绝不重试。code 一次性，不整体重试 doLogin。
+ *      （取码次数无配额上限，只有按账号 3 秒最小间隔排队；login_budget 只管 OAuth 恢复）
+ *   ④ 都失败→判失败跳下一账号
  *
  * ── PAID_TOKENS 兜底 TOKEN 参数说明（最高优先级，配置即用、跳过登录）──
  *   需 4 个字段，缺一不可（每个请求都消费它们）：
@@ -72,7 +75,7 @@
  *   登录链路优先级（命中即跳过后续）：
  *     ① 兜底 TOKEN(PAID_TOKENS) → 直接复用，跳过登录且不写缓存
  *     ② 缓存(PAID_cookies.json) 有效 → 复用
- *     ③ 无兜底/缓存 → getSingleCode 取 code → 业务登录 → 写缓存
+ *     ③ 无兜底/缓存 → yybGetCode 取 code（含重试） → 业务登录 → 写缓存
  * ============================================================
  */
 const fs = require('fs');
@@ -224,9 +227,15 @@ const ACC_RULE = '='.repeat(70);
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];
 
-// 取 code 单次请求超时（毫秒）。取码经常要几十秒，全仓统一 60 秒；
+// 取 code 单次请求超时（毫秒）。取码经常要几十秒，本脚本设 90 秒；
 // 裸 fetch 不设上限时受 undici 默认管（headersTimeout/bodyTimeout 各 300 秒），最坏能卡 5 分钟。
 const YYB_TIMEOUT = 90000;
+
+// 取 code 重试（2026-11-15a 引入）：502 是 YYB-GO 上游 8 秒超时，不是本地限速；
+// 取码次数无上限，只有按账号 3 秒最小间隔排队（code_min_gap_ms=3000），故间隔下限 3 秒。
+// 单次 502 约 8 秒即返回，4 次最坏约 4×8s + 3×6s ≈ 50 秒。
+const YYB_CODE_RETRY = 4;        // 总尝试次数（含首次），运行时钳制到 1~6
+const YYB_CODE_RETRY_DELAY = 5;  // 基础等待秒数 + 0~2 秒抖动，避免多账号同时重打
 
 // ============ 纯 JS AES（零依赖，逐字节等同 crypto-js；支持任意「4 的倍数」字节 key） ============
 // 与小程序(模块200 c.c)一致：key = Utf8(degradeToken)，iv = Utf8("123456789aasdfgh")，
@@ -308,7 +317,7 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-10-29a';   // 更新脚本此值
+const SCRIPT_VER = '2026-11-15b';   // 更新脚本此值
 const AES_PASS = '123456789aasdfgh';                               // 模块135常量 m.a
 const LOGIN_PUBKEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRxFgN1vGYDSkfH90SI9Ixr1wxyTah3+ShYIDvEL1cI4XCvXHfnBkGb6dQPsiNj1skENyF9zEEWv0jshvgpgNleDzd6vnJRf8LQtolFv4dWXzJwruGTCq6lYTM/K+4E8iaiXarD9z3fsR4nIUcu5QRRY1m//nLhRtxonva/ubO+QIDAQAB
@@ -542,26 +551,71 @@ function tokensMap(){
   return m;
 }
 
-// 单账号单次取码：直接调用 YYB-Go-Enhanced /wxapp/getCode。
-// 上限 YYB_TIMEOUT（60 秒），超时抛出的错误文案就是 `timeout`，方便日志 grep。
-async function yybGetCode(account){
+// —— 取码（单次）——
+// 直接调用 YYB-Go-Enhanced /wxapp/getCode；上限 YYB_TIMEOUT（90 秒），
+// 超时抛出的错误文案就是 `timeout`，方便日志 grep。
+// 失败统一包装成带 retryable / httpStatus 标记的 Error，由 yybGetCode 决定是否重试。
+function _codeFail(reason, retryable, status){
+  const e = new Error('YYB-Go-Enhanced取code失败: ' + reason);
+  e.retryable = !!retryable;
+  e.httpStatus = status || 0;
+  return e;
+}
+
+async function _yybCodeOnce(account){
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('timeout')), YYB_TIMEOUT);
+  let resp, j;
   try {
-    const resp = await fetch(`${account.server}/wxapp/getCode`, {
+    resp = await fetch(`${account.server}/wxapp/getCode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ref: account.ref, app_id: APPID }),
       signal: ctrl.signal,
     });
-    const j = await resp.json().catch(() => ({}));
-    const code = j && j.data && j.data.result && j.data.result.code;
-    if (!resp.ok || Number(j.code) !== 0 || !code) throw new Error('YYB-Go-Enhanced取code失败: ' + String(j.message || j.msg || `HTTP ${resp.status}`).slice(0, 160));
-    dbg('YYB getCode ok', mask(account.ref));
-    return code;
+    j = await resp.json().catch(() => ({})); // 非 JSON 也走下面统一判定
+  } catch (e){
+    // 网络断连 / DNS / AbortController 超时：瞬时故障，可重试
+    throw _codeFail('网络异常或超时: ' + String(e && e.message ? e.message : e).slice(0, 160), true);
   } finally {
     clearTimeout(timer);
   }
+
+  const status = resp.status;
+  const code = j && j.data && j.data.result && j.data.result.code;
+  if (resp.ok && Number(j.code) === 0 && code){
+    dbg('YYB getCode ok', mask(account.ref));
+    return code;
+  }
+  const reason = String((j && (j.message || j.msg)) || '').slice(0, 160) || `HTTP ${status}`;
+  // 明确拒绝不重试：HTTP 4xx（429 除外）与业务码 400/403/404/409。
+  // 可重试：5xx / 429 / 上游 call failed·deadline / 非 JSON / 成功响应里没有有效 code。
+  const bizCode = Number(j && j.code);
+  const hardFail = (status >= 400 && status < 500 && status !== 429) || [400, 403, 404, 409].includes(bizCode);
+  const softFail = status >= 500 || status === 429 || !code
+    || /call failed|deadline exceeded|timeout|超时|http\.failed/i.test(reason);
+  throw _codeFail(`HTTP ${status} ${reason}`, !hardFail && softFail, status);
+}
+
+// —— 取码（带重试）——
+// 只重试上游瞬时故障；明确 4xx / 业务拒绝立即失败，避免无意义重打。
+// 间隔 ≥3 秒对应 YYB-GO 的 code_min_gap_ms=3000（按账号排队，非拒绝）。
+// 重试日志走 WARN，不进 ERROR 收集，不会触发「只推错误」的通知。
+async function yybGetCode(account){
+  const total = Math.max(1, Math.min(6, Math.floor(Number(YYB_CODE_RETRY) || 4)));
+  let lastErr = null;
+  for (let i = 1; i <= total; i++){
+    try {
+      return await _yybCodeOnce(account);
+    } catch (e){
+      lastErr = e;
+      if (!e.retryable || i === total) break;
+      const wait = YYB_CODE_RETRY_DELAY + Math.random() * 2;
+      logWarn(`⚠️ [取码] 第 ${i}/${total} 次失败（${e.message}），${wait.toFixed(1)}s 后重试`);
+      await new Promise(res => setTimeout(res, Math.round(wait * 1000)));
+    }
+  }
+  throw lastErr || _codeFail('未知错误', false);
 }
 
 function parseLogin(resp, randomKey){
@@ -665,6 +719,10 @@ async function runOne(account, cache, tkmap){
       auth = await doLogin(account); src = 'YYB-Go-Enhanced 登录成功';
       cache[openid] = auth; saveCache(cache);
     }
+    // line 在账号结束后统一输出（见 main 的 r.line.forEach(logLine)），所以服务端判失效时
+    // 可以就地改写这一行，避免日志出现「缓存有效→复用」却又「重新登录」的自相矛盾。
+    const authLineIdx = line.length;
+    const credLabel = tkmap[openid] ? '兜底 TOKEN' : (src.includes('缓存') ? '缓存' : '登录态');
     line.push('🔑 ' + (tkmap[openid] ? 'TOKENS 兜底有效' : (src.includes('缓存') ? '缓存有效→复用' : '缓存已失效')));
     if (src.includes('YYB')) line.push('✅ YYB-Go-Enhanced 登录成功（已更新缓存）');
 
@@ -693,14 +751,23 @@ async function runOne(account, cache, tkmap){
       const sj = await signInSmart(auth);
       if (sj.CODE === '10000' && /登录失效|请重新登录/.test(sj.MSG || '') && !relogged){
         relogged = true;
+        // 判定即记录：放在 doLogin 之前，即使后面取 code 失败，日志也明确写出「缓存已失效」
+        line[authLineIdx] = `🔑 ${credLabel}已失效（服务端 CODE=10000 登录失效）`;
+        line.push('🔄 已判定失效，清缓存并重新取 code 登录');
         delete cache[openid]; saveCache(cache);
         auth = await doLogin(account); cache[openid] = auth; saveCache(cache);
-        line.push('🔄 缓存失效，已重新 YYB 登录');
+        line.push('✅ 重新 YYB 登录成功（缓存已更新）');
         signReport(await signInSmart(auth), '重登后');
       } else {
         signReport(sj, '');
       }
-    } catch (e){ success = false; failMsg = e.message || String(e); line.push('❌ 签到异常 ' + failMsg); }
+    } catch (e){
+      success = false; failMsg = e.message || String(e);
+      // 取 code 失败也被这个 try 兜住，旧文案统一叫「签到异常」会误导，按错误来源区分
+      const tag = /取code失败|call failed|deadline exceeded|timeout|网络异常/i.test(failMsg)
+        ? '重新登录取 code 失败（未完成重登）' : '签到异常';
+      line.push('❌ ' + tag + ': ' + failMsg);
+    }
 
     // 末次余额
     const finalBalance = await getCoinBalance(auth);
@@ -758,7 +825,7 @@ async function main(){
   let skipped = 0;
   for (let idx = 0; idx < accounts.length; idx++){
     const account = accounts[idx];
-    // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
+    // 今天已经跑完的账号直接跳过，不再发起 YYB 取码/登录请求（取码本身无次数配额上限）
     // key 与 PAID_cookies.json 缓存口径一致（openid = account.ref）
     const doneKey = account.ref;
     if (is_done_today(doneKey)) {
