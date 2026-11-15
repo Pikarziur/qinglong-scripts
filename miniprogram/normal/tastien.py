@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  塔斯汀会员
-# version: 2026-10-29a
+# version: 2026-11-15a  （取码层新增瞬时失败重试）
 # cron: 12 6,16 * * *
 # 积分有效期：获得起6个月内
 # =========================================================
@@ -17,6 +17,9 @@
   YYB_ONLY_REFS      账号序号白名单（1 起），仅运行指定序号；留空 [] 运行全部，例如 [1, 3]
   FORCE_ACTIVITY_ID  签到活动 ID 写死（0 = 自动：缓存 → 区间探测）
   SHOP_ID            门店 ID（抓包里的 gray-shop-id，默认 3487）
+  YYB_CODE_RETRY     取码总尝试次数（含首次），默认 4；仅瞬时失败重试，业务拒绝不重试
+  YYB_CODE_RETRY_DELAY  取码重试基础间隔秒数，默认 5（+0~2s 抖动）；须 ≥3 秒
+                        对应服务端 code_min_gap_ms=3000，间隔过短会被排队拖慢
 
 任务流程：
   1. 解析 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
@@ -43,6 +46,10 @@ YYB_ONLY_REFS = []
 FORCE_ACTIVITY_ID = 0
 # 门店 ID（抓包请求头里的 gray-shop-id）
 SHOP_ID = "3487"
+# YYB-Go /wxapp/getCode 重试：上游 8s 超时的 502 是随机瞬时失败，不是账号/配置问题。
+# 总尝试 4 次时漏过概率约 3%（单次失败率约 42%）；间隔须 ≥ 服务端 code_min_gap_ms=3s。
+YYB_CODE_RETRY = 4
+YYB_CODE_RETRY_DELAY = 5
 
 import json
 import os
@@ -226,7 +233,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-15a"
 _ACC_RULE = "=" * 70
 
 
@@ -349,27 +356,51 @@ def parse_yyb_entries() -> List[Tuple[str, str, str]]:
     return entries
 
 
-def yyb_get_code(server: str, ref: str) -> str:
-    """调 YYB-Go 的 /wxapp/getCode 取 wx.login code。"""
-    try:
-        sess = requests.Session()
-        sess.trust_env = False
-        response = sess.post(server + "/wxapp/getCode",
-                             json={"ref": ref, "app_id": MINI_APPID}, timeout=(10, 90))
-        response.raise_for_status()
-        body = response.json()
-    except Exception as exc:
-        raise RuntimeError("YYB-Go 取码失败：%s" % exc)
+def _yyb_code_once(server: str, ref: str) -> str:
+    """单次取码；失败抛「原因」异常，由 yyb_get_code 统一包装并判断是否重试。"""
+    sess = requests.Session()
+    sess.trust_env = False
+    response = sess.post(server + "/wxapp/getCode",
+                         json={"ref": ref, "app_id": MINI_APPID}, timeout=(10, 90))
+    response.raise_for_status()
+    body = response.json()
     code_field = body.get("code")
     if isinstance(code_field, int) and code_field not in (0, None):
-        raise RuntimeError("YYB-Go 取码失败：%s" % (body.get("msg") or body))
+        raise RuntimeError(str(body.get("msg") or body))
     data = body.get("data") or {}
     result = body.get("result") or (isinstance(data, dict) and data.get("result")) or {}
     code = ((isinstance(result, dict) and result.get("code"))
             or (isinstance(data, dict) and data.get("code")) or None)
     if not code:
-        raise RuntimeError("YYB-Go 未返回有效微信 code：%s" % str(body)[:200])
+        raise RuntimeError("未返回有效微信 code：%s" % str(body)[:200])
     return str(code)
+
+
+def _is_retryable_code_error(exc: Exception) -> bool:
+    """只重试瞬时失败：网络超时/断连、HTTP 5xx 与 429、非 JSON 响应、空 code。
+    明确业务拒绝（403/400/409 等 4xx、业务码错误）立即失败，不浪费取码额度。"""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+        return status >= 500 or status == 429
+    if isinstance(exc, (requests.RequestException, ValueError)):
+        return True
+    return isinstance(exc, RuntimeError) and "未返回有效微信 code" in str(exc)
+
+
+def yyb_get_code(server: str, ref: str) -> str:
+    """调 YYB-Go 的 /wxapp/getCode 取 wx.login code；瞬时失败按配置重试。"""
+    total = max(1, min(YYB_CODE_RETRY, 6))
+    for attempt in range(1, total + 1):
+        try:
+            return _yyb_code_once(server, ref)
+        except Exception as exc:
+            if attempt >= total or not _is_retryable_code_error(exc):
+                raise RuntimeError("YYB-Go 取码失败：%s" % exc)
+            delay = max(3, YYB_CODE_RETRY_DELAY) + random.uniform(0, 2)
+            warn("⚠️ YYB-Go 取码失败（第 %d/%d 次）：%s，%.0fs 后重试"
+                 % (attempt, total, str(exc)[:120], delay))
+            time.sleep(delay)
+    raise RuntimeError("YYB-Go 取码失败：重试次数已用尽")
 
 
 def pick_token(payload: Any, raw_text: str) -> Tuple[str, str]:
