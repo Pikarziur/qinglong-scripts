@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  丸丫甄选
-# version: 2026-10-29a
+# version: 2026-11-15a
 # cron: 18 6,16 * * *
 # 积分有效期：1年
 =========================================================*/
@@ -58,8 +58,24 @@ function _yybRouteFor(identifier) {
     throw new Error(`YYB_SERVER 中找不到账号标识：${wanted || '(空)'}`);
 }
 
-async function getSingleCode(appId, identifier) {
-    const route = _yybRouteFor(identifier);
+// ===== YYB 取码重试（2026-11-15a）=====
+// 502 多为 YYB-GO → 微信链路的上游 8 秒超时，不是本地限速；仅瞬时失败重试。
+// 总尝试 4 次（含首次），间隔 5~7 秒，满足 YYB-GO 的 code_min_gap_ms=3000。
+const YYB_CODE_RETRY = 4;
+const YYB_CODE_RETRY_DELAY = 5;
+
+function _yybCodeRetryable(e) {
+    const status = Number(e?.response?.status || e?.status || 0);
+    if (status) return status >= 500 || status === 429;
+    const text = String(e?.message || e || '');
+    if (text.startsWith('/wxapp/getCode 返回失败')) {
+        // HTTP 200 但 body.code != 0：上游超时类文案才重试，纯业务拒绝不重试
+        return /call failed|deadline exceeded|timeout|shortlink|bad gateway/i.test(text);
+    }
+    return true;  // 网络异常/超时、非 JSON、空 code 等瞬时失败
+}
+
+async function _yybCodeOnce(appId, route) {
     const response = await axios.post(`${route.server}/wxapp/getCode`,
         { ref: route.ref, app_id: appId },
         { timeout: 90000, headers: { 'Content-Type': 'application/json' } });
@@ -70,6 +86,22 @@ async function getSingleCode(appId, identifier) {
     const code = body.data?.result?.code;
     if (!code) throw new Error('/wxapp/getCode 未返回 data.result.code');
     return code;
+}
+
+async function getSingleCode(appId, identifier) {
+    const route = _yybRouteFor(identifier);   // 配置错误立即抛出，不进入重试
+    const total = Math.max(1, Math.min(YYB_CODE_RETRY, 6));
+    for (let attempt = 1; attempt <= total; attempt++) {
+        try {
+            return await _yybCodeOnce(appId, route);
+        } catch (e) {
+            if (attempt >= total || !_yybCodeRetryable(e)) throw e;
+            const delay = Math.max(3, YYB_CODE_RETRY_DELAY) + Math.random() * 2;
+            warn(`⚠️ YYB-Go 取码失败（第 ${attempt}/${total} 次）：${String(e?.message || e).slice(0, 120)}，${delay.toFixed(0)}s 后重试`);
+            await new Promise(r => setTimeout(r, delay * 1000));
+        }
+    }
+    throw new Error('/wxapp/getCode 取码失败：重试次数已用尽');
 }
 
 async function _resolveYybAccounts(envName = '') {
@@ -100,7 +132,7 @@ function logStartup(total) {
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }
-const SCRIPT_VER = '2026-10-29a';
+const SCRIPT_VER = '2026-11-15a';
 const ACC_RULE = '='.repeat(70);
 function accBanner(idx, total, ident = '') {
     log(ACC_RULE);
@@ -476,7 +508,7 @@ function isRepeatCheckin(message) {
     return /已达最大参与次数|已签到|重复签到|今日已参与|已经签到/.test(String(message || ""));
 }
 
-// yyb_go 取码（getSingleCode 内部已带节流与重试），失败时上层登录会记录原因
+// yyb_go 取码（getSingleCode 内部 4 次重试、间隔 5~7 秒），失败时上层登录会记录原因
 async function getWxCode(openid) {
     const { data } = await wechat.getCode(openid);
     if (!data || data.status === false) throw new Error(`yyb_go 取code失败: ${data?.message || short(data)}`);

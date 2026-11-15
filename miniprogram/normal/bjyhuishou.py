@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  白鲸鱼旧衣服回收
-# version: 2026-10-29a
+# version: 2026-11-15a
 # cron: 0 4,14 * * *
 # 积分有效期：永久有效
 # =========================================================
@@ -107,6 +107,31 @@ def _yyb_route(identifier):
     raise RuntimeError(f"YYB_SERVER 中找不到账号标识：{wanted or '(空)'}")
 
 
+# ===== YYB 取码重试（2026-11-15a）=====
+# 502 多为 YYB-GO → 微信链路的上游 8 秒超时，不是本地限速；仅瞬时失败重试。
+# 总尝试 4 次（含首次），间隔 5~7 秒，满足 YYB-GO 的 code_min_gap_ms=3000。
+YYB_CODE_RETRY = 4
+YYB_CODE_RETRY_DELAY = 5
+
+
+def _yyb_retryable(exc: Exception) -> bool:
+    """只重试瞬时失败；业务拒绝（403/400/409 等）立即失败，不浪费取码额度。"""
+    import requests as _requests
+    if isinstance(exc, _requests.HTTPError) and exc.response is not None:
+        status = exc.response.status_code
+        return status >= 500 or status == 429
+    if isinstance(exc, (_requests.RequestException, ValueError)):
+        return True
+    text = str(exc).lower()
+    if "未返回 data.result" in text:
+        return True
+    if "返回失败" in text:
+        # body.code != 0：仅上游超时类文案重试，纯业务拒绝不重试
+        return any(k in text for k in ("call failed", "deadline exceeded", "timeout",
+                                       "shortlink", "bad gateway"))
+    return False
+
+
 def _yyb_call(endpoint, app_id, identifier):
     import requests as _requests
     route = _yyb_route(identifier)
@@ -149,11 +174,22 @@ class _YybCompat:
 
     @staticmethod
     def get_single_code(app_id, identifier):
-        result = _yyb_call("/wxapp/getCode", app_id, identifier)
-        code = result if isinstance(result, str) else result.get("code")
-        if not code:
-            raise RuntimeError("/wxapp/getCode 未返回 data.result.code")
-        return str(code)
+        total = max(1, min(YYB_CODE_RETRY, 6))
+        for attempt in range(1, total + 1):
+            try:
+                result = _yyb_call("/wxapp/getCode", app_id, identifier)
+                code = result if isinstance(result, str) else result.get("code")
+                if not code:
+                    raise RuntimeError("/wxapp/getCode 未返回 data.result.code")
+                return str(code)
+            except Exception as exc:
+                if attempt >= total or not _yyb_retryable(exc):
+                    raise
+                delay = max(3, YYB_CODE_RETRY_DELAY) + random.uniform(0, 2)
+                warn("⚠️ YYB-Go 取码失败（第 %d/%d 次）：%s，%.0fs 后重试"
+                     % (attempt, total, str(exc)[:120], delay))
+                time.sleep(delay)
+        raise RuntimeError("/wxapp/getCode 取码失败：重试次数已用尽")
 
     @staticmethod
     def get_single_phone_code(app_id, identifier, login_type=None):
@@ -359,7 +395,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-15a"
 _ACC_RULE = "=" * 70
 
 # 账号白名单：按 YYB_SERVER 的行序（1 起）筛选本次要跑的账号。
