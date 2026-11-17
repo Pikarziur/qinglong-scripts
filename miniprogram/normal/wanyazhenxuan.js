@@ -3,7 +3,8 @@
 # name:  丸丫甄选
 # version: 2026-11-15a
 # cron: 18 6,16 * * *
-# 积分有效期：1年
+# 积分有效期：当前积分有效期为1年【1】
+# 检测过期积分：每年12/25~12/31检测提醒（即将过期积分=现有总积分）
 =========================================================*/
 
 // ────────────────────────────────────────────
@@ -397,6 +398,11 @@ const TOKEN_CACHE_FILE = path.join(__dirname, "wanyazhenxuan_token_cache.json");
 // 结构：{ "<openid>": {"date": "2026-11-07", "doneTime": "...", "note": "签到成功"} }
 // 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
 const DAILY_DONE_FILE = path.join(__dirname, "wanyazhenxuan_daily_done.json");
+// ===================== 积分过期提醒 =====================
+// 每年 12/25~12/31 检查并连续提醒；即将过期积分 = 现有总积分。
+const ENABLE_EXPIRE_REMIND = true;
+const EXPIRE_REMIND_START_DAY = 25;
+const EXPIRE_REMIND_END_DAY = 31;
 const USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF";
 
@@ -439,6 +445,18 @@ function _today() {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+// 是否处于积分过期提醒窗口（每年 12/29~12/31，含首尾）
+function isExpireWindow() {
+    if (!ENABLE_EXPIRE_REMIND) return false;
+    const d = new Date();
+    return d.getMonth() + 1 === 12 && d.getDate() >= EXPIRE_REMIND_START_DAY && d.getDate() <= EXPIRE_REMIND_END_DAY;
+}
+
+// 本次窗口对应的积分过期日
+function expireDeadline() {
+    return `${new Date().getFullYear()}-12-31`;
+}
+
 function load_daily_done() {
     try {
         if (!fs.existsSync(DAILY_DONE_FILE)) return {};
@@ -466,7 +484,14 @@ function is_done_today(key) {
     return String(entry.date || "") === _today();
 }
 
-function mark_done_today(key, note = "") {
+function expirePointsFromDone(key) {
+    const entry = load_daily_done()[key];
+    if (!entry || typeof entry !== "object") return null;
+    const val = entry.expirePoints;
+    return val === undefined || val === null ? null : Number(val);
+}
+
+function mark_done_today(key, note = "", expirePoints = null) {
     const cache = load_daily_done();
     const today = _today();
     // 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -480,6 +505,7 @@ function mark_done_today(key, note = "") {
         date: today,
         doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
         note: String(note || ""),
+        expirePoints: expirePoints === null || expirePoints === undefined ? null : Number(expirePoints),
     };
     save_daily_done(kept);
     log(`[打标] 今日任务已完成，已记录（${today}）`);
@@ -533,6 +559,7 @@ class Task {
         this.todayStatus = "未执行";
         this.todayEarned = 0;
         this.totalPoints = null;
+        this.expirePoints = null;
     }
 
     async run() {
@@ -756,19 +783,42 @@ class Task {
     }
 
     async getPoints() {
-        // 抓包(214027)未包含积分余额接口；user_points.json 为有赞通用契约的兼容探测，失败则降级为连签天数
+        // 主口径：会员中心初始化接口（抓包实测含 member.stats.points）
+        try {
+            const data = await this.request({ path: "/wscuser/membercenter/init-data.json" });
+            const pts = data?.member?.stats?.points;
+            if (pts !== undefined && pts !== null) {
+                this.totalPoints = Number(pts);
+                log(`账号[${this.index}] 当前积分: ${pts}`);
+                this.markExpirePoints();
+                return;
+            }
+        } catch (e) {
+            // 换用下面的兼容接口
+        }
+        // 兜底：有赞通用积分余额接口（部分店铺不存在）
         try {
             const data = await this.request({ path: "/wscump/integral/user_points.json" });
             const pts = data?.current_points ?? data?.real_points;
             if (pts !== undefined && pts !== null) {
                 this.totalPoints = Number(pts);
                 log(`账号[${this.index}] 当前积分: ${pts}`);
+                this.markExpirePoints();
                 return;
             }
         } catch (e) {
             // 部分店铺无此余额接口，忽略
         }
         if (this.continuesDay) log(`账号[${this.index}] 连续签到: ${this.continuesDay} 天`);
+    }
+
+    // 窗口内：即将过期积分 = 现有总积分
+    markExpirePoints() {
+        if (!isExpireWindow()) return;
+        if (this.totalPoints === null || this.totalPoints === undefined) return;
+        if (this.totalPoints <= 0) return;
+        this.expirePoints = Number(this.totalPoints);
+        log(`账号[${this.index}] 即将过期积分: ${this.expirePoints}`);
     }
 }
 
@@ -793,7 +843,31 @@ function buildSummaryContent(results) {
     return lines.join("\n");
 }
 
-async function printSummary(results, skipped = 0) {
+async function printExpireRemind(rows) {
+    // 窗口内：即将过期积分 > 0 则汇总打印 + 独立强推（连续多天）
+    if (!isExpireWindow()) return;
+    const hits = (rows || []).filter((r) => r && r.expirePoints !== null && r.expirePoints !== undefined && Number(r.expirePoints) > 0);
+    if (!hits.length) return;
+    const deadline = expireDeadline();
+    log('⏳ [积分过期提醒]');
+    for (const r of hits) log(`   · ${r.label}：${Number(r.expirePoints)} 积分（${deadline} 过期）`);
+    if (!_qnNotify) {
+        console.log('[QL] 未找到青龙通知模块，积分过期提醒未推送');
+        return;
+    }
+    if (!_QN_ENVS.some((k) => process.env[k])) {
+        console.log('[QL] 未配置通知渠道，积分过期提醒未推送（可在青龙「通知设置」或环境变量中配置）');
+        return;
+    }
+    try {
+        const body = hits.map((r) => `- ${r.label}：${Number(r.expirePoints)} 积分（${deadline} 过期）`).join('\n');
+        await _qnNotify(`【${_QN_SITE}】积分即将过期提醒`, body);
+    } catch (e) {
+        warn(`⚠️ [积分过期提醒] 推送失败：${e && e.message ? e.message : e}`);
+    }
+}
+
+async function printSummary(results, skipped = 0, expireRows = []) {
     const list = results || [];
     if (!list.length && !skipped) return;
     let ok = 0, signed = 0;
@@ -805,10 +879,21 @@ async function printSummary(results, skipped = 0) {
     const fail = list.length - ok - signed;
     log('='.repeat(70));
     log(`📊 [执行汇总] 丸丫甄选 · 账号 ${total} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped} ｜ 已签 ${signed}`);
+    // 汇总类别里打印每个账号的总积分
+    for (const t of list) {
+        if (t.totalPoints !== null && t.totalPoints !== undefined) {
+            log(`💰 [总积分] 账号${t.index}：${t.totalPoints}`);
+        }
+    }
     for (const line of buildSummaryContent(list).split('\n')) {
         if (line) log(line);
     }
     log('='.repeat(70));
+    try {
+        await printExpireRemind(expireRows);
+    } catch (e) {
+        warn(`⚠️ [积分过期提醒] 检查异常：${e && e.message ? e.message : e}`);
+    }
     // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     await flushNotify(
         '丸丫甄选',
@@ -820,6 +905,7 @@ async function printSummary(results, skipped = 0) {
 !(async () => {
   logStartup();
     const results = [];
+    const expireRows = [];
     await $.checkEnv(ckName);
     let skipped = 0;
     for (let _i = 0; _i < $.userList.length; _i++) {
@@ -830,19 +916,21 @@ async function printSummary(results, skipped = 0) {
         if (is_done_today(doneKey)) {
             log(`[打标] 账号 ${_i + 1}/${$.userList.length} 今日任务已完成，跳过`);
             skipped++;
+            expireRows.push({ label: `账号${_i + 1}`, expirePoints: expirePointsFromDone(doneKey) });
             continue;
         }
         accBanner(_i + 1, $.userList.length, `标识：${openid}`);
         const task = new Task(openid);
         await task.run();
         results.push(task);
+        expireRows.push({ label: `账号${_i + 1}`, expirePoints: task.expirePoints });
         // 今日已签到（服务端已签）或本次签到成功，都表示今日任务已完成
         if (task.todayStatus === '签到成功' || task.todayStatus === '今日已签') {
-            mark_done_today(doneKey, task.todayStatus);
+            mark_done_today(doneKey, task.todayStatus, task.expirePoints);
         }
         accFooter(_i + 1, $.userList.length);
         await $.wait(800);
     }
-    await printSummary(results, skipped);
+    await printSummary(results, skipped, expireRows);
 })()
     .catch((e) => err('💥 ' + (e.message || e)));

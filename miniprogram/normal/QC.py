@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  雀巢
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 48 5,15 * * *
-# 积分有效期：
+# 积分有效期：自获得起约1年；
+# 检测过期积分：每年12/25~12/31检测提醒（过期数=本年获取-本年消耗）
 # =========================================================
 # 雀巢会员俱乐部自动任务脚本（青龙面板专用版）
 # 版本: v2.1.0
@@ -354,6 +355,12 @@ SKIP_TASK_GUIDS = {"38C8BBDA3DAE4CD685B270D939E5063D", "36EFECD2AD8C44278317ED56
 # 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qc_daily_done.json")
 
+# ===================== 积分过期提醒 =====================
+# 积分自获得起约一年过期；按惯例每年 12/25~12/31（年尾最后 7 天）检查并连续提醒。
+# 即将过期积分 = 本年收入合计 - 本年消耗合计（消耗取绝对值，避免负值）。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_DAYS = 7
+
 # ===================== 工具函数 =====================
 def sleep(ms: int) -> asyncio.Future:
     return asyncio.sleep(ms / 1000)
@@ -371,6 +378,16 @@ def build_direct_transport() -> AsyncHTTPTransport:
 def _today() -> str:
     """当天日期，用于跨天判定。"""
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def in_expire_window() -> bool:
+    """是否处于积分过期提醒窗口（每年 12-25 ~ 12-31，含首尾）。"""
+    if not ENABLE_EXPIRE_REMIND:
+        return False
+    today = datetime.now()
+    if today.month != 12:
+        return False
+    return today.day > 31 - EXPIRE_REMIND_DAYS
 
 
 def load_daily_done() -> Dict[str, Any]:
@@ -405,8 +422,17 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def expire_points_from_done(server: str) -> Optional[float]:
+    """从当天打标记录读回即将过期积分（供本次跳过账号的提醒）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return None
+    val = entry.get("expire_points")
+    return None if val is None else float(val)
+
+
+def mark_done_today(server: str, note: str = "", expire_points: Optional[float] = None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存即将过期积分，供跳过时提醒）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -416,6 +442,7 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expire_points": None if expire_points is None else float(expire_points),
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -695,6 +722,45 @@ class QueChaoBot:
             err(f"❌ [{self.server}] 获取积分失败 | 原因: {str(e)}")
             return None
 
+    async def get_year_points(self, year: int) -> Optional[Tuple[float, float]]:
+        """翻页拉取指定自然年的积分流水，返回 (收入合计, 消耗合计绝对值)。"""
+        income = 0.0
+        consumed = 0.0
+        for page in range(1, 21):
+            body = {
+                "page_size": 50,
+                "page_index": page,
+                "change_type": -1,
+                "month_num": 0,
+                "start_time": f"{year}-01-01",
+                "end_time": f"{year}-12-31",
+            }
+            try:
+                response = await self.client.post(
+                    "/openapi/pointsservice/api/Points/getlist",
+                    content=json.dumps(body)
+                )
+                response_data = response.json()
+            except Exception as e:
+                warn(f"⚠️ [{self.server}] 积分流水查询失败 | 原因: {str(e)}")
+                return None
+            if response_data.get("errcode") != 200:
+                warn(f"⚠️ [{self.server}] 积分流水返回异常 | 原因: {response_data.get('errmsg', '未知错误')}")
+                return None
+            rows = (response_data.get("data") or {}).get("list") or []
+            for row in rows:
+                try:
+                    amount = abs(float(row.get("points_amount") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if row.get("change_type") == 1:
+                    income += amount
+                elif row.get("change_type") == 0:
+                    consumed += amount
+            if len(rows) < 50:
+                break
+        return income, consumed
+
     async def daily_sign(self) -> Tuple[bool, str]:
         try:
             response = await self.client.post(
@@ -779,6 +845,7 @@ class QueChaoBot:
             "initial_score": 0,
             "final_score": 0,
             "gained_score": 0,
+            "expire_points": None,
             "error": ""
         }
 
@@ -835,6 +902,15 @@ class QueChaoBot:
                     result["gained_score"] = final_balance - initial_balance
                     log(f"📊 [{self.server}] 今日新增: {result['gained_score']}积分 | 当前: {final_balance}")
 
+                # 积分过期提醒：仅年尾 7 天内查询本年流水，平时不产生额外请求
+                if in_expire_window():
+                    cur_year = datetime.now().year
+                    summary = await self.get_year_points(cur_year)
+                    if summary is not None:
+                        income, consumed = summary
+                        result["expire_points"] = income - consumed
+                        log(f"⏳ [{self.server}] 即将过期积分: {result['expire_points']:.2f}")
+
                 result["success"] = True
                 log(f"✅ [{self.server}] 任务执行完成")
 
@@ -843,6 +919,26 @@ class QueChaoBot:
             err(f"❌ [{self.server}] 执行异常 | 原因: {str(e)}")
 
         return result
+
+# ===================== 积分过期提醒 =====================
+async def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
+    """年尾窗口内：即将过期积分 > 0 则汇总打印 + 独立强推（每天提醒，连续 7 天）。"""
+    if not in_expire_window():
+        return
+    hits = [(str(r.get("server") or "账号"), float(r["expire_points"]))
+            for r in rows
+            if isinstance(r.get("expire_points"), (int, float)) and r["expire_points"] > 0]
+    if not hits:
+        return
+    year = datetime.now().year
+    log("⏳ [积分过期提醒]")
+    for server, points in hits:
+        log(f"   · {server}：{points:.2f} 积分（{year}-12-31 过期）")
+    content = "### 雀巢积分即将过期提醒\n\n"
+    for server, points in hits:
+        content += f"- {server}：{points:.2f} 积分（{year}-12-31 过期）\n"
+    await send_plusplus_notification("雀巢积分即将过期提醒", content)
+
 
 # ===================== 主程序 =====================
 async def main():
@@ -857,11 +953,13 @@ async def main():
 
     results = []
     skipped = []
+    expire_rows = []
     for index, server in enumerate(SERVERS):
         # 今天已完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(server):
             log(f"⏭️ [打标] 账号 {index + 1}/{len(SERVERS)} 今日任务已完成，跳过")
             skipped.append(server)
+            expire_rows.append({"server": server, "expire_points": expire_points_from_done(server)})
             continue
 
         proxy_info = global_proxy_info
@@ -872,9 +970,10 @@ async def main():
         bot = QueChaoBot(server, proxy_info)
         result = await bot.run()
         results.append(result)
+        expire_rows.append({"server": server, "expire_points": result.get("expire_points")})
         # 只有整个流程走完（success=True）才算今日完成
         if result.get("success"):
-            mark_done_today(server, result.get("sign_msg", ""))
+            mark_done_today(server, result.get("sign_msg", ""), result.get("expire_points"))
 
         if index < len(SERVERS) - 1:
             log(f"\n⏳ 等待2秒后执行下一个账号...")
@@ -908,6 +1007,17 @@ async def main():
         sum(1 for r in results if r["success"]),
         sum(1 for r in results if not r["success"]),
         len(skipped)))
+    # 汇总类别里打印每个账号的总积分
+    for i, r in enumerate(results, 1):
+        fb = r.get("final_balance")
+        if fb is None:
+            fb = r.get("initial_balance")
+        if fb is not None:
+            log(f"💰 [总积分] 账号{i}：{fb}")
+    try:
+        await check_expire_remind(expire_rows)
+    except Exception as e:
+        warn(f"⚠️ [积分过期提醒] 检查异常: {e}")
     log(ACC_RULE)
 
 

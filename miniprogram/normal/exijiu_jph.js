@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  君品荟
-# version: 2026-10-29a
+# version: 2026-11-17b
 # cron: 30 4,14 * * *
-# 积分有效期：每年7月19日
+# 积分有效期：每年7月19日（7-13 ~ 7-19 含到期当天共7天提醒，用 queryNearExpirePoints 的30天数据）【1】
 =========================================================*/
 
 // ────────────────────────────────────────────
@@ -21,6 +21,10 @@
 
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];  // 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
+
+// 签到前状态预检（2026-11-17）：checkTodaySignIn data=true 表示今日已签（HAR 124636 与 signInQuery 交叉验证）。
+// 已签则跳过滑块验证 + fillSignIn 写请求，避免二次执行数据；查询失败/查不到则照常签到，不漏签。
+const ENABLE_SIGN_STATE_CHECK = true;
 
 // 日志标签：必须在 new Env() 之前定义——Env 构造函数里会用到它（否则 TDZ 报错）
 const SRC = 'EXIJIU_JPH';
@@ -71,10 +75,10 @@ function collectError(line) {
     return true;
 }
 
-async function flushNotify(_site, summary, _logger) {
-    // 收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 sendNotify 时只提示一行。
-    // 前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
-    if (_qnFlushed || !_qnErrors.length) return false;
+async function flushNotify(_site, summary, _logger, force = false) {
+    // 收尾调用：本次有 ERROR，或 force=true（积分即将过期）才推送，一次运行最多一条。
+    // 未配置或找不到青龙 sendNotify 时只提示一行；站点名以 _QN_SITE 为准。
+    if (_qnFlushed || (!_qnErrors.length && !force)) return false;
     _qnFlushed = true;
     if (!_qnNotify) {
         console.log(_QN_NOMOD);
@@ -85,7 +89,9 @@ async function flushNotify(_site, summary, _logger) {
         return false;
     }
     try {
-        await _qnNotify('【' + _QN_SITE + '】执行出错', (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
+        // 有错仍沿用「执行出错」；仅过期提醒触发时用「执行汇总」，不误报出错
+        const _title = _qnErrors.length ? '执行出错' : '执行汇总';
+        await _qnNotify('【' + _QN_SITE + '】' + _title, (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
         return true;
     } catch (e) {
         console.log('[QL] 错误日志推送失败：' + (e && e.message ? e.message : e));
@@ -225,7 +231,7 @@ function is_done_today(key) {
     return String(entry.date || '') === _today();
 }
 
-function mark_done_today(key, note = '') {
+function mark_done_today(key, note = '', expireInfo = null, totalPoints = null) {
     const cache = load_daily_done();
     const today = _today();
     // 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -239,6 +245,10 @@ function mark_done_today(key, note = '') {
         date: today,
         doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
         note: String(note || ''),
+        // 缓存本轮查到的即将失效积分，供当天第二轮被跳过的账号读回提醒
+        expireInfo: expireInfo && typeof expireInfo === 'object' ? expireInfo : null,
+        // 缓存账户总积分：被跳过时也能在汇总里显示，不重新登录取码
+        totalPoints: (totalPoints === null || totalPoints === undefined) ? null : Number(totalPoints),
     };
     save_daily_done(kept);
     log(`✅ [打标] 今日任务已完成，已记录（${today}）`);
@@ -261,7 +271,7 @@ function logStartup(total) {
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }
-const SCRIPT_VER = '2026-10-29a';
+const SCRIPT_VER = '2026-11-16a';
 const ACC_RULE = '➖'.repeat(35);
 function accBanner(idx, total, ident = '') {
     log(ACC_RULE);
@@ -342,6 +352,11 @@ function parseYybGoEntry(rawValue) {
         // 的数据错位显示成失败账号的成绩（账号1 取码 502 失败，却显示账号2 的
         // 153****4814 ✔️签到成功+5积分）。失败账号必须单独标记并直接输出失败行。
         const accFailed = [];
+        // 即将失效积分提醒（7-13~7-19 窗口内按账号下标记录，含跳过的账号从缓存读回）
+        const accExpireInfo = [];
+        // 各账号总积分（跳过的账号从打标缓存读回）
+        const accPoints = [];
+        const expireWindow = isExpireWindow();
         // 登录成功的账号数，即 msg 中「✅ 用户手机号获取成功」分块的序号
         let loginOk = 0;
 
@@ -355,6 +370,18 @@ function parseYybGoEntry(rawValue) {
                 log(`⏭️ [打标] 账号 ${num}/${xjhdArr.length} 今日任务已完成，跳过`);
                 skipped++;
                 accSkipped[index] = true;
+                // 当天第二轮被跳过时，从打标缓存读回上午查到的即将失效积分
+                if (expireWindow) {
+                    const cached = load_daily_done()[doneKey];
+                    const info = cached && cached.expireInfo;
+                    if (info && Number(info.amount) > 0) accExpireInfo[index] = info;
+                }
+                // 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
+                const cachedTotal = (load_daily_done()[doneKey] || {}).totalPoints;
+                if (cachedTotal !== null && cachedTotal !== undefined
+                    && Number.isFinite(Number(cachedTotal))) {
+                    accPoints[index] = Number(cachedTotal);
+                }
                 continue;
             }
             accBanner(num, xjhdArr.length, `标识：${xjhd}`);
@@ -381,6 +408,37 @@ function parseYybGoEntry(rawValue) {
             // （分块按登录成功顺序排列，账号下标与之不一定相同，故单独记录）
             accBlockIdx[index] = loginOk++;
             await get_setcookie(xj_token);
+
+            // 即将失效积分：窗口内查询，异常只 WARN，不影响签到
+            if (expireWindow) {
+                try {
+                    const nearPts = await queryNearExpirePoints(xj_token);
+                    if (nearPts != null && nearPts > 0) {
+                        accExpireInfo[index] = { amount: nearPts, expireDate: '07-19' };
+                    }
+                } catch (e) {
+                    log(`⚠️ [积分过期] 查询失败（不影响签到）：${e && e.message ? e.message : e}`);
+                }
+            }
+
+            // 签到前状态预检（只读）：今日已签则跳过滑块验证 + fillSignIn 写请求，
+            // 避免服务端收到二次执行数据。查询失败/查不到一律照常签到，不漏签。
+            if (ENABLE_SIGN_STATE_CHECK) {
+                const signedToday = await checkTodaySignIn(xj_token);
+                if (signedToday === true) {
+                    log(`⏭️ [状态预检] 账号 ${num} 今日已签到，跳过滑块验证与签到请求`);
+                    skipped++;
+                    accSkipped[index] = true;
+                    // 补日打标：本账号今日已完成，避免当天后续运行重复登录/查询
+                    mark_done_today(doneKey, '今日已签到（状态预检）', accExpireInfo[index] || null);
+                    accFooter(num, xjhdArr.length);
+                    continue;
+                } else if (signedToday === false) {
+                    log(`🔍 [状态预检] 账号 ${num} 今日未签到，继续签到流程`);
+                } else {
+                    log(`⚠️ [状态预检] 账号 ${num} 查询失败，照常签到`);
+                }
+            }
 
             // 滑块验证（服务端强校验：captcha/check 未通过则签到必被拒「未校验验证码」，故必须重试到位）
             let captchaPassed = false;
@@ -451,15 +509,19 @@ function parseYybGoEntry(rawValue) {
             }
 
             const signed = await fillSignIn(xj_cookie, xj_token, xj_code);
-            // 签到接口返回成功才算今日完成
-            if (signed) mark_done_today(doneKey, '签到成功');
             if (captchaSamplePayload) {
                 reportCaptchaSample({
                     ...captchaSamplePayload,
                     extra: { signMessage: msg.split('\n').slice(-3).join('\n') }
                 });
             }
-            await getpoints(xj_token);
+            // 查询总积分（只读）；失败返回 null，不影响签到结论
+            const pointsValue = await getpoints(xj_token);
+            // 签到接口返回成功才算今日完成（同时缓存总积分，供跳过时读回）
+            if (signed) mark_done_today(doneKey, '签到成功', accExpireInfo[index] || null, pointsValue);
+            if (pointsValue !== null && pointsValue !== undefined && Number.isFinite(Number(pointsValue))) {
+                accPoints[index] = Number(pointsValue);
+            }
             await $await(10000)
             accFooter(num, xjhdArr.length);
         }
@@ -477,6 +539,11 @@ function parseYybGoEntry(rawValue) {
                 // 今日已完成（打标跳过）：无本次执行数据
                 summaryOut.push(`${em} [账号${i + 1}]`);
                 summaryOut.push('⏭️ 今日已完成，跳过');
+                // 被跳过也要显示总积分：从打标缓存读回的数值
+                if (accPoints[i] !== undefined && accPoints[i] !== null
+                    && Number.isFinite(Number(accPoints[i]))) {
+                    summaryOut.push(`💎 总积分${accPoints[i]}`);
+                }
                 continue;
             }
             if (accFailed[i]) {
@@ -507,12 +574,39 @@ function parseYybGoEntry(rawValue) {
             if (totalMatch) summaryOut.push(`💰 总积分${totalMatch[1]}`);
         }
         for (const line of summaryOut) log(line);
+        // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+        for (let i = 0; i < xjhdArr.length; i++) {
+            const val = accPoints[i];
+            if (val !== undefined && val !== null && Number.isFinite(Number(val))) {
+                log(`💎 总积分(${Number(val)})（账号${i + 1}）`);
+            }
+        }
+        // 即将失效积分提醒：窗口内命中即在汇总区输出，每轮强推一次通知
+        const expireLines = [];
+        const bjYear = new Date(Date.now() + 8 * 3600 * 1000).getUTCFullYear();
+        for (const [i, info] of accExpireInfo.entries()) {
+            if (info && Number(info.amount) > 0) {
+                expireLines.push(`💰 积分(${Number(info.amount).toFixed(2)})即将过期： ${bjYear}-${info.expireDate || '07-19'}（账号${i + 1}）`);
+            }
+        }
+        for (const line of expireLines) log(line);
         log('➖'.repeat(35));
-        // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+        // 错误日志推送：有错误或积分即将过期才发；未配置通知渠道则只提示一行
+        let notifySummary = `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`;
+        const pointLines = [];
+        for (let i = 0; i < xjhdArr.length; i++) {
+            const val = accPoints[i];
+            if (val !== undefined && val !== null && Number.isFinite(Number(val))) {
+                pointLines.push(`账号${i + 1} 总积分 ${Number(val)}`);
+            }
+        }
+        if (pointLines.length) notifySummary += '\n' + pointLines.join(' ｜ ');
+        if (expireLines.length) notifySummary += '\n' + expireLines.join('\n');
         await flushNotify(
             '君品荟',
-            `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`,
+            notifySummary,
             log,
+            expireLines.length > 0,
         );
         // ── 退出码 ─────────────────────────────────────────────────
         // 2026-11-13 修正：此前无条件以 0 退出，账号失败时青龙仍显示「完成 ✅」。
@@ -753,20 +847,63 @@ async function getpoints(token__) {
                     const pointss = d.data.points;
                     //log(`✅ 总积分：${pointss}`);
                     addLog(`总积分：${pointss}`);
+                    const num = Number(pointss);
+                    resolve(Number.isFinite(num) ? num : null);
                 } else {
                     addLog(`获取总积分失败：${d.message || '未知'}`);
+                    resolve(null);
                 }
             } catch (e) {
                 addLog(`获取总积分`);
+                resolve(null);
             }
-            resolve();
         }).catch(() => {
             addLog(`获取总积分失败`);
-            resolve();
+            resolve(null);
         })
     })
 }
 
+
+// ========== 积分过期提醒（2026-11-16a）==========
+// 规则：积分有效期至每年 7-19；7-13 ~ 7-19（含到期当天，共 7 天）窗口内提醒。
+// 数据源：queryNearExpirePoints 接口的 nearExpirePoints（平台定义的 30 天内即将失效积分），
+//         比自己翻流水算更准，直接用平台字段。
+// 真机 HAR 核实：POST /api/customer/queryNearExpirePoints/token，body {"checkLevelExist":true}，
+//   头 X-Access-Token + AppID + Authorization Basic；响应 data={expireDay,nearExpirePoints,nearExpireDay}。
+const NEAR_EXPIRE_URL = '/api/customer/queryNearExpirePoints/token';
+const EXPIRE_WINDOW_START_DAY = 13;
+const EXPIRE_WINDOW_END_DAY = 19;
+
+function isExpireWindow() {
+    // 北京时间 7-13 ~ 7-19（含到期当天）
+    const d = new Date(Date.now() + 8 * 3600 * 1000);
+    const month = d.getUTCMonth() + 1;
+    const day = d.getUTCDate();
+    return month === 7 && day >= EXPIRE_WINDOW_START_DAY && day <= EXPIRE_WINDOW_END_DAY;
+}
+
+async function queryNearExpirePoints(token_) {
+    return new Promise((resolve) => {
+        axios.post(`https://fm.exijiu.com${NEAR_EXPIRE_URL}`, { checkLevelExist: true }, {
+            headers: {
+                'X-Access-Token': token_,
+                AppID: 'wx8d41cdc44c8aeaab',
+                Authorization: 'Basic d2VjaGF0OndlY2hhdF9zZWNyZXQ=',
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 MicroMessenger',
+                Referer: 'https://servicewechat.com/wx8d41cdc44c8aeaab/284/page-frame.html',
+            },
+        }).then((res) => {
+            const d = res && res.data;
+            if (d && String(d.code) === '10000' && d.success && d.data) {
+                resolve(Math.max(0, Number(d.data.nearExpirePoints) || 0));
+            } else {
+                resolve(null);
+            }
+        }).catch(() => resolve(null));
+    })
+}
 
 // 滑块请求
 async function slidePost(body) {
@@ -802,6 +939,32 @@ async function commonPost(url, body = {}, token_) {
             headers: { 'X-access-token': token_, 'Content-Type': 'application/json' }
         }).then(res => {
             resolve(res.data);
+        }).catch(() => { resolve(null) })
+    })
+}
+
+// 签到前只读状态预检：今日是否已签到。
+// 真机 HAR 核实（quantumult-x-2026-11-17-124636.har）：
+//   POST /api/customer/daily/checkTodaySignIn  body {} → {code:"10000", data:true/false, success:true}
+//   同刻 signInQuery 历史末条 signDate=2026-11-17（今日已签），交叉印证 data:true == 今日已签到。
+// 头按真机带全：X-Access-Token + AppID + Authorization Basic。
+// 返回 true=已签 / false=未签 / null=查询失败（后者照常签到，防漏签）。
+async function checkTodaySignIn(token_) {
+    return new Promise(resolve => {
+        axios.post('https://fm.exijiu.com/api/customer/daily/checkTodaySignIn', {}, {
+            headers: {
+                'X-access-token': token_,
+                'AppID': 'wx8d41cdc44c8aeaab',
+                'Authorization': 'Basic d2VjaGF0OndlY2hhdF9zZWNyZXQ=',
+                'Content-Type': 'application/json'
+            }
+        }).then(res => {
+            const d = res && res.data;
+            if (d && String(d.code) === '10000' && typeof d.data === 'boolean') {
+                resolve(d.data);
+            } else {
+                resolve(null);
+            }
         }).catch(() => { resolve(null) })
     })
 }

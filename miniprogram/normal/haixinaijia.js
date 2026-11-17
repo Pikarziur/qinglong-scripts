@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  海信爱家
-# version: 2026-10-29a
+# version: 2026-11-17d
 # cron: 42 4,14 * * *
-# 积分有效期：每年12月31日
+# 积分有效期：有效期至少为1年，即从获得开始至次年年底【1+1】
+# 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取积分-上年的消耗积分
 =========================================================*/
 
 /**
@@ -21,9 +22,12 @@
  *   2) 每个账号即时从 YYB-Go-Enhanced 获取 code 和手机号授权数据并登录
  *   3) 登录成功后缓存 refreshToken，并在业务请求前自动续期
  *   4) 自动流程：任务列表 -> 尝试完成未完成任务 -> 签到 -> 抽奖 -> 查询积分前后变化
+ *   5) 积分过期提醒：翻页找"注册会员奖励"流水日期为基准，每年该月日为到期日；
+ *      若今天落在 [到期日-7天, 到期日]（含）则汇总打印并强制推送提醒（不统计积分数量）。
  *
  * 日志规范：[LEVEL] [HXAJ] message   （LEVEL: INFO / WARN / ERROR）
  * 错误通知：本次运行出现 ERROR 日志才推送一次（接入青龙 sendNotify.js / notify.js）；正常跑完不打扰。
+ * 过期提醒：命中过期窗口时额外强制推送一次（与错误通知独立，不受"仅有ERROR才推"限制）。
  */
 
 const fs = require('fs');
@@ -208,7 +212,7 @@ function is_done_today(key) {
   return String(entry.date || '') === _today();
 }
 
-function mark_done_today(key, note = '') {
+function mark_done_today(key, note = '', totalPoints = null, expireAlert = '') {
   const cache = load_daily_done();
   const today = _today();
   // 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -222,6 +226,10 @@ function mark_done_today(key, note = '') {
     date: today,
     doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
     note: String(note || ''),
+    // 缓存账户总积分：被跳过时也能在汇总里显示，不重新登录取码
+    totalPoints: (totalPoints === null || totalPoints === undefined) ? null : Number(totalPoints),
+    // 缓存过期提醒：当天第二轮被跳过的账号也能连续收到提醒，不重新登录取码
+    expireAlert: String(expireAlert || ''),
   };
   save_daily_done(kept);
   logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
@@ -242,7 +250,7 @@ function logStartup(total) {
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-10a';
+const SCRIPT_VER = '2026-11-17c';
 const ACC_RULE = '='.repeat(70);
 
 // ── YYB-GO 取码参数 ────────────────────────────────────────────────
@@ -1233,6 +1241,16 @@ const CACHE_FILE = path.join(__dirname, 'hsaj_cache.json');
 const RAW_YYB_SERVER = String(process.env.YYB_SERVER || '').trim();
 const ONLY_TASK_CODES = toSet(process.env.hsaj_only_task_codes || '');
 const SKIP_TASK_CODES = toSet(process.env.hsaj_skip_task_codes || '');
+// ── 任务白名单（2026-11-17b）：只跑清单内任务，其余任务会黑号，代码保留但不再执行 ──
+// 清单内：
+//   view_strategy    查看使用攻略（新人任务；接口无此任务或已完成时 filterTasks 自然跳过）
+//   share_activity   分享爱家活动奖励积分（每日）
+//   control_machine  操控智能家电奖励积分（每日）
+// 签到（海信爱家签到奖励）是独立 doSignIn 流程，不在此白名单内，见 runOneAccount。
+// 已停用（会黑号，映射表保留仅作识别，不再进入执行）：
+//   bind_machine 绑定设备 / invite_friend 邀请好友 / join_review 参与评测
+//   create_service_card 创建服务卡 / buy_machine 购买家电
+const ALLOWED_TASK_CODES = new Set(['view_strategy', 'share_activity', 'control_machine']);
 const DISABLE_TASK_USER_PHONE = /^(1|true|yes)$/i.test(
   String(process.env.hsaj_disable_phone || '').trim(),
 );
@@ -1240,13 +1258,23 @@ const REFRESH_EXPIRE_AHEAD_SEC = Math.max(
   0,
   Number(process.env.hsaj_refresh_ahead_sec || 300) || 300,
 );
+// 2026-11-17b 起默认关闭：抽奖不在保留任务清单内，且 jfsc draw 接口自 2026-11-10 起返回 404 已失效。
 const ENABLE_LOTTERY = !/^(0|false|no)$/i.test(
-  String(process.env.hsaj_enable_lottery || '1').trim(),
+  String(process.env.hsaj_enable_lottery || '0').trim(),
 );
 const LOTTERY_TIMES = Math.max(
   0,
   Math.min(10, Number(process.env.hsaj_lottery_times || 1) || 1),
 );
+
+// ── 积分过期提醒配置 ────────────────────────────────────────────────
+// 过期规则：上年（自然年）获取的积分每年 12-31 统一过期。
+// 过期积分 = 上年获取积分（明细 score 为正） - 上年消耗积分（明细 score 为负取绝对值）。
+// 检查口径：每年 12-25 ~ 12-31（含首尾）检查并每天连续提醒；窗口外不发任何流水请求。
+const EXPIRE_CHECK_ENABLED = !/^(0|false|no)$/i.test(
+  String(process.env.hsaj_enable_expire_check || '1').trim(),
+);
+const EXPIRE_WARN_WINDOW = [[12, 25], [12, 31]]; // 提醒窗口 [起, 止]（月, 日），含首尾
 const AUTO_REPORT_TASK_CODES = new Set(['view_strategy', 'bind_machine', 'control_machine']);
 const TASK_REPORT_EXEC_DELAY_MS = {
   view_strategy: 15500,
@@ -2192,6 +2220,104 @@ function extractPointEntities(data) {
   return [];
 }
 
+// ── 积分过期提醒 ────────────────────────────────────────────────
+// 过期规则：上年（自然年）获取的积分每年 12-31 统一过期。
+// 过期积分 = 上年获取积分（明细 score 为正） - 上年消耗积分（明细 score 为负取绝对值）。
+// 流水明细带正负值与具体时间（createdTime 毫秒），按上一自然年时间范围过滤聚合。
+// 每年 12-25 ~ 12-31（含首尾）命中窗口才查询；窗口外不发任何流水请求。
+
+// 强制推送：与"仅有 ERROR 才推送"的错误通知独立；命中过期窗口时无论有无 ERROR 都推一次。
+let _expirePushed = false;
+async function pushExpireAlert(text) {
+  if (!_QN_ENABLED || _expirePushed) return false;
+  _expirePushed = true;
+  if (!_qnNotify) { console.log(_QN_NOMOD); return false; }
+  if (!_QN_ENVS.some((k) => process.env[k])) {
+    console.log('[QL] 未配置通知渠道，过期提醒未推送（可在青龙「通知设置」或环境变量中配置）');
+    return false;
+  }
+  try {
+    await _qnNotify('【' + _QN_SITE + '】积分即将过期提醒', text);
+    return true;
+  } catch (e) {
+    console.log('[QL] 过期提醒推送失败：' + (e && e.message ? e.message : e));
+    return false;
+  }
+}
+
+// 翻页拉取上一自然年的积分流水，按明细正负聚合：正=获取、负=消耗（取绝对值）。
+// getUserPointRecords 支持 startTime/endTime（毫秒），先按年范围过滤，再按 createdTime 复核，
+// 避免接口对时间范围口径差异导致串年。返回 { gained, consumed }。
+async function sumLastYearPoints(acc, { pageSize = 100, maxPages = 30 } = {}) {
+  const year = new Date().getFullYear() - 1;
+  const startTime = new Date(year, 0, 1).getTime();
+  const endTime = new Date(year + 1, 0, 1).getTime();
+  let gained = 0;
+  let consumed = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    let data;
+    try {
+      data = await getUserPointRecords(acc, { pageNo: page, pageSize, startTime, endTime });
+    } catch (err) {
+      logWarn(`过期积分流水查询失败(第${page}页): ${err.message}`);
+      break;
+    }
+    const entities = extractPointEntities(data);
+    if (!entities.length) break;
+    for (const rec of entities) {
+      const ms = recordTimeMs(rec);
+      if (!ms || ms < startTime || ms >= endTime) continue;
+      const s = recordScore(rec);
+      if (s > 0) gained += s;
+      else if (s < 0) consumed += -s;
+    }
+    if (entities.length < pageSize) break; // 最后一页
+  }
+  return { gained, consumed };
+}
+
+function fmtDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// 检查单账号是否命中过期窗口；命中则 logInfo + 返回提醒文本，否则返回空串。
+async function checkPointsExpire(acc, accountIndex) {
+  if (!EXPIRE_CHECK_ENABLED) return '';
+  try {
+    const today = new Date();
+    const month = today.getMonth() + 1;
+    const day = today.getDate();
+    const [[sm, sd], [em, ed]] = EXPIRE_WARN_WINDOW;
+    const md = month * 100 + day;
+    if (md < sm * 100 + sd || md > em * 100 + ed) {
+      const pad = (n) => String(n).padStart(2, '0');
+      logInfo(`过期提醒: 未进入检查窗口（每年 ${pad(sm)}-${pad(sd)} ~ ${pad(em)}-${pad(ed)}），跳过`);
+      return '';
+    }
+
+    const { gained, consumed } = await sumLastYearPoints(acc);
+    const amount = gained - consumed;
+    if (amount <= 0) {
+      logInfo(`过期提醒: 上年获取 ${gained} - 消耗 ${consumed} ≤ 0，无可过期积分（账号${accountIndex}）`);
+      return '';
+    }
+
+    const today0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const expireDay = new Date(today.getFullYear(), 11, 31); // 每年 12-31 到期
+    const remaining = Math.round((expireDay.getTime() - today0.getTime()) / 86400000);
+    const text = `⏳ 积分(${amount.toFixed(2)})即将过期： ${fmtDate(expireDay)} 到期（还剩 ${remaining} 天），`
+      + `请尽快使用（账号${accountIndex}）（上年获取${gained.toFixed(2)}-消耗${consumed.toFixed(2)}）`;
+    logInfo(`[过期] ${text}`);
+    return text;
+  } catch (err) {
+    logWarn(`过期提醒检查异常: ${err.message}`);
+    return '';
+  }
+}
+
 async function getTodayPointEntities(acc, pageSize = 50) {
   const range = getDayRangeMs();
   const data = await getUserPointRecords(acc, { pageNo: 1, pageSize, ...range });
@@ -2677,6 +2803,8 @@ function filterTasks(tasks) {
   const pending = tasks.filter((t) => Number(t?.taskStatus ?? 0) !== 1 && t?.taskCode);
   return pending.filter((t) => {
     const code = String(t.taskCode);
+    // 白名单：只跑清单内任务；其余（会黑号）不进入执行
+    if (!ALLOWED_TASK_CODES.has(code)) return false;
     if (ONLY_TASK_CODES.size > 0 && !ONLY_TASK_CODES.has(code)) return false;
     if (SKIP_TASK_CODES.has(code)) return false;
     return true;
@@ -2881,9 +3009,11 @@ async function runOneAccount(acc, idx, total) {
   try {
     const groupsAfter = await getTaskCenterTaskList(account);
     const allAfter = flattenTasksWithMeta(groupsAfter);
-    const remaining = allAfter.filter((t) => Number(t?.taskStatus ?? 0) !== 1 && t?.taskCode);
+    // 复核同样只看白名单内任务；被停用的任务（会黑号）不计入"未完成"
+    const remaining = allAfter.filter((t) =>
+      Number(t?.taskStatus ?? 0) !== 1 && t?.taskCode && ALLOWED_TASK_CODES.has(String(t.taskCode)));
     if (!remaining.length) {
-      logInfo('复核: 任务中心接口显示全部已完成');
+      logInfo('复核: 清单内任务均已完成（停用的任务不计入）');
     } else {
       logInfo(`复核: 仍有 ${remaining.length} 个未完成任务`);
       logInfo(`复核判定汇总: ${summarizeHintCounts(remaining)}`);
@@ -2946,6 +3076,7 @@ async function runOneAccount(acc, idx, total) {
   logInfo(`积分(执行后): ${pointsAfter}  (变化: ${delta >= 0 ? '+' : ''}${delta})`);
   logInfo(`积分字段(执行后): ${summarizePointFields(pointsAfterDetail?.raw)}`);
   await printTodayPointRecords(account);
+  const expireAlert = await checkPointsExpire(account, idx);
   logInfo(`行为上报次数: ${behaviorCount}`);
   logInfo(`任务上报次数: ${doneCount}`);
 
@@ -2955,6 +3086,7 @@ async function runOneAccount(acc, idx, total) {
     pointsAfter,
     delta,
     doneCount,
+    expireAlert,
   };
 }
 
@@ -2988,6 +3120,9 @@ async function main() {
   let ok = 0;
   let fail = 0;
   let skipped = 0;
+  const expireAlerts = [];
+  // 各账号总积分：[[账号序号, 总积分], ...]（跳过的账号从打标缓存读回）
+  const pointsRows = [];
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -2998,6 +3133,14 @@ async function main() {
     if (is_done_today(doneKey)) {
       logInfo(`⏭️ [打标] 账号 ${i + 1}/${entries.length} 今日任务已完成，跳过`);
       skipped++;
+      // 被跳过也要在汇总里显示总积分与过期提醒：从打标缓存读回，不重新登录取码
+      const cachedEntry = load_daily_done()[doneKey] || {};
+      const cachedTotal = cachedEntry.totalPoints;
+      if (cachedTotal !== null && cachedTotal !== undefined
+          && Number.isFinite(Number(cachedTotal))) {
+        pointsRows.push([i + 1, Number(cachedTotal)]);
+      }
+      if (cachedEntry.expireAlert) expireAlerts.push(String(cachedEntry.expireAlert));
       continue;
     }
 
@@ -3006,8 +3149,14 @@ async function main() {
       merged = mergeWithCache(fresh, cache);
       const result = await runOneAccount(merged, i + 1, entries.length);
       ok += 1;
-      // 账号流程完整走完（未抛异常）才算今日完成
-      mark_done_today(doneKey, '任务完成');
+      if (result?.expireAlert) expireAlerts.push(result.expireAlert);
+      // 账号流程完整走完（未抛异常）才算今日完成（同时缓存总积分与过期提醒，供跳过时读回）
+      const totalPoints = (result && result.pointsAfter !== undefined && result.pointsAfter !== null)
+        ? Number(result.pointsAfter) : null;
+      mark_done_today(doneKey, '任务完成', totalPoints, result?.expireAlert || '');
+      if (totalPoints !== null && Number.isFinite(totalPoints)) {
+        pointsRows.push([i + 1, totalPoints]);
+      }
 
       const toSave = Object.assign({}, merged, result.account, {
         updateTime: new Date().toISOString(),
@@ -3030,9 +3179,23 @@ async function main() {
   const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] ${_QN_SITE} · ${tail}`);
+  // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+  for (const [idx, total] of pointsRows) logInfo(`💎 总积分(${total})（账号${idx}）`);
+  if (expireAlerts.length) {
+    logInfo(`⏳ [即将过期] 12-31 到期的积分（上年获取-上年消耗）：`);
+    for (const line of expireAlerts) logInfo(`   ${line}`);
+  }
   logInfo(ACC_RULE);
+  // 过期提醒：命中窗口时强制推送一次（与错误通知独立）
+  if (expireAlerts.length) {
+    await pushExpireAlert(expireAlerts.join('\n'));
+  }
   // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-  await flushNotify(_QN_SITE, tail, logInfo);
+  let notifyTail = tail;
+  if (pointsRows.length) {
+    notifyTail += '\n' + pointsRows.map(([idx, total]) => `账号${idx} 总积分 ${total}`).join(' ｜ ');
+  }
+  await flushNotify(_QN_SITE, notifyTail, logInfo);
   if (fail > 0) process.exitCode = 1;
 }
 

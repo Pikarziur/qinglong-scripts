@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  嘉立创
-# version: 2026-10-29a
+# version: 2026-11-17b
 # cron: 12 5,15 * * *
-# 积分有效期：次年12月31日
+# 积分有效期：次年12月31日【1+1】
+# 过期提醒：每年 12/25~12/31 检查即将过期豆豆，汇总打印 + 强推通知（详见下方 EXPIRE_* 配置）
 # =========================================================
 
 # 任务流程：
@@ -37,12 +38,14 @@
 YYB_ONLY_REFS = []  # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
 import os
-from datetime import datetime
+import calendar
+from datetime import date, datetime, timedelta, timezone
 import sys
 import json
 import time
 import traceback
 import hashlib
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -196,7 +199,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17b"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -248,8 +251,9 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", deadline_expire=None, expire_detail=None,
+                    total=None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存当天过期数据与豆豆总数，供跳过时读回）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -259,9 +263,36 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "deadline_expire": str(deadline_expire) if deadline_expire is not None else None,
+        "expire_detail": str(expire_detail) if expire_detail is not None else None,
+        "totalPoints": str(total) if total is not None else None,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def expire_from_done(server: str) -> tuple:
+    """从当天打标记录读回 (deadline_expire, expire_detail)，供本次被跳过的账号提醒用。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None, None
+    de = amount(entry.get("deadline_expire")) if entry.get("deadline_expire") is not None else None
+    dt = amount(entry.get("expire_detail")) if entry.get("expire_detail") is not None else None
+    return de, dt
+
+
+def total_points_from_done(server: str):
+    """从当天打标记录读回豆豆总数（总积分），供被跳过的账号在汇总里显示。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None
+    raw = entry.get("totalPoints")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -301,6 +332,23 @@ if DEBUG:
 
 BASE_URL = "https://m.jlc.com"
 CAS_BASE_URL = "https://passport.jlc.com"
+
+# ── 豆豆过期提醒（2026-11-17 新增）────────────────────────────────
+# 规则：豆豆"获得起次年 12/31"过期（脚本头部已注明）。年尾前 7 天（12/25~12/31）
+# 检查即将过期的豆豆，汇总打印 + 独立强推通知。
+# 数值口径（用户定「两者结合」）：
+#   主口径 = 服务端 getCustomerIntegral.deadlineExpireNum（官方算好的即将到期数）；
+#   对照值 = 明细差值 = 前一年获取的积分 −（前一年已兑换 + 今年已兑换）；
+#   两者不一致时只把对照值打印出来供参考，以主口径为准、不阻断。
+# 明细接口（均 POST {"pageNum":n,"pageSize":10}，需翻页累加；HAR 142030 验证）：
+#   getIntegralVoucherChangeRecord  → data.data[] 每条 integralChangeTypeName/integralChangeNum/createTime
+#   selectIntegralVoucherChangeRecord → 已兑换明细（当前账号 totalRows=0，无样本，字段容错解析）
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_DAYS = 7            # 年尾前 N 天开始检查（12/25~12/31，含年末当天）
+INTEGRAL_RECORD_PATH = "/api/activity/front/getIntegralVoucherChangeRecord"
+EXCHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRecord"
+RECORD_PAGE_SIZE = 50             # 明细翻页大小（HAR 用 10，这里放大减少请求；服务端如截断按实际 total 翻）
+RECORD_MAX_PAGES = 30             # 翻页上限保护，避免异常时无限翻
 CAS_APP_ID = os.getenv("JLC_CAS_APP_ID", "JLC_MOBILE_APP").strip()
 PLATFORM_TYPE = os.getenv("JLC_PLATFORM_TYPE", "MP-WEIXIN").strip()
 SOURCE = os.getenv("JLC_SOURCE", "2").strip()
@@ -770,6 +818,25 @@ def api_get(session: requests.Session, path: str, params: Optional[Dict[str, Any
     return data
 
 
+def api_post(session: requests.Session, path: str, body: Optional[Dict[str, Any]] = None,
+             token: str = "", secret: str = "") -> Dict[str, Any]:
+    """POST JSON 接口（明细查询用），与 api_get 共用鉴权头与密钥过期重试。"""
+    url = BASE_URL + path
+    for attempt in range(2):
+        headers = build_headers(token, secret) if token else {}
+        r = session.post(url, json=body or {}, headers=headers, timeout=20)
+        r.raise_for_status()
+        try:
+            data = r.json()
+        except Exception:
+            raise RuntimeError(f"接口返回非 JSON：{url}\n{r.text[:300]}")
+        if attempt == 0 and data.get("code") in SECRET_EXPIRED_CODES:
+            refresh_secret_key(token=token, previous_key=headers.get("secretkey", ""))
+            continue
+        return data
+    return data
+
+
 def get_sign_status(s, token, secret) -> Dict[str, Any]:
     return api_get(s, "/api/activity/sign/getCurrentUserSignInConfig",
                    params={"platformType": PLATFORM_TYPE}, token=token, secret=secret)
@@ -787,6 +854,139 @@ def receive_voucher(s, token, secret) -> Dict[str, Any]:
 
 def get_doudou_total(s, token, secret) -> Dict[str, Any]:
     return api_get(s, "/api/activity/front/getCustomerIntegral", token=token, secret=secret)
+
+
+# ===================== 豆豆过期提醒（年尾前 7 天） =====================
+def amount(value: Any) -> Decimal:
+    """把接口数值安全转成 Decimal，失败按 0。"""
+    try:
+        return Decimal(str(value or "0"))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+
+
+def in_expire_window(today: date = None) -> bool:
+    """是否落在过期提醒窗口：每年 12 月最后 N 天（12/25~12/31，含 12/31 当天）。"""
+    today = today or date.today()
+    if today.month != 12:
+        return False
+    return today.day > calendar.monthrange(today.year, 12)[1] - EXPIRE_REMIND_DAYS
+
+
+def _record_year(rec: Dict[str, Any]) -> Optional[int]:
+    """从明细 createTime 取年份。HAR 为 UTC ISO（...Z / +08:00），按北京时间归年更贴合签到口径。"""
+    ct = str(rec.get("createTime") or "")
+    if not ct:
+        return None
+    try:
+        dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone(timedelta(hours=8))).year
+    except Exception:
+        return None
+
+
+def _record_amount(rec: Dict[str, Any]) -> Decimal:
+    """明细积分值，宽松取字段名（不同接口字段可能为 integralChangeNum / integralNum 等）。"""
+    for k in ("integralChangeNum", "integralNum", "integralVoucher", "num", "amount", "value"):
+        if k in rec and rec.get(k) is not None:
+            return amount(rec.get(k))
+    return Decimal("0")
+
+
+def _fetch_all_records(s, token, secret, path) -> Optional[List[Dict[str, Any]]]:
+    """翻页拉取全部明细；失败返回 None（与空列表区分：None=查询异常，[]=确实无记录）。"""
+    rows: List[Dict[str, Any]] = []
+    for page in range(1, RECORD_MAX_PAGES + 1):
+        resp = api_post(s, path, {"pageNum": page, "pageSize": RECORD_PAGE_SIZE},
+                        token=token, secret=secret)
+        if not resp.get("success", False):
+            if not rows:
+                return None
+            break
+        data = resp.get("data") or {}
+        page_rows = data.get("data") or []
+        if isinstance(page_rows, list):
+            rows.extend(r for r in page_rows if isinstance(r, dict))
+        total_pages = data.get("totalPages")
+        try:
+            total_pages = int(total_pages)
+        except (TypeError, ValueError):
+            total_pages = page
+        if page >= total_pages or not page_rows:
+            break
+    return rows
+
+
+def calc_expire_by_detail(s, token, secret, check_year: int) -> Optional[Decimal]:
+    """对照口径：前一年获取 −（前一年已兑换 + 今年已兑换）。
+
+    check_year=检查当年（如 2026）；前一年=2025。豆豆"次年 12/31 过期"，
+    故 2025 年获取、且未在 2025/2026 兑换掉的部分，将于 2026-12-31 过期。
+    任一明细查询异常返回 None（只影响对照值，不影响主口径 deadlineExpireNum）。
+    """
+    prev_year = check_year - 1
+    gain_rows = _fetch_all_records(s, token, secret, INTEGRAL_RECORD_PATH)
+    exchange_rows = _fetch_all_records(s, token, secret, EXCHANGE_RECORD_PATH)
+    if gain_rows is None or exchange_rows is None:
+        return None
+    prev_gain = sum((_record_amount(r) for r in gain_rows
+                     if _record_year(r) == prev_year and _record_amount(r) > 0), Decimal("0"))
+    exchanged = sum((abs(_record_amount(r)) for r in exchange_rows
+                     if _record_year(r) in (prev_year, check_year)), Decimal("0"))
+    result = prev_gain - exchanged
+    log(f"    🧮 [过期对照] {prev_year}年获取 {prev_gain:.2f} − "
+        f"{prev_year}/{check_year}年已兑换 {exchanged:.2f} = {result:.2f} 豆豆")
+    return result if result > 0 else Decimal("0")
+
+
+def notify_expire_alert(lines: list) -> bool:
+    """过期提醒强推：独立于「只推 ERROR」的错误通知，命中即推。"""
+    if not lines or _qn_send is None:
+        return False
+    if not any(os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，过期提醒未推送（可在青龙「通知设置」或环境变量中配置）",
+              flush=True)
+        return False
+    title = "【%s】豆豆即将过期提醒" % _QN_SITE
+    body = "\n".join(lines)
+    try:
+        _qn_send(title, body)
+        return True
+    except Exception as _e:
+        print("[QL] 过期提醒推送失败：%s" % _e, flush=True)
+        return False
+
+
+def check_expire_remind(results: List[Dict[str, Any]]) -> None:
+    """年尾窗口内：以 deadlineExpireNum 为主口径，明细差值为对照，命中则汇总打印 + 强推。"""
+    if not ENABLE_EXPIRE_REMIND or not in_expire_window():
+        return
+    hits = []
+    for r in results:
+        primary = r.get("deadline_expire")
+        detail = r.get("expire_detail")
+        val = primary if isinstance(primary, Decimal) and primary > 0 else None
+        if val is None and isinstance(detail, Decimal) and detail > 0:
+            val = detail  # 主口径缺失/为 0 时，用对照值兜底提醒
+        if val is None or val <= 0:
+            continue
+        note = ""
+        if isinstance(primary, Decimal) and isinstance(detail, Decimal) and primary != detail:
+            note = f"（明细对照 {detail:.2f}，口径不一致仅供参考）"
+        hits.append((r.get("label") or "账号", val, note))
+    if not hits:
+        return
+    log(_ACC_RULE)
+    log("⏳ [豆豆过期提醒] 检测到即将过期的豆豆（获得起次年 12/31 到期，请尽快使用）：")
+    for label, val, note in hits:
+        log(f"   · {label}：{val:.2f} 豆豆即将过期{note}")
+    log(_ACC_RULE)
+    push_lines = ["检测到即将过期的豆豆（获得起次年 12/31 到期，请尽快使用）："]
+    push_lines += [f"{label}：{val:.2f} 豆豆即将过期{note}" for label, val, note in hits]
+    if notify_expire_alert(push_lines):
+        log("📣 [豆豆过期提醒] 已推送通知")
 
 
 def _extract_streak_day(st_data: Dict[str, Any]) -> Optional[int]:
@@ -808,6 +1008,8 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
         "total": None,
         "expireTime": None,
         "streak_day": None,
+        "deadline_expire": None,
+        "expire_detail": None,
     }
 
     ok_all = True
@@ -881,8 +1083,20 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
             expire_time = data.get("expireTime")
             result["total"] = total
             result["expireTime"] = expire_time
+            # 主口径：服务端算好的即将到期积分（deadlineExpireNum）
+            if data.get("deadlineExpireNum") is not None:
+                result["deadline_expire"] = amount(data.get("deadlineExpireNum"))
             extra = f"，有效期至：{expire_time}" if expire_time else ""
             log(f"💰 [{remark}] 当前豆豆总数：{total}{extra}")
+            if result["deadline_expire"] is not None:
+                log(f"    ⏳ 即将过期豆豆（服务端）：{result['deadline_expire']:.2f}")
+
+        # 年尾窗口内才查明细对照值，平时不发这些请求
+        if ENABLE_EXPIRE_REMIND and in_expire_window():
+            try:
+                result["expire_detail"] = calc_expire_by_detail(s, token, secret, date.today().year)
+            except Exception as _e:
+                warn(f"⚠️ [{remark}] 过期明细对照查询失败：{_e}")
 
     return ok_all, result
 
@@ -902,6 +1116,11 @@ def main() -> int:
         if is_done_today(key):
             log(f"⏭️ [打标] 账号 {idx}/{len(accounts)} 今日任务已完成，跳过")
             skip_count += 1
+            # 从打标缓存读回当天过期数据，保证下午 cron 跳过时汇总仍能提醒
+            de, dt = expire_from_done(key)
+            results.append({"label": f"账号{idx}({acc.get('remark') or idx})",
+                            "deadline_expire": de, "expire_detail": dt,
+                            "total": total_points_from_done(key)})
             continue
 
         remark = acc["remark"]
@@ -924,13 +1143,15 @@ def main() -> int:
 
         ok, res = run_one_account(idx, remark, token, secret)
         res["ok"] = ok
+        res["label"] = f"账号{idx}({remark or idx})"
         results.append(res)
 
         if not ok:
             fail_count += 1
         else:
-            # 账号流程完整走完（ok=True）才算今日完成
-            mark_done_today(key, "签到完成")
+            # 账号流程完整走完（ok=True）才算今日完成，同时缓存当天过期数据与豆豆总数
+            mark_done_today(key, "签到完成", res.get("deadline_expire"),
+                            res.get("expire_detail"), res.get("total"))
 
         acc_footer(idx, len(accounts))
         # 账号间延迟
@@ -940,11 +1161,27 @@ def main() -> int:
     success_count = len(accounts) - fail_count - skip_count
     log(_ACC_RULE)
     log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success_count} ｜ 失败 {fail_count} ｜ 跳过 {skip_count}")
+    # 豆豆总数（总积分）汇总：无论是否跳过、任务是否已完成，都在这里显示
+    for idx, item in enumerate(results, 1):
+        total = item.get("total")
+        if total is None:
+            continue
+        log(f"💎 总积分({total})（{item.get('label') or '账号%d' % idx}）")
     log(_ACC_RULE)
+    # 豆豆过期提醒：年尾前 7 天，主口径 deadlineExpireNum + 明细对照，汇总打印 + 强推
+    try:
+        check_expire_remind(results)
+    except Exception as _e:
+        warn(f"⚠️ [豆豆过期提醒] 检查异常：{_e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    _notify_tail = f"账号 {len(accounts)} ｜ 成功 {success_count} ｜ 失败 {fail_count} ｜ 跳过 {skip_count}"
+    _point_lines = [f"{item.get('label') or '账号'} 总积分 {item.get('total')}"
+                    for item in results if item.get("total") is not None]
+    if _point_lines:
+        _notify_tail += "\n" + " ｜ ".join(_point_lines)
     flush_notify(
         "JLC 嘉立创",
-        f"账号 {len(accounts)} ｜ 成功 {success_count} ｜ 失败 {fail_count} ｜ 跳过 {skip_count}",
+        _notify_tail,
         logger=log,
     )
     return 1 if fail_count else 0

@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  交个朋友会员商城
-# version: 2026-10-29a
+# version: 2026-11-17b
 # cron: 18 5,15 * * *
-# 积分有效期：获得起1年后1日
+# 积分有效期：按年尾统一过期（每年 12 月 31 日），年尾前 7 天开始提醒，总积分计入即将过期【1】
+# 过期提醒：每年 12/25~12/31 检查即将过期积分，汇总打印 + 强推通知（详见下方 EXPIRE_* 配置）
 # =========================================================
 
 # 任务流程：
@@ -14,6 +15,7 @@
 #   4. 签到：先 GET /dtapi/pointsSign/user/pointsInfo/query 看 signTodayResult 是否今日已签；
 #      未签才 GET /dtapi/pointsSign/user/sign?date=YYYY/MM/DD 签到，再查 pointsInfo 取总积分与连续天数
 #   5. 输出汇总（已签/签到成功/失败一目了然）
+#   6. 过期提醒：每年 12/25~12/31（年尾前 7 天）把「总积分」作为即将过期积分，汇总打印 + 强推通知
 # 可控参数：
 #   IYOUKE_TOKEN    可选。手动 bearer token，空格分隔多账号，优先级最高（免 YYB）
 #   YYB_SERVER      必填（无 IYOUKE_TOKEN 时）。格式「地址@ref」，空格/换行分隔
@@ -27,7 +29,8 @@
 
 
 import os
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 import sys
 import time
 import json
@@ -184,7 +187,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17b"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -236,8 +239,8 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", total=None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存当天总积分，供跳过时过期提醒用）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -247,9 +250,22 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "total": total if total is not None else None,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def total_from_done(server: str) -> Optional[int]:
+    """从当天打标记录读回总积分，供本次被跳过的账号过期提醒用。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None
+    val = entry.get("total")
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -287,6 +303,11 @@ IYOUKE_TOKEN = os.getenv("IYOUKE_TOKEN", "").strip()
 YYB_SERVER_RAW = os.getenv("YYB_SERVER", "").strip()
 # ③ YYB 只跑这些 ref 的白名单过滤器：留空 = 跑 YYB_SERVER 全部账号；填 ["1","2"] = 只跑这些
 YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
+# ===================== 积分过期提醒 =====================
+# 交个朋友积分按年尾统一过期（每年 12/31），年尾前 N 天开始提醒。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_DAYS = 7            # 年尾前 N 天开始检查（12/25~12/31，含年末当天）
+# 提醒数值直接取「总积分」（pointsNums），不做明细拆分
 # 接口参数（可选环境变量覆盖；缺省用抓包所得默认值）
 APP_ID = os.getenv("IYOUKE_APP_ID", "wx3b294e7a0ba29bc3").strip()
 APP_VERSION = os.getenv("IYOUKE_VERSION", "3.5.4").strip()
@@ -576,6 +597,61 @@ def sign_one(token: str) -> Dict[str, Any]:
     return result
 
 
+def in_expire_window(today: date = None) -> bool:
+    """是否落在过期提醒窗口：每年 12 月最后 N 天（12/25~12/31，含 12/31 当天）。"""
+    today = today or date.today()
+    if today.month != 12:
+        return False
+    return today.day > calendar.monthrange(today.year, 12)[1] - EXPIRE_REMIND_DAYS
+
+
+def notify_expire_alert(lines: list) -> bool:
+    """过期提醒强推：独立于「只推 ERROR」的错误通知，命中即推。"""
+    if not lines or _qn_send is None:
+        return False
+    if not any(os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，过期提醒未推送（可在青龙「通知设置」或环境变量中配置）",
+              flush=True)
+        return False
+    title = "【%s】积分即将过期提醒" % _QN_SITE
+    body = "\n".join(lines)
+    try:
+        _qn_send(title, body)
+        return True
+    except Exception as _e:
+        print("[QL] 过期提醒推送失败：%s" % _e, flush=True)
+        return False
+
+
+def check_expire_remind(results: List[Dict[str, Any]]) -> None:
+    """年尾窗口内：把总积分当作即将过期积分，命中则汇总打印 + 强推。"""
+    if not ENABLE_EXPIRE_REMIND or not in_expire_window():
+        return
+    hits = []
+    for r in results:
+        total = r.get("total")
+        if total is None:
+            continue
+        try:
+            val = int(total)
+        except (TypeError, ValueError):
+            continue
+        if val <= 0:
+            continue
+        hits.append((r.get("remark") or "账号", val))
+    if not hits:
+        return
+    log(_ACC_RULE)
+    log("⏳ [积分过期提醒] 检测到即将过期的积分（每年 12/31 统一过期，请尽快使用）：")
+    for remark, val in hits:
+        log(f"   · {remark}：{val} 积分即将过期")
+    log(_ACC_RULE)
+    push_lines = ["检测到即将过期的积分（每年 12/31 统一过期，请尽快使用）："]
+    push_lines += [f"{remark}：{val} 积分即将过期" for remark, val in hits]
+    if notify_expire_alert(push_lines):
+        log("📣 [积分过期提醒] 通知已推送")
+
+
 def parse_accounts() -> List[Dict[str, Any]]:
     """返回账号列表。优先级：IYOUKE_TOKEN（手动）> YYB_SERVER（YYBGO 取码）。"""
     accounts: List[Dict[str, Any]] = []
@@ -595,6 +671,8 @@ def parse_accounts() -> List[Dict[str, Any]]:
 def main() -> int:
     log_startup()
     results: List[Dict] = []
+    # 过期提醒数据单独收集：跳过的账号也从打标缓存读回总积分，不影响原有成功/已签统计
+    expire_rows: List[Dict[str, Any]] = []
     accounts = parse_accounts()
     log(f"🚀 {SCRIPT_NAME} 开始 · 共 {len(accounts)} 个账号")
     any_fail = False
@@ -605,6 +683,8 @@ def main() -> int:
         if is_done_today(key):
             log(f"⏭️ [打标] 账号 {idx}/{len(accounts)} 今日任务已完成，跳过")
             skip_count += 1
+            # 从打标缓存读回当天总积分，保证下午 cron 跳过时汇总仍能过期提醒
+            expire_rows.append({"remark": acc["remark"], "total": total_from_done(key), "idx": idx})
             continue
         acc_banner(idx, len(accounts), "备注：" + str(acc["remark"]))
         # 取 token
@@ -636,11 +716,13 @@ def main() -> int:
         results.append({"ok": res["ok"], "signed": res["signed"],
                         "reward": res["reward"], "total": res["total"],
                         "msg": res["msg"], "idx": idx, "remark": acc["remark"]})
+        # 过期提醒数据：总积分直接作为即将过期积分
+        expire_rows.append({"remark": acc["remark"], "total": res["total"], "idx": idx})
         if not (res["ok"] or res["signed"]):
             any_fail = True
         else:
-            # 今日已签或本次签到成功，都算今日完成
-            mark_done_today(key, res.get("msg", ""))
+            # 今日已签或本次签到成功，都算今日完成（同时缓存总积分供跳过时提醒用）
+            mark_done_today(key, res.get("msg", ""), res.get("total"))
         acc_footer(idx, len(accounts))
 
     success = sum(1 for r in results if r["ok"])
@@ -662,11 +744,27 @@ def main() -> int:
             err(f"❌ {_acct} 签到失败：{r.get('msg') or ''}")
     log(_ACC_RULE)
     log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {fail_count} ｜ 跳过 {skip_count} ｜ 已签 {signed}")
+    # 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+    for row in expire_rows:
+        total = row.get("total")
+        if total is None:
+            continue
+        log(f"💎 总积分({total})（[{row.get('remark') or row.get('idx')}]）")
     log(_ACC_RULE)
+    # 积分过期提醒：年尾窗口内把总积分当作即将过期积分，汇总打印 + 强推（失败不影响主流程）
+    try:
+        check_expire_remind(expire_rows)
+    except Exception as _e:
+        warn(f"⚠️ 过期提醒处理异常：{_e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    _notify_tail = f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {fail_count} ｜ 跳过 {skip_count} ｜ 已签 {signed}"
+    _point_lines = [f"[{row.get('remark') or row.get('idx')}] 总积分 {row.get('total')}"
+                    for row in expire_rows if row.get("total") is not None]
+    if _point_lines:
+        _notify_tail += "\n" + " ｜ ".join(_point_lines)
     flush_notify(
         "交个朋友",
-        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {fail_count} ｜ 跳过 {skip_count} ｜ 已签 {signed}",
+        _notify_tail,
         logger=log,
     )
     return 1 if any_fail else 0

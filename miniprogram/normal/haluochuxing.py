@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  哈啰出行单车
-# version: 2026-10-29a
+# name:  哈啰出行
+# version: 2026-11-17c
 # cron: 48 4,14 * * *
 # 积分有效期：获得起3个月内
+# 检测过期积分：每3个月月底前七天 检查并连续提醒；过期积分=现有积分
 # =========================================================
 
 """
-name: 哈啰出行签到
-cron: 48 4,14 * * *
-
-哈啰出行微信小程序每日签到与奖励金查询，基于 YYB-Go-Enhanced 自动取码登录。
+哈啰 | 单车助力车打车顺风车租车 微信小程序每日签到与奖励金查询，基于 YYB-Go-Enhanced 自动取码登录。
 
 环境变量：
   YYB_SERVER     必填，格式：YYB-Go-Enhanced 地址@微信账号标识；多账号每行一条
@@ -21,7 +19,11 @@ cron: 48 4,14 * * *
 
 账号白名单：脚本顶部硬编码常量 YYB_ONLY_REFS（1 起序号，按 YYB_SERVER 行序）；留空 [] 跑全部账号
 
-功能仅包含：静默登录、每日签到、签到前后奖励金对比、钱包余额查询，以及执行汇总与错误通知。
+功能包含：静默登录、每日签到、签到前后奖励金对比、钱包余额查询，
+执行汇总与错误通知，以及每月月底前 7 天的积分过期提醒（expiring>0 时连续提醒并强推）。
+
+待定任务：视频浏览任务（尚未实现）。此类任务通常需要真实观看行为，脚本无法可靠模拟，
+不确保是否会被服务端判定异常或造成黑号；在确认安全性之前暂不接入。
 
 日志规范：[LEVEL] [HLCX] message   （LEVEL: INFO / WARN / ERROR）
 错误通知：本次运行出现 ERROR 日志才推送一次（接入青龙 notify.py）；正常跑完不打扰。
@@ -30,13 +32,14 @@ cron: 48 4,14 * * *
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -187,12 +190,19 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17d"
 _ACC_RULE = "=" * 70
+
+# 积分过期提醒：按脚本头部注释规则（每3个月月底前七天 检查并连续提醒；
+# 过期积分=现有积分）。命中窗口时，任一账号现有积分>0 则在汇总日志连续打印并强推。
+# 窗口计算：last_day - 7 < today.day <= last_day（月底前 7 天，含最后一天当天）。
+ENABLE_EXPIRE_REMIND = True      # 总开关，False 关闭过期提醒
+EXPIRE_REMIND_DAYS = 7           # 提前天数（窗口 = 月底前 7 天）
+EXPIRE_REMIND_MONTHS = (3, 6, 9, 12)  # 启用提醒的月份（每 3 个月检测一次）
 
 # 账号白名单：按 YYB_SERVER 的行序（1 起）筛选本次要跑的账号。
 # 留空 [] 表示运行全部账号；例：[1, 3] 只跑第 1、3 个。
-YYB_ONLY_REFS = [2]
+YYB_ONLY_REFS = []
 
 APP_NAME = "哈啰出行签到"
 HERE = Path(__file__).resolve().parent
@@ -382,8 +392,9 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", expiring: Optional[int] = None,
+                    total_points: Any = None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存当天的 expiring 与总积分，供跳过时读回）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -393,9 +404,32 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expiring": expiring,
+        "totalPoints": total_points,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def expiring_from_done(server: str) -> Optional[int]:
+    """从当天打标记录里读回 expiring（供本次被跳过、未走 run_account 的账号使用）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None
+    if "expiring" not in entry:
+        return None
+    return as_int(entry.get("expiring"))
+
+
+def total_points_from_done(server: str) -> Optional[int]:
+    """从当天打标记录里读回总积分（供被跳过的账号在汇总里显示）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None
+    val = entry.get("totalPoints")
+    if val is None:
+        return None
+    return as_int(val)
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -640,6 +674,14 @@ def points_of(node: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def expiring_of(node: Dict[str, Any]) -> Optional[int]:
+    """从 pointInfo 返回里取「即将过期」奖励金数（expiring）。取不到返回 None。"""
+    data = node.get("data") if isinstance(node, dict) else None
+    if not isinstance(data, dict) or "expiring" not in data:
+        return None
+    return as_int(data.get("expiring"))
+
+
 def amount_of(node: Dict[str, Any]) -> str:
     data = node.get("data") if isinstance(node, dict) else None
     if not isinstance(data, dict):
@@ -659,7 +701,9 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         "label": account.label, "server": account.server, "success": False, "skipped": False,
         "user": "-", "sign": "-", "bonus": "-", "title": "", "extra": "",
         "points_before": None, "points_after": None, "points_delta": None,
-        "amount_before": "", "amount_after": "", "wallet": "", "continuous": "-",
+        "totalPoints": None,
+        "amount_before": "", "amount_after": "", "expiring": None,
+        "wallet": "", "continuous": "-",
         "sign_source": "", "error": "",
     }
     log(_ACC_RULE)
@@ -690,8 +734,11 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         before = client.point_info()
         result["points_before"] = points_of(before)
         result["amount_before"] = amount_of(before)
+        result["expiring"] = expiring_of(before)
         log(f"    💰 签到前奖励金：{result['points_before']}　"
               f"≈{result['amount_before'] or '-'} 元")
+        if result["expiring"] is not None:
+            log(f"    ⏳ 即将过期奖励金：{result['expiring']}")
     except Exception as exc:
         warn(f"    ⚠️ 查询奖励金失败：{preview(exc, 160)}")
 
@@ -717,6 +764,13 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
     elif not ENABLE_SIGN:
         result["sign"] = "已关闭签到（HL_ENABLE_SIGN=0）"
         result["success"] = True
+    elif sign_state.get("didSignToday"):
+        # 2026-11-17a：签到前状态接口明确今日已签 → 跳过 do_sign 写请求，避免重复提交。
+        # 查询失败时 sign_state 为空、didSignToday 为假，不会走到这里，仍走下面的原签到逻辑
+        # （宁可服务端返回"已签"，也不漏签）。
+        result["sign"] = "今日已签到（签到前状态确认，跳过签到请求，不重复提交）"
+        result["success"] = True
+        log(f"    🟡 {result['sign']}")
     else:
         try:
             res = client.do_sign()
@@ -760,6 +814,10 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         result["amount_after"] = amount_of(after)
         if result["points_before"] is not None and result["points_after"] is not None:
             result["points_delta"] = result["points_after"] - result["points_before"]
+        # 总积分 = 当前奖励金余额（签到后优先，签到后查不到则退回签到前）
+        result["totalPoints"] = (result["points_after"]
+                                 if result["points_after"] is not None
+                                 else result["points_before"])
         log(f"    💰 签到后奖励金：{result['points_after']}　"
               f"≈{result['amount_after'] or '-'} 元")
     except Exception as exc:
@@ -783,15 +841,93 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
 # --------------------------------------------------------------------------- #
 # 汇总与通知
 # --------------------------------------------------------------------------- #
-def _finish(total: int, ok_count: int, skipped: int = 0) -> int:
+def in_expire_window(today: Optional[date] = None) -> bool:
+    """今天是否落在「每 3 个月的月份里，月底前 7 天」提醒窗口内。
+
+    窗口 = (last_day - N, last_day]，共 N 天；仅启用月份（EXPIRE_REMIND_MONTHS）生效。
+    例：31 号月末且 N=7 → 25~31 号提醒；30 号月末 → 24~30 号提醒。
+    """
+    if today is None:
+        today = date.today()
+    if today.month not in EXPIRE_REMIND_MONTHS:
+        return False
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    return today.day > last_day - EXPIRE_REMIND_DAYS
+
+
+def notify_expire_alert(lines: list) -> bool:
+    """积分过期提醒强推：独立于「只推 ERROR」的错误通知，命中即推。"""
+    if not lines or _qn_send is None:
+        return False
+    if not any(os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，积分过期提醒未推送（可在青龙「通知设置」或环境变量中配置）",
+              flush=True)
+        return False
+    title = "【%s】积分即将过期提醒" % _QN_SITE
+    body = "\n".join(lines)
+    try:
+        _qn_send(title, body)
+        return True
+    except Exception as _e:
+        print("[QL] 积分过期提醒推送失败：%s" % _e, flush=True)
+        return False
+
+
+def check_expire_remind(results: List[Dict[str, Any]]) -> None:
+    """窗口内，任一账号现有积分>0 则在汇总日志连续打印并强推（过期积分=现有积分）。"""
+    if not ENABLE_EXPIRE_REMIND or not in_expire_window():
+        return
+    hits = []
+    for r in results:
+        tp = r.get("totalPoints")
+        if isinstance(tp, (int, float)) and tp > 0:
+            label = b32(r.get("label")) or "账号"
+            hits.append((label, tp))
+    if not hits:
+        return
+    # 汇总日志连续打印（窗口内每天都会打印）
+    log(_ACC_RULE)
+    log("⏳ [积分过期提醒] 检测到现有积分将于本月底过期（过期积分=现有积分）：")
+    for label, exp in hits:
+        log(f"   · {label}：{exp} 积分即将过期")
+    log(_ACC_RULE)
+    # 独立强推
+    push_lines = ["检测到现有积分将于本月底过期（过期积分=现有积分）："]
+    push_lines += [f"{label}：{exp} 积分即将过期" for label, exp in hits]
+    if notify_expire_alert(push_lines):
+        log("📣 [积分过期提醒] 已推送通知")
+
+
+def _finish(total: int, ok_count: int, skipped: int = 0,
+            results: Optional[List[Dict[str, Any]]] = None) -> int:
     """打印尾部 [执行汇总] 并推送错误日志，返回退出码。"""
     fail_count = total - ok_count - skipped
     tail = "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok_count, fail_count, skipped)
     log(_ACC_RULE)
     log("📊 [执行汇总] 哈啰出行 · %s" % tail)
+    # 总积分汇总（无论是否跳过、任务是否已完成，都在这里显示）
+    if results:
+        for idx, r in enumerate(results, 1):
+            total_points = r.get("totalPoints")
+            if total_points is None:
+                continue
+            label = b32(r.get("label")) or "账号"
+            log(f"💎 总积分({total_points})（{label}）")
     log(_ACC_RULE)
+    # 积分过期提醒：每 3 个月的月底前 7 天窗口内、现有积分>0 时连续打印 + 强推
+    if results is not None:
+        try:
+            check_expire_remind(results)
+        except Exception as _e:
+            warn(f"⚠️ [积分过期提醒] 检查异常：{_e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-    flush_notify(_QN_SITE, tail, logger=log)
+    _notify_tail = tail
+    if results:
+        _point_lines = [f"{b32(r.get('label')) or '账号'} 总积分 {r.get('totalPoints')}"
+                        for r in results if r.get("totalPoints") is not None]
+        if _point_lines:
+            _notify_tail += "\n" + " ｜ ".join(_point_lines)
+    flush_notify(_QN_SITE, _notify_tail, logger=log)
     return 0 if fail_count == 0 else 1
 
 
@@ -839,11 +975,14 @@ def main() -> int:
         if is_done_today(key):
             log(f"⏭️ [打标] 账号 {index}/{total} 今日任务已完成，跳过")
             # 并入已有的 skipped 统计（不算成功、也不算失败）
+            skip_expiring = expiring_from_done(key)
             results.append({
                 "label": account.label, "server": account.server, "success": False,
                 "skipped": True, "user": "-", "sign": "今日任务已完成，已跳过", "bonus": "-",
                 "title": "", "extra": "", "points_before": None, "points_after": None,
-                "points_delta": None, "amount_before": "", "amount_after": "",
+                "points_delta": None, "totalPoints": total_points_from_done(key),
+                "amount_before": "", "amount_after": "",
+                "expiring": skip_expiring,
                 "wallet": "", "continuous": "-", "sign_source": "", "error": "",
                 "tasks": None,
             })
@@ -855,14 +994,17 @@ def main() -> int:
             # 未绑定账号（skipped）、DRY_RUN、关闭签到等不算真正完成，不打标
             if (result.get("success") and not result.get("skipped")
                     and not DRY_RUN and ENABLE_SIGN):
-                mark_done_today(key, result.get("sign", ""))
+                mark_done_today(key, result.get("sign", ""), result.get("expiring"),
+                                result.get("totalPoints"))
         except Exception as exc:
             err("❌ [主程序] %s 执行异常：%s" % (account.label, exc))
             results.append({
                 "label": account.label, "server": account.server, "success": False,
                 "skipped": False, "user": "-", "sign": "-", "bonus": "-", "title": "",
                 "extra": "", "points_before": None, "points_after": None, "points_delta": None,
-                "amount_before": "", "amount_after": "", "wallet": "", "continuous": "-",
+                "totalPoints": None,
+                "amount_before": "", "amount_after": "", "expiring": None,
+                "wallet": "", "continuous": "-",
                 "sign_source": "", "error": str(exc), "tasks": None,
             })
         if index < total:
@@ -870,7 +1012,7 @@ def main() -> int:
 
     ok = sum(1 for i in results if i.get("success") and not i.get("skipped"))
     skipped = sum(1 for i in results if i.get("skipped"))
-    return _finish(total, ok, skipped)
+    return _finish(total, ok, skipped, results)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  蜜蜂惊喜社
-# version: 2026-10-29a
+# version: 2026-11-17d
 # cron: 30 5,15 * * *
-# 积分有效期：
+# 积分有效期：当前获取的积分将在后年1月1日过期【1+1】
+# 即将过期检查方式：年底前 7 天检查即将过期积分（上年+今年）
 # =========================================================
 
 # ========== 企业微信推送配置（可选） ==========
@@ -25,10 +26,13 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   1. 本地 code 服务获取微信 code
   2. 有赞 authorize 接口使用 code 换 accessToken（yz_union 授权）
   3. 查询积分（签到前/签到后 user_points.json）
-  4. 获取签到活动信息（show_checkin_page_v2.json）
-  5. 每日签到（checkinV2.json，含奖品明细）
-  6. PushPlus 推送
-  7. 品赞代理，业务请求优先代理，失败直连兜底
+  4. 2026-11-17a：签到前 ISV 状态预检（point/log/query 的 checkin），今日已签则跳过签到写请求
+  5. 获取 yz_open_id（getUserOpenInfo.json，用于状态查询与 ISV 签到）；拿不到则降级原签到
+  6. 每日签到：优先 ISV /api/sign（与状态查询同源）；拿不到 yz_open_id 时降级 checkinV2.json
+  7. PushPlus 推送
+  8. 品赞代理，业务请求优先代理，失败直连兜底
+  9. 2026-11-17b：浏览直播预告领奖任务（开关默认关）——查 pagesview 状态 + point/log/create 领奖；
+     真实浏览文章无法由脚本模拟，故默认关闭，需人工确认可接受风险后再开启。
 
 环境变量：
   PLUSPLUS_TOKEN    PushPlus token，可选
@@ -49,8 +53,9 @@ import json
 import os
 import random
 import time
+import calendar
 import traceback
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -64,7 +69,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17d"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [MFJXS] message ==========
@@ -88,6 +93,11 @@ def err(msg):
 
 APP_NAME = "蜜蜂惊喜社小程序"
 APPID = "wx3aa848f81dfa0967"
+
+# ========== 内部配置：直接改这里，省去去面板设环境变量 ==========
+# 账号序号白名单（1 起，按 YYB_SERVER 里的书写顺序编号）；留空 [] = 全部运行
+# 例：[1] 只跑第 1 个账号；[1, 3] 跑第 1 和第 3 个
+YYB_ONLY_REFS = []
 
 SERVERS = [
     "127.0.0.1:8088",
@@ -140,6 +150,41 @@ LOGIN_URL = f"{API_BASE}/wscshop/weapp/authorize.json"
 POINTS_URL = f"{API_BASE}/wscump/integral/user_points.json"
 CHECKIN_PAGE_URL = f"{API_BASE}/wscump/checkin/show_checkin_page_v2.json"
 CHECKIN_URL = f"{API_BASE}/wscump/checkin/checkinV2.json"
+# 2026-11-17a：ISV 体系（与状态查询同源）。yz_open_id 由 getUserOpenInfo.json 返回。
+ISV_BASE = "https://mp-isv.youzanyun.com"
+ISV_POINT_QUERY_URL = f"{ISV_BASE}/api/point/log/query"   # 任务状态：checkin/pagesview/subscribe
+ISV_SIGN_URL = f"{ISV_BASE}/api/sign"                     # ISV 签到写请求
+# 2026-11-17b：浏览直播预告领奖（HAR 115030）。真实浏览文章无法由脚本模拟，默认关闭。
+ISV_POINT_CREATE_URL = f"{ISV_BASE}/api/point/log/create"  # 预告领奖写请求（type=2, points=10）
+
+# ===== 浏览直播预告领奖任务开关（2026-11-17b）=====
+# 默认关：该任务需要真实在微信里打开公众号文章，脚本只能查状态 + 提交领奖，
+# 服务端是否校验前置浏览无法从 HAR 确认，存在黑号风险，故默认关闭。
+# 想用时改为 True；开后仍会先查 pagesview，已完成任务则跳过写请求（状态检测）。
+ENABLE_ARTICLE_VIEW_TASK = False
+ARTICLE_VIEW_TASK_POINTS = 10          # 单次领奖积分（HAR 实测 10）
+ARTICLE_VIEW_TASK_TYPE = 2             # 任务类型：浏览预告（HAR 实测 type=2）
+
+# ===== 积分过期提醒（2026-11-17c）=====
+# 规则：今年获取的积分，次年 12 月 31 日到期。因此每年年底前 7 天检查一次：
+#   轮询「上年」获取的积分量；上年为 0 → 无积分会过期，不提醒；
+#   上年 > 0 → 即将过期量 = 上年获取 + 今年获取，打印在汇总日志并推送通知。
+# 数据源：积分中心 pointstore（HAR 151902）
+#   - getPointsRecords.json   积分明细（含 amount/createdAt/expiredAt），按 createdAt 归年汇总
+#   - getCustomerPoints.json   服务端口径对照（nearlyExpiredAmount = 即将过期积分）
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_DAYS = 7                 # 年底前 N 天开始检查（含 12/31 当天）
+EXPIRE_RECORDS_PAGE_SIZE = 50           # 明细分页大小
+EXPIRE_RECORDS_MAX_PAGES = 40           # 明细最大翻页数（40 × 50 = 2000 条，足够覆盖一年签到）
+POINTSTORE_RECORDS_PATH = "wscump/pointstore/getPointsRecords.json"
+POINTSTORE_CUSTOMER_PATH = "wscump/pointstore/getCustomerPoints.json"
+# pointstore 是 h5 页面接口，Referer 需与抓包一致（HAR 151902）
+POINTSTORE_REFERER = {
+    POINTSTORE_RECORDS_PATH: "https://h5.youzan.com/wscump/pointstore/pointdetails",
+    POINTSTORE_CUSTOMER_PATH: "https://h5.youzan.com/wscump/pointstore/pointcenter",
+}
+# 时间戳按北京时间归年（积分签到口径）
+CN_TZ = timezone(timedelta(hours=8))
 
 KDT_ID = "104905610"
 USER_VERSION = "2.226.7.201"
@@ -643,20 +688,47 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """记录该账号今天已完成。"""
+def mark_done_today(server: str, note: str = "",
+                    expire: Optional[Dict[str, Any]] = None,
+                    total_points: Any = None) -> None:
+    """记录该账号今天已完成。
+
+    expire：可选的积分过期数据（prev/cur/nearly），缓存进打标文件，
+            供下午 cron 全跳过时读回，保证汇总照样能提醒。
+    """
     cache = load_daily_done()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
     today = _today()
     cache = {k: v for k, v in cache.items()
              if isinstance(v, dict) and str(v.get("date") or "") == today}
-    cache[server] = {
+    entry: Dict[str, Any] = {
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
     }
+    if isinstance(expire, dict):
+        entry["expire"] = {
+            "prev": to_float(expire.get("prev")),
+            "cur": to_float(expire.get("cur")),
+            "nearly": (to_float(expire.get("nearly"))
+                       if expire.get("nearly") is not None else None),
+        }
+    if total_points is not None:
+        entry["totalPoints"] = to_float(total_points)
+    cache[server] = entry
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def total_points_from_done(server: str) -> Optional[float]:
+    """从当天打标记录读回总积分，供本次被跳过的账号在汇总里显示。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or str(entry.get("date") or "") != _today():
+        return None
+    val = entry.get("totalPoints")
+    if val is None:
+        return None
+    return to_float(val)
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -685,12 +757,18 @@ def get_cached_token(server: str) -> str | None:
 
 def set_cached_token(server: str, token: str, expire_time: str, session_id: str | None = None) -> None:
     cache = load_token_cache()
-    cache[server] = {
+    old = cache.get(server) if isinstance(cache.get(server), dict) else {}
+    entry = {
         "token": token,
         "sessionId": session_id or "",
         "expireTime": expire_time,
         "updateTime": datetime.now().isoformat(),
     }
+    # 保留已缓存的 ISV 用户标识，避免刷新 token 时丢失
+    for field in ("buyerId", "userOpenId"):
+        if old.get(field):
+            entry[field] = old[field]
+    cache[server] = entry
     save_token_cache(cache)
 
 
@@ -703,14 +781,40 @@ def get_cached_session_id(server: str) -> str | None:
     return str(sid) if sid else None
 
 
+def get_cached_field(server: str, field: str) -> str | None:
+    """读取缓存里的扩展字段（buyerId / userOpenId）"""
+    data = load_token_cache().get(server)
+    if not isinstance(data, dict):
+        return None
+    value = data.get(field)
+    return str(value) if value else None
+
+
+def set_cached_fields(server: str, **fields: Any) -> None:
+    """把扩展字段写回缓存（不覆盖 token/sessionId/expireTime）"""
+    cache = load_token_cache()
+    entry = cache.get(server)
+    if not isinstance(entry, dict):
+        entry = {}
+    for key, value in fields.items():
+        if value:
+            entry[key] = str(value)
+    entry["updateTime"] = datetime.now().isoformat()
+    cache[server] = entry
+    save_token_cache(cache)
+
+
 def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: str = "积分",
-               session_id: str | None = None) -> str:
-    """照源脚本 getPoints()：user_points.json 查积分"""
+               session_id: str | None = None) -> tuple:
+    """照源脚本 getPoints()：user_points.json 查积分。
+
+    返回 (展示文本, 积分数值)；查询失败时数值为 None。
+    """
     resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies, session_id)
     if to_float(resp.get("code")) != 0:
         msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
         warn(f"⚠️ [积分] {label}获取失败: {msg}")
-        return f"获取失败: {msg}"
+        return f"获取失败: {msg}", None
     data = safe_data(resp)
     points = data.get("current_points") if data.get("current_points") is not None else (
         data.get("real_points") if data.get("real_points") is not None else (
@@ -718,7 +822,381 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
         )
     )
     log(f"✅ [积分] {label}: {points}")
-    return f"{points} 积分"
+    value = None
+    try:
+        value = float(points)
+    except (TypeError, ValueError):
+        value = None
+    return f"{points} 积分", value
+
+
+# ===================== 积分过期提醒（年底前 7 天） =====================
+# 规则：今年获取的积分，次年 12 月 31 日到期（HAR 151902 明细里 2026 年获取的记录
+#       expiredAt=1830268800 → +08 为 2028-01-01 00:00，反证「获取年份 +1 的年底」）。
+# 因此每年年底前 7 天检查一次：轮询上年获取量；上年为 0 → 不提醒；
+# 上年 > 0 → 即将过期 = 上年获取 + 今年获取。
+def in_expire_window(today: date | None = None) -> bool:
+    """年底前 N 天（含 12/31 当天）才检查即将过期积分。"""
+    today = today or date.today()
+    if today.month != 12:
+        return False
+    last_day = calendar.monthrange(today.year, 12)[1]
+    return today.day > last_day - EXPIRE_REMIND_DAYS
+
+
+def _cn_year(ts: Any) -> int:
+    """时间戳按北京时间(+8)归年；解析失败返回 0。"""
+    try:
+        value = int(float(ts))
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+    try:
+        return datetime.fromtimestamp(value, CN_TZ).year
+    except (OSError, OverflowError, ValueError):
+        return 0
+
+
+def pointstore_get(server: str, path: str, token: str, proxies: Dict[str, str] | None,
+                   session_id: str | None, query: Dict[str, Any]) -> Dict[str, Any]:
+    """积分中心(pointstore)接口。
+
+    HAR 151902 是 h5 页面形态：URL 只带 kdt_id，靠 Cookie 的 KDTSESSIONID / nobody_sign 维持会话；
+    本脚本是小程序 code 换 access_token 形态，所以两条鉴权路径都带上：
+      - URL 参数 access_token（build_url 自带）
+      - Cookie KDTSESSIONID / nobody_sign = session_id（有赞 H5 惯例）
+    """
+    url = build_url(path, token, query)
+    headers = common_headers(token, session_id)
+    headers["Referer"] = POINTSTORE_REFERER.get(path, "https://h5.youzan.com/wscump/pointstore/")
+    if session_id:
+        headers["Cookie"] = f"KDTSESSIONID={session_id}; nobody_sign={session_id}"
+    try:
+        resp = request_with_proxy("GET", url, headers=headers, proxies=proxies, server=server)
+        return resp.json()
+    except Exception as exc:
+        warn(f"⚠️ [积分过期] {path} 请求异常: {exc}")
+        return {"code": -1, "msg": str(exc)}
+
+
+def fetch_point_records(server: str, token: str, proxies: Dict[str, str] | None,
+                        session_id: str | None, ts_start: int, ts_end: int) -> List[Dict[str, Any]]:
+    """拉取指定时间范围的积分明细（自动翻页）。"""
+    records: List[Dict[str, Any]] = []
+    page = 1
+    total = 0
+    while page <= EXPIRE_RECORDS_MAX_PAGES:
+        resp = pointstore_get(server, POINTSTORE_RECORDS_PATH, token, proxies, session_id,
+                              {"pageSize": EXPIRE_RECORDS_PAGE_SIZE, "page": page,
+                               "timeStart": ts_start, "timeEnd": ts_end,
+                               "type": 0, "needGoodsDetail": 1})
+        if to_float(resp.get("code")) != 0:
+            warn(f"⚠️ [积分过期] 积分明细查询失败: {resp.get('msg') or json_preview(resp, 200)}")
+            break
+        data = safe_data(resp)
+        items = data.get("logContentList") or []
+        records.extend([x for x in items if isinstance(x, dict)])
+        if not total:
+            total = int(to_float(data.get("total")) or 0)
+        if not items or (total and len(records) >= total):
+            break
+        page += 1
+    if total and len(records) < total:
+        warn(f"⚠️ [积分过期] 积分明细可能被截断：已取 {len(records)}/{total} 条")
+    return records
+
+
+def sum_gained_points(records: List[Dict[str, Any]], year: int) -> float:
+    """统计指定年份「获取」的积分总量（amount>0；负数为消耗不计）。"""
+    total = 0.0
+    for r in records:
+        amount = to_float(r.get("amount"))
+        if amount <= 0:
+            continue
+        if _cn_year(r.get("createdAt")) != year:
+            continue
+        total += amount
+    return total
+
+
+def query_expire_summary(server: str, token: str, proxies: Dict[str, str] | None,
+                         session_id: str | None) -> Optional[Dict[str, Any]]:
+    """查询即将过期积分数据。
+
+    返回 {"prev": 上年获取量, "cur": 今年获取量, "nearly": 服务端口径(可空)}；失败返回 None。
+    """
+    today = date.today()
+    year = today.year
+    prev_year = year - 1
+    # 时间分段按北京时间；每段不超过一年，避免服务端时间范围限制
+    prev_start = int(datetime(prev_year, 1, 1, 0, 0, 0, tzinfo=CN_TZ).timestamp())
+    prev_end = int(datetime(year, 1, 1, 0, 0, 0, tzinfo=CN_TZ).timestamp()) - 1
+    cur_start = prev_end + 1
+    cur_end = int(datetime(year, 12, 31, 23, 59, 59, tzinfo=CN_TZ).timestamp())
+
+    prev_sum = sum_gained_points(fetch_point_records(server, token, proxies, session_id,
+                                                     prev_start, prev_end), prev_year)
+    cur_sum = sum_gained_points(fetch_point_records(server, token, proxies, session_id,
+                                                    cur_start, cur_end), year)
+
+    # 对照口径：服务端现成的「即将过期积分」
+    nearly = None
+    resp = pointstore_get(server, POINTSTORE_CUSTOMER_PATH, token, proxies, session_id,
+                          {"withNearlyExpired": True})
+    if to_float(resp.get("code")) == 0:
+        nearly = to_float((safe_data(resp) or {}).get("nearlyExpiredAmount"))
+    return {"prev": prev_sum, "cur": cur_sum, "nearly": nearly}
+
+
+def expire_from_done(server: str) -> Optional[Dict[str, Any]]:
+    """从日打标文件读回当天缓存的过期数据（下午 cron 全跳过时仍能提醒）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return None
+    if str(entry.get("date") or "") != _today():
+        return None
+    value = entry.get("expire")
+    return value if isinstance(value, dict) else None
+
+
+def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
+    """汇总打印 + 推送即将过期积分提醒。
+
+    rows: [{"idx": 1, "server": "...", "prev": 上年获取, "cur": 今年获取, "nearly": 服务端口径}]
+    上年获取为 0 → 该账号没有会到期的积分，不提醒。
+    """
+    hits = [r for r in rows if to_float(r.get("prev")) > 0]
+    if not hits:
+        return
+    lines: List[str] = []
+    total_all = 0.0
+    for r in hits:
+        prev = to_float(r.get("prev"))
+        cur = to_float(r.get("cur"))
+        total = prev + cur
+        total_all += total
+        text = f"账号{r.get('idx')}：即将过期 {total:.0f} 分（上年 {prev:.0f} + 今年 {cur:.0f}）"
+        nearly = r.get("nearly")
+        if nearly is not None:
+            nearly_val = to_float(nearly)
+            if abs(nearly_val - total) > 0.5:
+                text += f"（服务端 nearlyExpiredAmount={nearly_val:.0f}，口径不一致仅供参考）"
+        lines.append(text)
+
+    log("⏳ [积分过期提醒] " + " ｜ ".join(lines))
+    content = (
+        "⏳ 积分即将过期提醒（年底前 7 天检查）\n"
+        f"📅 检查日期：{_today()}\n"
+        f"💠 合计即将过期：{total_all:.0f} 分\n"
+        + "\n".join(f"　• {t}" for t in lines)
+        + "\n\n⚠️ 到期规则：今年获取的积分，次年 12 月 31 日到期，请及时使用。"
+    )
+    try:
+        send_pushplus("🐝 蜜蜂惊喜社积分即将过期提醒", content)
+    except Exception as exc:
+        warn(f"⚠️ [积分过期] 通知推送异常: {exc}")
+
+
+# ====================== ISV 体系（2026-11-17a） ======================
+# 背景：签到状态查询（point/log/query）与签到写请求（/api/sign）都在 mp-isv.youzanyun.com，
+#       靠 yz_open_id（= getUserOpenInfo.json 的 userOpenId）标识用户，与 h5 的 access_token 体系不同。
+#       目标：签到前先查 checkin 状态，已签则跳过写请求，避免二次提交判黑号。
+#       拿不到 yz_open_id 时降级回原 checkinV2 签到，保证不漏签。
+
+def extract_buyer_id(raw_login: Any) -> str | None:
+    """从登录响应里宽松提取 buyerId / yzUid（getUserOpenInfo.json 需要）"""
+    if not isinstance(raw_login, dict):
+        return None
+    candidates: List[str] = []
+    for key in ("buyerId", "buyer_id", "yzUid", "yz_uid", "openId", "userId", "uid"):
+        candidates.append(str(raw_login.get(key) or ""))
+    inner = raw_login.get("data")
+    if isinstance(inner, dict):
+        for key in ("buyerId", "buyer_id", "yzUid", "yz_uid", "openId", "userId", "uid", "buyerid"):
+            candidates.append(str(inner.get(key) or ""))
+    for value in candidates:
+        if value and value != "null":
+            return value
+    return None
+
+
+def isv_headers() -> Dict[str, str]:
+    """ISV 接口请求头（HAR 实测：仅需 content-type + Referer + UA，无 Extra-Data/access_token）"""
+    return {
+        "User-Agent": USER_AGENT,
+        "Referer": f"https://servicewechat.com/{APPID}/32/page-frame.html",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+
+def get_yz_open_id(server: str, token: str, session_id: str | None,
+                   proxies: Dict[str, str] | None, raw_login: Any) -> str | None:
+    """获取 ISV 的 yz_open_id（= userOpenId）。缓存优先，其次 getUserOpenInfo.json；失败返回 None。"""
+    cached_open = get_cached_field(server, "userOpenId")
+    if cached_open:
+        log(f"🔑 [ISV] 使用缓存 userOpenId: {mask(cached_open)}")
+        return cached_open
+
+    buyer_id = get_cached_field(server, "buyerId") or extract_buyer_id(raw_login)
+    # getUserOpenInfo.json 走 h5 体系（access_token + Extra-Data），buyerId 取不到就先不传，
+    # 由服务端按 access_token 识别；仍失败则本次不做 ISV 预检、降级原签到。
+    query = {"buyerId": buyer_id} if buyer_id else None
+    url = build_url("wscuser/weapp/getUserOpenInfo.json", token, query)
+    resp = api_get(server, url, token, proxies, session_id)
+    if to_float(resp.get("code")) != 0:
+        msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
+        warn(f"⚠️ [ISV] 获取 userOpenId 失败: {msg}（本次降级原签到）")
+        return None
+    data = safe_data(resp)
+    open_id = data.get("userOpenId") or data.get("yzOpenId") or data.get("openId")
+    if not open_id:
+        warn("⚠️ [ISV] getUserOpenInfo 未返回 userOpenId（本次降级原签到）")
+        return None
+    open_id = str(open_id)
+    set_cached_fields(server, userOpenId=open_id, buyerId=buyer_id)
+    log(f"🔑 [ISV] userOpenId 获取成功: {mask(open_id)}")
+    return open_id
+
+
+def query_isv_task_state(server: str, yz_open_id: str,
+                         proxies: Dict[str, str] | None) -> Dict[str, Any] | None:
+    """查询 ISV 任务完成状态：{pagesview, checkin, subscribe}；失败返回 None"""
+    try:
+        resp = request_with_proxy(
+            "POST", ISV_POINT_QUERY_URL,
+            headers=isv_headers(),
+            json={"kdtid": int(KDT_ID), "yz_open_id": yz_open_id},
+            proxies=proxies, server=server,
+        )
+        data = resp.json()
+    except Exception as exc:
+        warn(f"⚠️ [ISV] 任务状态查询异常: {exc}")
+        return None
+    if str(data.get("flag")) != "200" and to_float(data.get("flagIntValue")) != 200:
+        msg = data.get("message") or json_preview(data, 200)
+        warn(f"⚠️ [ISV] 任务状态查询失败: {msg}")
+        return None
+    state = safe_data(data)
+    if not isinstance(state, dict) or not state:
+        warn("⚠️ [ISV] 任务状态为空（本次降级原签到）")
+        return None
+    return state
+
+
+def isv_sign(server: str, yz_open_id: str, proxies: Dict[str, str] | None) -> str | None:
+    """ISV 签到写请求；返回 '签到成功'/'今日已签到'，失败返回 None（降级原签到）"""
+    try:
+        resp = request_with_proxy(
+            "POST", ISV_SIGN_URL,
+            headers=isv_headers(),
+            json={"kdt_id": int(KDT_ID), "yz_open_id": yz_open_id},
+            proxies=proxies, server=server,
+        )
+        data = resp.json()
+    except Exception as exc:
+        warn(f"⚠️ [ISV] 签到异常: {exc}")
+        return None
+    flag = str(data.get("flag"))
+    if flag == "200" or to_float(data.get("flagIntValue")) == 200:
+        payload = data.get("data")
+        msg = str(payload) if payload is not None else str(data.get("message") or "")
+        if "已签" in msg:
+            log("✅ [ISV] 今日已签到")
+            return "今日已签到"
+        log(f"✅ [ISV] 签到成功: {msg}")
+        return "签到成功"
+    msg = data.get("message") or json_preview(data, 200)
+    warn(f"⚠️ [ISV] 签到失败: {msg}（本次降级原签到）")
+    return None
+
+
+def get_article_view_live_id(server: str, proxies: Dict[str, str] | None) -> str | None:
+    """查询当前直播预告活动，返回 live_id（每天不同，不能写死）。
+    HAR 115030 #20：POST /api/show  body={kdt_id} -> data.id（如 2768）、account_link。
+    """
+    try:
+        resp = request_with_proxy(
+            "POST", f"{ISV_BASE}/api/show",
+            headers=isv_headers(),
+            json={"kdt_id": int(KDT_ID)},
+            proxies=proxies, server=server,
+        )
+        data = resp.json()
+    except Exception as exc:
+        warn(f"⚠️ [预告] 查询直播活动异常: {exc}")
+        return None
+    if str(data.get("flag")) != "200" and to_float(data.get("flagIntValue")) != 200:
+        warn(f"⚠️ [预告] 查询直播活动失败: {data.get('message') or json_preview(data, 200)}")
+        return None
+    info = safe_data(data)
+    live_id = info.get("id") or info.get("live_id")
+    if not live_id:
+        warn("⚠️ [预告] 活动未返回 live_id")
+        return None
+    return str(live_id)
+
+
+def do_article_view_task(server: str, yz_open_id: str,
+                         proxies: Dict[str, str] | None,
+                         state: Dict[str, Any] | None) -> str:
+    """浏览直播预告领奖任务（开关默认关）。
+    状态检测：优先复用调用方已查的 state.pagesview；否则重新查询。
+      - pagesview=true（今日已完成）→ 跳过写请求，返回"今日已完成"。
+      - 状态查询失败 → 不做写请求，返回失败原因（避免盲目提交）。
+      - pagesview=false → 提交 point/log/create 领奖。
+    注意：真实浏览文章这一步脚本无法模拟；此处仅按状态提交领奖，是否判黑号由服务端决定。
+    """
+    if not ENABLE_ARTICLE_VIEW_TASK:
+        return "-"
+
+    if state is None:
+        state = query_isv_task_state(server, yz_open_id, proxies)
+    if state is None:
+        warn("⚠️ [预告] 任务状态查询失败，跳过领奖写请求")
+        return "状态查询失败，已跳过"
+
+    if bool(state.get("pagesview")):
+        log("✅ [预告] 今日浏览任务已完成（pagesview=true，未发送领奖请求）")
+        return "今日已完成"
+
+    live_id = get_article_view_live_id(server, proxies)
+    if not live_id:
+        return "未获取到活动 live_id，已跳过"
+
+    wait_time = random.randint(2, 5)
+    log(f"⏳ [预告] 领奖前等待 {wait_time}s（live_id={live_id}）")
+    sleep(wait_time)
+
+    try:
+        resp = request_with_proxy(
+            "POST", ISV_POINT_CREATE_URL,
+            headers=isv_headers(),
+            json={
+                "kdtid": int(KDT_ID),
+                "yz_open_id": yz_open_id,
+                "live_id": live_id,
+                "type": ARTICLE_VIEW_TASK_TYPE,
+                "points": ARTICLE_VIEW_TASK_POINTS,
+            },
+            proxies=proxies, server=server,
+        )
+        data = resp.json()
+    except Exception as exc:
+        warn(f"⚠️ [预告] 领奖请求异常: {exc}")
+        return f"领奖异常: {exc}"
+
+    if str(data.get("flag")) == "200" or to_float(data.get("flagIntValue")) == 200:
+        msg = str(data.get("data") or data.get("message") or "")
+        log(f"✅ [预告] 领奖成功: {msg}")
+        return f"领奖成功: {msg}"
+    msg = data.get("message") or json_preview(data, 200)
+    if any(kw in str(msg) for kw in ("已领", "重复", "已完成", "已参与")):
+        log(f"✅ [预告] 今日已领取: {msg}")
+        return "今日已领取"
+    warn(f"⚠️ [预告] 领奖失败: {msg}")
+    return f"领奖失败: {msg}"
 
 
 def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, Dict[str, Any] | None]:
@@ -757,6 +1235,11 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
     elif not isinstance(expire_time, str):
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
     set_cached_token(server, token, expire_time, session_id)
+    # 2026-11-17a：首登时把 buyerId 缓存下来，供后续缓存 token 运行 ISV 状态预检使用
+    buyer_id = extract_buyer_id(raw_login)
+    if buyer_id:
+        set_cached_fields(server, buyerId=buyer_id)
+        log(f"🔑 [ISV] 买家标识 buyerId 已缓存: {buyer_id}")
     return token, session_id, raw_login
 
 
@@ -815,6 +1298,9 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "token": "-",
         "signMsg": "-",
         "pointsMsg": "-",
+        "totalPoints": None,
+        "articleMsg": "-",
+        "expire": None,
         "error": "",
     }
 
@@ -839,14 +1325,54 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     try:
         # 签到前积分
-        points_before = get_points(server, token, proxies, "签到前积分", session_id)
+        points_before, points_before_val = get_points(server, token, proxies, "签到前积分", session_id)
 
-        # 每日签到
-        result["signMsg"] = do_checkin(server, token, proxies, session_id)
+        # 2026-11-17a：优先走 ISV 体系——先查任务状态，已签则跳过写请求（防重复提交判黑号）。
+        # 任一环节拿不到 yz_open_id / 查不到状态 / 签到失败，均降级回原 checkinV2，保证不漏签。
+        signed_by_isv = False
+        state: Dict[str, Any] | None = None
+        yz_open_id = get_yz_open_id(server, token, session_id, proxies, raw_login)
+        if yz_open_id:
+            state = query_isv_task_state(server, yz_open_id, proxies)
+            if state is not None:
+                checkin_done = bool(state.get("checkin"))
+                log(f"📋 [ISV] 任务状态: checkin={checkin_done} "
+                    f"pagesview={bool(state.get('pagesview'))} subscribe={bool(state.get('subscribe'))}")
+                if checkin_done:
+                    log("✅ [签到] 今日已签到（ISV 状态预检确认，未发送签到请求）")
+                    result["signMsg"] = "今日已签到"
+                    signed_by_isv = True
+                else:
+                    isv_msg = isv_sign(server, yz_open_id, proxies)
+                    if isv_msg:
+                        result["signMsg"] = isv_msg
+                        signed_by_isv = True
+
+        if not signed_by_isv:
+            log("🔁 [签到] ISV 路径未生效，降级原 checkinV2 签到")
+            result["signMsg"] = do_checkin(server, token, proxies, session_id)
 
         # 签到后积分
-        points_after = get_points(server, token, proxies, "签到后积分", session_id)
+        points_after, points_after_val = get_points(server, token, proxies, "签到后积分", session_id)
         result["pointsMsg"] = f"{points_before} → {points_after}"
+        # 总积分：签到后余额优先，取不到则退回签到前余额
+        result["totalPoints"] = points_after_val if points_after_val is not None else points_before_val
+
+        # 2026-11-17b：浏览直播预告领奖任务（开关默认关，关时直接返回"-"不产生任何请求）
+        if ENABLE_ARTICLE_VIEW_TASK:
+            if yz_open_id:
+                result["articleMsg"] = do_article_view_task(server, yz_open_id, proxies, state)
+            else:
+                result["articleMsg"] = "无 userOpenId，已跳过"
+                warn("⚠️ [预告] 未获取到 userOpenId，跳过领奖任务")
+
+        # 积分过期数据（仅年底前 7 天查询，平时完全不发请求；失败不影响主流程）
+        if ENABLE_EXPIRE_REMIND and in_expire_window():
+            try:
+                result["expire"] = query_expire_summary(server, token, proxies, session_id)
+            except Exception as exc:
+                warn(f"⚠️ [积分过期] 查询异常: {exc}")
+                result["expire"] = None
 
         result["success"] = True
         return result
@@ -873,16 +1399,34 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
     for idx, res in enumerate(results, 1):
         icon = "✅" if res["success"] else "❌"
 
+        # 2026-11-17b：预告任务仅在开关开启时展示
+        article_line = f"\n📺 预告：{res.get('articleMsg', '-')}" if ENABLE_ARTICLE_VIEW_TASK else ""
+
         content += f"""
 👤 账号 {idx}
 📝 签到：{res["signMsg"]}
-💰 积分：{res["pointsMsg"]}
+💰 积分：{res["pointsMsg"]}{article_line}
 {icon} 结果：{"成功" if res["success"] else "失败"}
 """
 
         if not res["success"]:
             content += f"❌ 原因：{res['error']}\n"
 
+        content += "━━━━━━━━━━━━━━━━━━━━\n"
+
+    # 总积分汇总（跳过账号从打标缓存读回，一并列出）
+    points_rows = []
+    for item in results:
+        if item.get("totalPoints") is not None:
+            points_rows.append((int(item.get("idx") or 0), float(item["totalPoints"])))
+    for item in (skipped or []):
+        val = total_points_from_done(item.get("server"))
+        if val is not None:
+            points_rows.append((int(item.get("idx") or 0), float(val)))
+    if points_rows:
+        content += "💎 总积分汇总：\n"
+        for idx, val in sorted(points_rows):
+            content += "💎 总积分(%.2f)（账号%d）\n" % (val, idx)
         content += "━━━━━━━━━━━━━━━━━━━━\n"
 
     return content
@@ -894,16 +1438,30 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    # 积分过期数据单独收集，不混进 results，避免影响原有成功/失败/跳过统计口径
+    expire_rows: List[Dict[str, Any]] = []
+    # 总积分汇总：[(账号序号, 总积分)]
+    points_rows: List[tuple] = []
 
     for index, server in enumerate(SERVERS, 1):
+        result: Optional[Dict[str, Any]] = None
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(server):
             log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
-            skipped.append({"server": server})
+            skipped.append({"server": server, "idx": index})
+            # 从打标缓存读回当天查到的过期数据，保证下午 cron 跳过时汇总仍能提醒
+            cached_expire = expire_from_done(server)
+            if cached_expire:
+                expire_rows.append({"idx": index, "server": server, **cached_expire})
+            # 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
+            cached_total = total_points_from_done(server)
+            if cached_total is not None:
+                points_rows.append((index, cached_total))
             continue
 
         try:
             result = run_account(index, len(SERVERS), server)
+            result["idx"] = index
             results.append(result)
             # 本脚本 result["success"] 恒为 True，签到是否真的成功只体现在 signMsg 里，
             # 所以只有「签到成功 / 今日已签到」才打标（异常路径已在上面 except 处理，不会走到这）。
@@ -920,12 +1478,23 @@ def main() -> None:
                 "token": "-",
                 "signMsg": "-",
                 "pointsMsg": "-",
+                "totalPoints": None,
+                "articleMsg": "-",
+                "expire": None,
                 "error": traceback.format_exc().strip(),
             })
         else:
             # 放在 else 里：打标失败不会把已成功的账号误记为失败
             if should_mark:
-                mark_done_today(server, sign_msg)
+                mark_done_today(server, sign_msg, expire=result.get("expire"),
+                                total_points=result.get("totalPoints"))
+
+        expire_info = result.get("expire") if isinstance(result, dict) else None
+        if isinstance(expire_info, dict):
+            expire_rows.append({"idx": index, "server": server, **expire_info})
+        total_points = result.get("totalPoints") if isinstance(result, dict) else None
+        if total_points is not None:
+            points_rows.append((index, total_points))
 
         if index < len(SERVERS):
             log("⏳ [间隔] 等待 2s 后处理下一个账号")
@@ -935,6 +1504,15 @@ def main() -> None:
     fail_count = len(results) - success_count
     log("📊 [执行汇总] 蜜蜂惊喜社 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
         % (len(SERVERS), success_count, fail_count, len(skipped)))
+    # 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+    for idx, total in points_rows:
+        log(f"💎 总积分({float(total):.2f})（账号{idx}）")
+    # 积分过期提醒：汇总打印 + 独立通知（上年有积分才提醒）
+    if expire_rows:
+        try:
+            check_expire_remind(expire_rows)
+        except Exception as exc:
+            warn(f"⚠️ [积分过期] 提醒处理异常: {exc}")
 
     print()
     log(ACC_RULE)
@@ -1124,6 +1702,13 @@ def _yyb_phone(server, *args, **kwargs):
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+if YYB_ONLY_REFS:
+    _wanted = {int(r) for r in YYB_ONLY_REFS}
+    SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+    if not SERVERS:
+        warn(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_yyb_accounts())} 个）")
 
 
 _yyb_original_get_code = get_code

@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  华润通
-# version: 2026-10-29a
+# version: 2026-11-17c
 # cron: 54 4,14 * * *
-# 积分有效期：获得起第3年的12月31日
+# 积分有效期：获得起第3年的12月31日（expiredPoints，每年12/25起检查提醒）【1+2】
 # =========================================================
 
 """
@@ -18,6 +18,7 @@
 依赖：requests、pycryptodome（仓库 requirements.txt 已声明）
 缓存：/ql/data/config/hrt_tokens.json，失效后会自动通过 YYB-Go-Enhanced 重新登录。
 功能：自动登录、查询签到状态、签到领积分，并输出签到前积分、本次增加积分、签到后积分。
+      积分过期提醒：每年 12/25 起检查 queryExpiredBalance 的 expiredPoints，>0 时打印汇总并强推通知。
 
 日志规范：[LEVEL] [HRT] message   （LEVEL: INFO / WARN / ERROR）
 
@@ -26,7 +27,8 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 import hashlib
 import hmac
 import json
@@ -50,6 +52,13 @@ from Crypto.Util.Padding import pad
 # 内部配置：直接改这里，省去去面板设环境变量
 # 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
 YYB_ONLY_REFS = []
+
+# ── 积分过期提醒（2026-11-17 新增）────────────────────────────
+# 依据 HAR：POST /api/points/expired/queryExpiredBalance 返回 {"expiredPoints": N}
+# 官方字段名叫 expiredPoints（字面"已过期"），此处按用户约定当作"即将过期积分"使用。
+# 规则：每年 12/25 开始检查，任一账号 expiredPoints > 0 即连续打印到汇总日志，并独立强推一次通知。
+ENABLE_EXPIRE_REMIND = True       # 是否开启积分过期提醒
+EXPIRE_REMIND_START_DAY = 25      # 每年 12 月从这一天开始检查（含），持续到月底
 
 APP_ID = "wx66c62601b987e69d"
 HRT_BASE = "https://mid.huaruntong.cn"
@@ -254,7 +263,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17c"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -266,6 +275,57 @@ def acc_banner(idx, total, ident=""):
 def acc_footer(idx, total):
     """打印账号分隔标识（结束）。"""
     log("🔚 账号 %d/%d 处理结束" % (idx, total))
+
+
+# ———————————— 积分过期提醒（第③项） ————————————
+def in_expire_window(today: Optional[date] = None) -> bool:
+    """今天是否落在过期提醒窗口：每年 12/25 起（含）到 12/31。
+
+    华润通积分"获得起第3年的12月31日"到期，故每年 12/25 起连续检查到月底。
+    """
+    if today is None:
+        today = date.today()
+    return today.month == 12 and today.day >= EXPIRE_REMIND_START_DAY
+
+
+def notify_expire_alert(lines: list) -> bool:
+    """积分过期提醒强推：独立于「只推 ERROR」的错误通知，命中即推。"""
+    if not lines or _qn_send is None:
+        return False
+    if not any(os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，积分过期提醒未推送（可在青龙「通知设置」或环境变量中配置）",
+              flush=True)
+        return False
+    title = "【%s】积分即将过期提醒" % _QN_SITE
+    body = "\n".join(lines)
+    try:
+        _qn_send(title, body)
+        return True
+    except Exception as _e:
+        print("[QL] 积分过期提醒推送失败：%s" % _e, flush=True)
+        return False
+
+
+def check_expire_remind(results: List[Dict[str, Any]]) -> None:
+    """12/25 起，任一账号 expiredPoints>0 则在汇总日志连续打印并强推提醒。"""
+    if not ENABLE_EXPIRE_REMIND or not in_expire_window():
+        return
+    hits = []
+    for r in results:
+        exp = r.get("expired")
+        if isinstance(exp, int) and exp > 0:
+            hits.append((r.get("label") or "账号", exp))
+    if not hits:
+        return
+    log(_ACC_RULE)
+    log("⏳ [积分过期提醒] 检测到即将过期的积分（华润通积分于获得后第3年12月31日到期）：")
+    for label, exp in hits:
+        log(f"   · {label}：{exp} 积分即将过期")
+    log(_ACC_RULE)
+    push_lines = ["检测到即将过期的积分（华润通积分于获得后第3年12月31日到期）："]
+    push_lines += [f"{label}：{exp} 积分即将过期" for label, exp in hits]
+    if notify_expire_alert(push_lines):
+        log("📣 [积分过期提醒] 已推送通知")
 
 
 def compact(value: Any) -> str:
@@ -401,8 +461,9 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", expired: Optional[int] = None,
+                    total_points: Any = None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存当天的 expiredPoints 与总积分，供跳过时读回）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -412,9 +473,33 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expired": expired,
+        "totalPoints": total_points,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def expired_from_done(server: str) -> Optional[int]:
+    """从当天打标记录里读回 expiredPoints（供本次被跳过、未走 run 的账号使用）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or "expired" not in entry:
+        return None
+    try:
+        return int(entry.get("expired") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def total_points_from_done(server: str) -> Optional[int]:
+    """从当天打标记录里读回总积分（供被跳过的账号在汇总里显示）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or "totalPoints" not in entry:
+        return None
+    try:
+        return int(entry.get("totalPoints"))
+    except (TypeError, ValueError):
+        return None
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -671,6 +756,25 @@ class HRT:
             raise RuntimeError("积分接口未返回可用积分")
         return int(value)
 
+    def expired_points(self) -> int:
+        """查即将过期积分（HAR 字段 expiredPoints，官方命名奇特，按约定当作"即将过期"）。
+
+        依据：POST /api/points/expired/queryExpiredBalance
+              {"sysId":"T0000001","channelId":"APP","token":...}
+              → {"expiredPoints": N}
+        失败返回 None（不抛异常），避免影响签到主流程。
+        """
+        try:
+            data = self.h5_post(
+                "/api/points/expired/queryExpiredBalance",
+                {"sysId": "T0000001", "channelId": "APP",
+                 "transactionUuid": str(uuid.uuid4()), "token": self.token},
+            )
+            return int(data.get("expiredPoints") or 0)
+        except Exception as exc:
+            warn(f"⚠️ [过期提醒] 查询即将过期积分失败：{safe_message(exc)}")
+            return None
+
     def sign_state(self) -> Dict[str, Any]:
         return self.h5_post(
             "/api/points/queryWeekSignin",
@@ -715,7 +819,9 @@ class HRT:
         added = after - before
         if not already and api_added > 0 and added == 0:
             added = api_added
-        return {"before": before, "added": added, "after": after, "already": already}
+        expired = self.expired_points()
+        return {"before": before, "added": added, "after": after, "already": already,
+                "expired": expired}
 
 
 def main() -> int:
@@ -739,11 +845,15 @@ def main() -> int:
     imported = [x.strip() for x in os.getenv("HRT_TOKEN", "").splitlines() if x.strip()]
     failures = 0
     skipped = 0
+    results: List[Dict[str, Any]] = []
     for pos, account in enumerate(accounts, 1):
         # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(account.ref):
             log(f"⏭️ [打标] 账号 {pos}/{len(accounts)} 今日任务已完成，跳过")
             skipped += 1
+            # 从打标缓存读回当天记录的 expiredPoints，保证下午跳过时也能提醒
+            results.append({"label": account.label, "expired": expired_from_done(account.ref),
+                            "total": total_points_from_done(account.ref)})
             continue
         acc_banner(pos, len(accounts), "标识：" + str(account.ref))
         client = HRT(account)
@@ -760,20 +870,42 @@ def main() -> int:
             log(f"📊 签到前积分：{result['before']}")
             log(f"🎁 本次增加积分：{result['added']}")
             log(f"📈 签到后积分：{result['after']}")
+            exp = result.get("expired")
+            if isinstance(exp, int) and exp > 0:
+                log(f"⏳ 即将过期积分：{exp}")
+            results.append({"label": account.label, "expired": exp,
+                            "total": result.get("after")})
             # 只有签到流程完整走完才算今日完成
-            mark_done_today(account.ref, status)
+            mark_done_today(account.ref, status, exp, result.get("after"))
         except Exception as exc:
             failures += 1
             err(f"❌ {account.label}：失败 · 原因：{safe_message(exc)}")
+            results.append({"label": account.label, "expired": None, "total": None})
         acc_footer(pos, len(accounts))
     success = len(accounts) - failures - skipped
     log(_ACC_RULE)
     log(f"📊 [执行汇总] 华润通 · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failures} ｜ 跳过 {skipped}")
+    # 总积分汇总（无论是否跳过、任务是否已完成，都在这里显示）
+    for idx, item in enumerate(results, 1):
+        total = item.get("total")
+        if total is None:
+            continue
+        log(f"💎 总积分({total})（{item.get('label') or '账号%d' % idx}）")
     log(_ACC_RULE)
+    # 积分过期提醒：12/25 起，任一账号 expiredPoints>0 则连续打印 + 强推
+    try:
+        check_expire_remind(results)
+    except Exception as _e:
+        warn(f"⚠️ [积分过期提醒] 检查异常：{_e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
+    _notify_tail = f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failures} ｜ 跳过 {skipped}"
+    _point_lines = [f"账号{i} 总积分 {item.get('total')}"
+                    for i, item in enumerate(results, 1) if item.get("total") is not None]
+    if _point_lines:
+        _notify_tail += "\n" + " ｜ ".join(_point_lines)
     flush_notify(
         "华润通",
-        f"账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failures} ｜ 跳过 {skipped}",
+        _notify_tail,
         logger=log,
     )
     return 1 if failures else 0

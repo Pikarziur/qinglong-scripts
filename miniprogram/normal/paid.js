@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  平安i动
-# version: 2026-11-15b
+# version: 2026-11-17c
 # cron: 42 5,15 * * *
-# 积分有效期：未知
+# 积分有效期：无明确说明
+# 检测过期积分：按惯例每年12/25~12/31连续检测并提醒；过期积分=现有余额积分
 =========================================================*/
 'use strict';
 /*
@@ -317,7 +318,10 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-11-15b';   // 更新脚本此值
+const SCRIPT_VER = '2026-11-17b';   // 更新脚本此值
+// 签到前健康币流水状态预检（2026-11-17）：getFlow 当天有「签到」入账则跳过签到写请求。
+// 已签跳过写请求避免二次执行数据；查询失败/查不到照常签到，不漏签。
+const ENABLE_SIGN_STATE_CHECK = true;
 const AES_PASS = '123456789aasdfgh';                               // 模块135常量 m.a
 const LOGIN_PUBKEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRxFgN1vGYDSkfH90SI9Ixr1wxyTah3+ShYIDvEL1cI4XCvXHfnBkGb6dQPsiNj1skENyF9zEEWv0jshvgpgNleDzd6vnJRf8LQtolFv4dWXzJwruGTCq6lYTM/K+4E8iaiXarD9z3fsR4nIUcu5QRRY1m//nLhRtxonva/ubO+QIDAQAB
@@ -327,6 +331,12 @@ const CACHE_FILE = path.join(__dirname, 'PAID_cookies.json');
 // 结构：{ "<openid>": {"date": "2026-11-07", "doneTime": "...", "note": "签到完成"} }
 // 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
 const DAILY_DONE_FILE = path.join(__dirname, 'paid_daily_done.json');
+
+// ── 健康币过期提醒（2026-11-17）────────────────────────────────
+// 平安i动无明确过期时间，按惯例年底清空：过期数 = 现有余额。
+// 仅每年 12/25~12/31（年尾最后 7 天，含当天）检查并连续提醒、独立强推。
+const ENABLE_EXPIRE_REMIND = true;
+const EXPIRE_REMIND_DAYS = 7;
 
 // ====================== 日打标（今日完成标记） ======================
 function _today() {
@@ -363,7 +373,7 @@ function is_done_today(key) {
   return String(entry.date || '') === _today();
 }
 
-function mark_done_today(key, note = '') {
+function mark_done_today(key, note = '', balance = null) {
   const cache = load_daily_done();
   const today = _today();
   // 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -377,9 +387,19 @@ function mark_done_today(key, note = '') {
     date: today,
     doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
     note: String(note || ''),
+    // 缓存健康币余额：跳过账号的过期提醒也能在汇总里显示，不重新登录取码
+    balance: (balance === null || balance === undefined) ? null : Number(balance),
   };
   save_daily_done(kept);
   logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
+}
+
+function balance_from_done(key) {
+  // 从当天打标记录读回健康币余额（供本次跳过账号的过期提醒）
+  const entry = load_daily_done()[key];
+  if (!entry || typeof entry !== 'object') return null;
+  const v = entry.balance;
+  return (v === null || v === undefined) ? null : Number(v);
 }
 
 function clear_daily_done(key = '') {
@@ -516,7 +536,7 @@ function serverUrl(serverType, apiPath){
   return `https://${sub}.lifeapp.pingan.com.cn${apiPath}`;
 }
 
-async function callApi(serverType, apiPath, { method = 'GET', data = null, auth = null } = {}){
+async function callApi(serverType, apiPath, { method = 'GET', data = null, auth = null, contentType = null } = {}){
   let url = serverUrl(serverType, apiPath);
   // GET: 参数拼进 URL query（ r += "?" + queryString），并参与签名
   if (method === 'GET' && data && Object.keys(data).length){
@@ -524,7 +544,7 @@ async function callApi(serverType, apiPath, { method = 'GET', data = null, auth 
     url += (url.includes('?') ? '&' : '?') + qs;
   }
   const headers = buildHeaders(method, url, method === 'GET' ? null : data, auth);
-  const ct = (method === 'POST') ? 'application/x-www-form-urlencoded' : 'application/json'; // 真机 POST 用 x-www-form-urlencoded（空 body 也如此）
+  const ct = contentType || ((method === 'POST') ? 'application/x-www-form-urlencoded' : 'application/json'); // 真机 POST 默认 x-www-form-urlencoded（空 body 也如此）；个别接口（如 getFlow）用 json，显式传 contentType 覆盖
   const opts = { method, headers: Object.assign({ 'Content-Type': ct }, headers) };
   if (method === 'POST') opts.body = typeof data === 'string' ? data : JSON.stringify(data || {});
   dbg('REQ', method, url, opts.body || '');
@@ -676,6 +696,44 @@ async function getCoinBalance(auth){
   return v == null ? 0 : v;
 }
 
+// 签到前只读状态预检：查健康币流水，判断今天是否有「签到」入账。
+// 真机 HAR 核实（quantumult-x-2026-11-17-2.har）：
+//   POST platform.lifeapp.pingan.com.cn/interest-asset/account/getFlow
+//   body {"assetTypeCode":"idMMB","offset":0,"size":10,"accountType":0}
+//   → CODE="00", DATA.list[] 每项 {balanceIncrese, sourceName:"签到", type:"01", createTime(ms)}
+//   同日 2026-11-17 05:42:47 有签到+10 一条，据此判「今日已签」。
+// 头走 callApi 现有 X-Sign 体系（与签到接口同款）；body 为真机 json，显式 contentType='application/json'。
+// 返回 true=今日已签 / false=今日未签 / null=查询失败（后者照常签到，防漏签）。
+function _beijingDayRangeMs(){
+  const now = new Date();
+  const local = new Date(now.getTime() + 8 * 3600 * 1000); // 北京时间
+  const y = local.getUTCFullYear(), m = local.getUTCMonth(), d = local.getUTCDate();
+  const startUtcMs = Date.UTC(y, m, d) - 8 * 3600 * 1000;   // 北京当天 00:00 对应的时刻(ms)
+  return [startUtcMs, startUtcMs + 24 * 3600 * 1000];
+}
+async function signedTodayByFlow(auth){
+  try {
+    const j = await callApi('SpringCloud_platform', '/interest-asset/account/getFlow', {
+      method: 'POST',
+      data: { assetTypeCode: 'idMMB', offset: 0, size: 10, accountType: 0 },
+      auth,
+      contentType: 'application/json'
+    });
+    if (!j || j.CODE !== '00' || !j.DATA || !Array.isArray(j.DATA.list)) return null;
+    const [start, end] = _beijingDayRangeMs();
+    for (const r of j.DATA.list){
+      if (String(r.sourceName || '') !== '签到') continue;
+      const t = Number(r.createTime);
+      if (!Number.isFinite(t)) continue;
+      if (t >= start && t < end) return true;
+    }
+    return false;
+  } catch (e){
+    dbg('getFlow 预检异常: ' + (e && e.message ? e.message : e));
+    return null;
+  }
+}
+
 // 每日签到（POST /health-core/ledong/healthStep/step/completeJgjStepSignInTask，空 body，X-Timestamp 毫秒级）
 //   返回 00=成功（计入健康币）；MSG 含"已签到"=今日已签；token 失效返回 CODE=10000「登录失效」
 async function doSignIn(auth){
@@ -702,6 +760,7 @@ async function runOne(account, cache, tkmap){
   const line = [];           // 本账号输出行
   let auth = null, src = '';
   let success = true, failMsg = '';
+  let alreadySigned = false; // 状态预检命中今日已签：跳过签到写请求，main 计入 skipped
 
   try {
     // ① 兜底 TOKEN（最高优先级：命中即跳过登录、不写缓存，避免污染本地 cookie）
@@ -729,6 +788,23 @@ async function runOne(account, cache, tkmap){
     // 初始健康币（用户总币，与"我的健康币"页一致）
     const initBalance = await getCoinBalance(auth);
     line.push('💰 初始健康币: ' + initBalance);
+
+    // 签到前状态预检（只读）：健康币流水今天有「签到」入账则跳过签到写请求，
+    // 避免服务端收到二次执行数据。查询失败/查不到一律照常签到，不漏签。
+    if (ENABLE_SIGN_STATE_CHECK){
+      const signedToday = await signedTodayByFlow(auth);
+      if (signedToday === true){
+        alreadySigned = true;
+        line.push('⏭️ [状态预检] 今日已有签到健康币记录，跳过签到请求');
+        const finalBalance = await getCoinBalance(auth);
+        line.push(`💰 签到前 ${initBalance}｜本次增加 +0｜当前 ${finalBalance}`);
+        return { line, success, failMsg, openid, alreadySigned, balance: finalBalance };
+      } else if (signedToday === false){
+        line.push('🔍 [状态预检] 今日无签到记录，继续签到');
+      } else {
+        line.push('⚠️ [状态预检] 流水查询失败，照常签到');
+      }
+    }
 
     // 每日签到（最基础动作，独立于任务列表； completeJgjStepSignInTask 为无参 GET）
     //   签到接口严格校验 token：若返回「登录失效」说明缓存已过期 → 清缓存并重登一次（更新 auth 供后续领取用）
@@ -773,6 +849,7 @@ async function runOne(account, cache, tkmap){
     const finalBalance = await getCoinBalance(auth);
     const todayAdd = finalBalance - initBalance;
     line.push(`💰 签到前 ${initBalance}｜本次增加 +${todayAdd >= 0 ? todayAdd : 0}｜当前 ${finalBalance}`);
+    return { line, success, failMsg, openid, alreadySigned, balance: finalBalance };
 
   } catch (e){
     success = false; failMsg = e.message;
@@ -781,14 +858,65 @@ async function runOne(account, cache, tkmap){
     if (cache[openid]) { delete cache[openid]; saveCache(cache); }
   }
 
-  return { line, success, failMsg, openid };
+  return { line, success, failMsg, openid, alreadySigned };
 }
 
 // ============================== 主流程 ==============================
-async function finishSummary(total, okCount, skipped = 0){
+// 是否落在年尾最后 N 天（12/25~12/31，含 12/31 当天）
+function inExpireWindow(now = new Date()){
+  if (now.getMonth() !== 11) return false;
+  const lastDay = new Date(now.getFullYear(), 12, 0).getDate(); // 12 月最后一天
+  return now.getDate() > lastDay - EXPIRE_REMIND_DAYS;
+}
+
+// 过期提醒强推：独立于「只推 ERROR」的错误通知，命中即推
+async function notifyExpireAlert(lines){
+  if (!_QN_ENABLED || !_qnNotify) return false;
+  if (!_QN_ENVS.some((k) => process.env[k])) {
+    console.log('[QL] 未配置通知渠道，过期提醒未推送（可在青龙「通知设置」或环境变量中配置）');
+    return false;
+  }
+  try {
+    await _qnNotify('【' + _QN_SITE + '】健康币即将过期提醒', lines.join('\n'));
+    return true;
+  } catch (e){
+    console.log('[QL] 过期提醒推送失败：' + (e && e.message ? e.message : e));
+    return false;
+  }
+}
+
+// 年尾窗口内：过期数=现有余额，任一账号余额>0 则汇总打印 + 强推
+async function checkExpireRemind(rows){
+  if (!ENABLE_EXPIRE_REMIND || !inExpireWindow()) return;
+  const hits = (rows || []).filter((r) => r && Number.isFinite(r.balance) && r.balance > 0);
+  if (!hits.length) return;
+  const year = new Date().getFullYear();
+  logInfo(ACC_RULE);
+  logInfo(`⏳ [健康币过期提醒] 检测到现有健康币将于 ${year}-12-31 清零（过期数=现有余额）：`);
+  hits.forEach((r) => logInfo(`   · ${r.label}：${r.balance} 健康币即将过期`));
+  logInfo(ACC_RULE);
+  const lines = [`检测到现有健康币将于 ${year}-12-31 清零（过期数=现有余额）：`];
+  lines.push(...hits.map((r) => `${r.label}：${r.balance} 健康币即将过期`));
+  if (await notifyExpireAlert(lines)) logInfo('📣 [健康币过期提醒] 通知已推送');
+}
+
+async function finishSummary(total, okCount, skipped = 0, expireRows = []){
   const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 失败 ${total - okCount - skipped} ｜ 跳过 ${skipped}`;
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] 平安i动 · ${tail}`);
+  // 汇总类别里打印每个账号的总积分
+  for (const r of results) {
+    const bal = r.balance ?? r.snapshotBalance;
+    if (bal !== null && bal !== undefined) {
+      logInfo(`💰 [总积分] ${r.label}：${bal}`);
+    }
+  }
+  // 过期提醒打印在汇总类别内：年尾最后 7 天、余额>0 才提醒，连续提醒 + 独立强推
+  try {
+    await checkExpireRemind(expireRows);
+  } catch (e){
+    logWarn(`⚠️ [健康币过期提醒] 检查异常：${e && e.message ? e.message : e}`);
+  }
   logInfo(ACC_RULE);
   // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
   await flushNotify(_QN_SITE, tail, logInfo);
@@ -823,14 +951,18 @@ async function main(){
 
   let okCount = 0;
   let skipped = 0;
+  const expireRows = []; // 过期提醒数据：{ label, balance }
   for (let idx = 0; idx < accounts.length; idx++){
     const account = accounts[idx];
     // 今天已经跑完的账号直接跳过，不再发起 YYB 取码/登录请求（取码本身无次数配额上限）
     // key 与 PAID_cookies.json 缓存口径一致（openid = account.ref）
     const doneKey = account.ref;
+    const label = `账号 ${idx + 1}` + (account.note ? `（${account.note}）` : '');
     if (is_done_today(doneKey)) {
       logInfo(`⏭️ [打标] 账号 ${idx + 1}/${total} 今日任务已完成，跳过`);
       skipped++;
+      // 跳过账号从打标缓存读回余额，保证汇总的过期提醒仍连续
+      expireRows.push({ label, balance: balance_from_done(doneKey) });
       continue;
     }
     logInfo(ACC_RULE);
@@ -838,10 +970,15 @@ async function main(){
     logInfo(ACC_RULE);
     const r = await runOne(account, cache, tkmap);
     r.line.forEach(logLine);
-    if (r.success) {
+    expireRows.push({ label, balance: r.balance });
+    if (r.alreadySigned) {
+      // 状态预检命中今日已签：跳过写请求，计入跳过并补打标（与日打标同口径）
+      skipped++;
+      mark_done_today(doneKey, '今日已签到（状态预检）', r.balance);
+    } else if (r.success) {
       okCount++;
       // 签到成功（含今日已签到）才算今日完成
-      mark_done_today(doneKey, '签到完成');
+      mark_done_today(doneKey, '签到完成', r.balance);
     }
     if (idx < accounts.length - 1){
       const configuredDelay = ACCOUNT_DELAY === undefined ? NaN : Number(ACCOUNT_DELAY);
@@ -850,7 +987,7 @@ async function main(){
     }
   }
 
-  await finishSummary(total, okCount, skipped);
+  await finishSummary(total, okCount, skipped, expireRows);
   // 跳过不算失败：仅当有真实失败账号时才置退出码
   if (total - okCount - skipped > 0) process.exitCode = 1;
 }

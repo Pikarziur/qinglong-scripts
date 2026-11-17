@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  中免会员
-# version: 2026-11-16c
+# version: 2026-11-17e
 # cron: 6 4,14 * * *
-# 积分有效期：获得起3年内（36 个自然月）
+# 积分有效期：积分到账后36个自然月有效（到期日 = 到账日 + 3 年同月同日）【1+2】
+# 检测过期积分：到期日前 7 天起每天检测、到期日前一天停（当天不提醒），提醒量=账户现有总积分；整池三年清空一次，检测年份按 2028 → 2031 → 2034 → 2037 → 2040 … 递推（每轮窗口固定 12-25 ~ 12-31）
 # =========================================================
 
 # 任务流程：
@@ -12,9 +13,12 @@
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取每个账号的 wx.login code
 #   3. 用 code 请求登录接口换取会员 token（每次运行强制重新登录，不落盘）
 #   4. 调用签到接口完成每日签到，并查询今日是否已签 / 连续签到天数
-#   5. 查询「预过期积分」明细，若最近一笔到期日距今 ≤ EXPIRE_WARN_DAYS 天，
+#   5. 查询「预过期积分」明细取最近一笔到期日，若距今在 1~EXPIRE_WARN_DAYS 天之间（到期前一天停止），
+#      即将过期积分金额直接套用「账户现有总积分」统计（不拆到期日分组），
 #      在汇总下方输出 💰 提醒，并强制推送一次汇总通知（无错误也推）；
 #      接口只读，不消耗取码配额
+#   6. 查询账户积分总览（总积分 / 即将过期 / 累计获得 / 累计消耗），只取总积分写入
+#      日打标缓存（当天第二轮被跳过时直接读回，汇总里仍打印 💎 总积分）
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行 / 空格 / & 分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
@@ -70,9 +74,23 @@ SIGN_RECORD_URL = "https://" + HOST + "/api/user/signRecord"
 # ——— 预过期积分提醒（2026-11-16 新增）————————————————————
 # 真机抓包：POST /api/points/expirePointsList，无请求体，
 # 返回 data[] = [{"balanceUnit":"10.00","expireDate":"2029-03-31 00:00:00"}, ...]
+# 本接口只用来定「最近一笔到期日」（决定是否进入提醒窗口），
+# 提醒金额用账户总积分（balance），见 user/info/v3
 EXPIRE_POINTS_URL = "https://" + HOST + "/api/points/expirePointsList"
 EXPIRE_PAGE_URL   = "packages/list-view/integral-past/integral-past"
-EXPIRE_WARN_DAYS  = 7     # 最近一笔到期日距今 ≤ N 天（0~N）才提醒；已过期不提醒
+EXPIRE_WARN_DAYS  = 7     # 最近一笔到期日距今在 1~N 天之间才提醒（到期日-7 天起、到期前一天止）；已过期不提醒
+
+# ——— 账户积分总览（2026-11-17 新增）———————————————————————
+# 真机抓包：POST /api/user/info/v3，无请求体、无 query 参数，
+# x-access-token 鉴权，pageUrl = packages/list-view/integral-detail/integral-detail
+# 返回 data.points = {balance, balanceShow, frozenBalance,
+#                     expireBalance, totalAdd, totalConsume}
+#   balance       账户总积分（可用余额）
+#   expireBalance 即将过期积分合计（只有金额，没有到期日）
+#   totalAdd      累计获得积分
+#   totalConsume 累计消耗积分
+USER_INFO_URL      = "https://" + HOST + "/api/user/info/v3"
+USER_INFO_PAGE_URL = "packages/list-view/integral-detail/integral-detail"
 
 # 日打标文件：今日已完成的账号当天再次运行时直接跳过（不消耗 YYB 取码配额）
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -222,7 +240,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-16c"
+SCRIPT_VER = "2026-11-17e"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -282,11 +300,13 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "", expire_info: Dict[str, Any] = None) -> None:
+def mark_done_today(server: str, note: str = "", expire_info: Dict[str, Any] = None,
+                    points_info: Dict[str, Any] = None) -> None:
     """给该账号打上「今日已完成」标记；顺带缓存本轮查到的最近一笔预过期积分。
 
     缓存 expireInfo 是为了让当天第二轮（账号被日打标跳过、不重新登录）也能
     在汇总下输出提醒，而不额外消耗 YYB 取码配额；跨天会随打标记录一起清理。
+    pointsInfo 同理：缓存账户积分总览，跳过时直接读回打印。
     """
     cache = load_daily_done()
     today = _today()
@@ -298,6 +318,7 @@ def mark_done_today(server: str, note: str = "", expire_info: Dict[str, Any] = N
         "doneTime": now_text(),
         "note": str(note or ""),
         "expireInfo": expire_info if isinstance(expire_info, dict) else None,
+        "pointsInfo": points_info if isinstance(points_info, dict) else None,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -536,6 +557,8 @@ def get_nearest_expire_points(token):
     """查询「最近一笔」预过期积分（纯只读接口）。
 
     返回 {"date": "YYYY-MM-DD", "amount": float, "days": int}；
+    注：返回的 amount 是「该到期日分组」的明细金额，仅供对照；
+    正式提醒金额在调用方统一改写为「账户总积分」（balance）。
     接口不可用 / 无明细 / 日期无法解析时返回 None，只记一行 WARN，不影响签到。
     """
     h = _common_headers(token, page=EXPIRE_PAGE_URL)
@@ -576,21 +599,80 @@ def get_nearest_expire_points(token):
     }
 
 
+def get_points_info(token):
+    """查询账户积分总览（纯只读接口）。
+
+    返回 {"balance", "expireBalance", "totalAdd", "totalConsume"}（均为 float）；
+    接口不可用 / 响应缺字段时返回 None，只记一行 WARN，不影响签到结果。
+    """
+    h = _common_headers(token, page=USER_INFO_PAGE_URL)
+    h["content-type"] = "application/x-www-form-urlencoded"
+    try:
+        # 真机抓包：Content-Length: 0，无请求体、无 query 参数
+        r = requests.post(USER_INFO_URL, data="", headers=h, timeout=(10, 30))
+        jr = _parse(r)
+    except Exception as exc:
+        warn("⚠️ [积分] 查询失败: " + str(exc)[:120])
+        return None
+    if not isinstance(jr, dict):
+        warn("⚠️ [积分] 响应非 JSON")
+        return None
+    ok, _, _ = _ok(jr)
+    data = jr.get("data") if isinstance(jr.get("data"), dict) else None
+    if not ok or not isinstance(data, dict):
+        warn("⚠️ [积分] 接口未返回数据（code=%s）" % jr.get("code"))
+        return None
+    p = data.get("points")
+    if not isinstance(p, dict):
+        warn("⚠️ [积分] 响应里没有 points 字段")
+        return None
+
+    def _num(v):
+        try:
+            return float(str(v).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "balance": _num(p.get("balance")),
+        "expireBalance": _num(p.get("expireBalance")),
+        "totalAdd": _num(p.get("totalAdd")),
+        "totalConsume": _num(p.get("totalConsume")),
+    }
+
+
 def is_expire_alert(info) -> bool:
-    """最近一笔到期日距今 0~EXPIRE_WARN_DAYS 天才提醒（含今天到期，已过期不提醒）。"""
+    """最近一笔到期日距今 1~EXPIRE_WARN_DAYS 天才提醒。
+
+    提醒窗口整体前移一天：从「到期日-7天」开始，到「到期日-1天」结束，
+    到期当天（days=0）不再提醒。这样窗口不会跨年，便于按年算出检测时间。
+
+    days 为 None = 没拿到到期日（服务端 expireBalance > 0 但明细接口无数据），
+    这种情况下只要有余额就提醒。
+    """
     if not isinstance(info, dict):
         return False
+    days = info.get("days")
+    if days is None:
+        try:
+            return float(info.get("amount") or 0) > 0
+        except (TypeError, ValueError):
+            return False
     try:
-        days = int(info.get("days"))
+        days = int(days)
     except (ValueError, TypeError):
         return False
-    return 0 <= days <= EXPIRE_WARN_DAYS
+    # days=0 是到期当天（不提醒）；1~7 天才提醒
+    return 1 <= days <= EXPIRE_WARN_DAYS
 
 
 def expire_alert_line(info: Dict[str, Any], idx: int) -> str:
     """按约定格式生成提醒行：💰 积分(10.00)即将过期： 2029-03-31（账号1）"""
-    return "💰 积分(%.2f)即将过期： %s（账号%d）" % (float(info.get("amount") or 0),
-                                              str(info.get("date") or ""), idx)
+    amount = float(info.get("amount") or 0)
+    date = str(info.get("date") or "")
+    if date:
+        return "💰 积分(%.2f)即将过期： %s（账号%d）" % (amount, date, idx)
+    return "💰 积分(%.2f)即将过期： 到期日未知（账号%d）" % (amount, idx)
 
 
 def ensure_token(server, ref):
@@ -616,7 +698,7 @@ def run_account(server, ref):
     if not token:
         brief = " ".join(str(status_msg).split())[:80]
         err("❌ 账号不可用 · 原因: " + brief)
-        return False, "ref " + str(ref) + ": ❌ " + brief, "", None
+        return False, "ref " + str(ref) + ": ❌ " + brief, "", None, None
     # 登录状态一行简注（每次都是新登录）
     log("🔑 登录态 · " + status_msg)
     t_short, t_long, _ = today_str()
@@ -624,25 +706,54 @@ def run_account(server, ref):
     sym1 = "✅" if before else "⭕"
     log("📊 签到前 · 今日(" + t_short + ") " + sym1
         + ("  signText=" + str(txt) if txt is not None else ""))
-    status, msg, extra = do_sign(token)
-    emoji, tag = _status_emoji_and_tag(status)
-    line = emoji + " " + tag + "  ──  服务端 msg: " + (msg or "")
-    if status in ("成功", "已签"):
-        log(line)
+    if before:
+        # 2026-11-17a：签到前状态接口明确今日已签 → 跳过 do_sign 写请求，避免重复提交。
+        # signIn 字段可能是 True 或 1，统一用 truthy 判断；查询失败返回 None、未签返回 0/False
+        # 都不跳过，仍走原签到逻辑（宁可服务端返回"已签"，也不漏签）。
+        status, msg = "已签", "签到前状态确认今日已签，跳过签到请求"
+        log("🟡 今日已签  ──  " + msg + "，本次不重复提交")
     else:
-        err(line)
-    for one in extra:
-        log("🎁 " + one)
-    after, txt2 = get_today_done(token)
-    sym2 = "✅" if after else "⭕"
-    log("📊 签到后 · 今日(" + t_short + ") " + sym2
-        + ("  signText=" + str(txt2) if txt2 is not None else ""))
-    # 如果之前没签 / 之后签了，加一行 🎉 高亮
-    if before is False and after is True:
-        log("🎉 本账号首次签到成功！")
+        status, msg, extra = do_sign(token)
+        emoji, tag = _status_emoji_and_tag(status)
+        line = emoji + " " + tag + "  ──  服务端 msg: " + (msg or "")
+        if status in ("成功", "已签"):
+            log(line)
+        else:
+            err(line)
+        for one in extra:
+            log("🎁 " + one)
+        after, txt2 = get_today_done(token)
+        sym2 = "✅" if after else "⭕"
+        log("📊 签到后 · 今日(" + t_short + ") " + sym2
+            + ("  signText=" + str(txt2) if txt2 is not None else ""))
+        # 如果之前没签 / 之后签了，加一行 🎉 高亮
+        if before is False and after is True:
+            log("🎉 本账号首次签到成功！")
+    emoji, tag = _status_emoji_and_tag(status)
     # 预过期积分只在本账号已拿到 token 时查一次；失败只 WARN，不改签到结果
     expire_info = get_nearest_expire_points(token)
-    return True, "ref " + str(ref) + ": " + emoji + " " + tag, status, expire_info
+    # 账户积分总览（总积分 / 即将过期 / 累计获得 / 累计消耗）；失败只 WARN
+    points_info = get_points_info(token)
+    if points_info:
+        # 统计口径（用户约定）：即将过期积分直接套用账户现有总积分，
+        # 不再拆到期日分组统计（整池三年清空、到期前手动消费的模式下，
+        # 提醒量就是全部待消费积分）；明细接口只用来定「最近一笔到期日」。
+        total_balance = points_info.get("balance", 0)
+        if expire_info:
+            detail_amount = expire_info.get("amount", 0)
+            expire_info["amount"] = total_balance
+            expire_info["detailAmount"] = detail_amount
+            log("ℹ️ [预过期积分] 最近到期日 %s，统计口径=账户总积分 %.2f"
+                "（该批明细 %.2f）"
+                % (str(expire_info.get("date") or "未知"), total_balance, detail_amount))
+        elif points_info.get("expireBalance", 0) > 0:
+            # 明细接口没给出任何条目、但服务端 expireBalance > 0 时，
+            # 同样用账户总积分统计（只缺到期日，有余额就提醒）
+            expire_info = {"date": "", "amount": total_balance, "days": None,
+                           "detailAmount": points_info.get("expireBalance", 0)}
+            warn("⚠️ [预过期积分] 明细接口无数据，改用账户总积分 %.2f 提醒"
+                 % total_balance)
+    return True, "ref " + str(ref) + ": " + emoji + " " + tag, status, expire_info, points_info
 
 def main():
     log_startup()
@@ -665,6 +776,7 @@ def main():
     success = 0
     skipped = 0
     expire_alerts = []   # [(账号序号, 最近一笔预过期积分信息)]
+    points_rows = []     # [(账号序号, 总积分)]
     for i, (server, ref, _) in enumerate(entries, start=1):
         # 今日已成功签到的账号直接跳过，不再消耗 YYB 取码配额
         key = "%s@%s" % (server, ref)
@@ -676,17 +788,22 @@ def main():
             info = cached.get("expireInfo") if isinstance(cached, dict) else None
             if is_expire_alert(info):
                 expire_alerts.append((i, info))
+            pinfo = cached.get("pointsInfo") if isinstance(cached, dict) else None
+            if isinstance(pinfo, dict) and pinfo:
+                points_rows.append((i, float(pinfo.get("balance") or 0)))
             continue
         acc_banner(i, total, "标识：" + str(ref))
         try:
-            ok, line, status, expire_info = run_account(server, ref)
+            ok, line, status, expire_info, points_info = run_account(server, ref)
             if ok:
                 success += 1
             # 只有服务端明确返回「签到成功 / 今日已签到」才算今日完成
             if status in ("成功", "已签"):
-                mark_done_today(key, line, expire_info)
+                mark_done_today(key, line, expire_info, points_info)
             if is_expire_alert(expire_info):
                 expire_alerts.append((i, expire_info))
+            if isinstance(points_info, dict):
+                points_rows.append((i, float(points_info.get("balance") or 0)))
         except Exception as e:
             err("💥 账号异常: " + str(e))
             err(traceback.format_exc())
@@ -699,6 +816,9 @@ def main():
     fail = total - success - skipped
     log(_ACC_RULE)
     log(f"📊 [执行汇总] 中免会员 · 账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}")
+    # 账户总积分汇总（每个账号一行，便于对比）
+    for idx, bal in points_rows:
+        log("💎 总积分(%.2f)（账号%d）" % (bal, idx))
     # 预过期积分提醒：只在最近一笔到期日距今 ≤ EXPIRE_WARN_DAYS 天时输出
     for idx, info in expire_alerts:
         log(expire_alert_line(info, idx))
@@ -706,6 +826,9 @@ def main():
 
     # 通知：有 ERROR 照旧推；检测到积分即将过期时，即使全成功也强制推一次汇总
     notify_summary = f"账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}"
+    if points_rows:
+        notify_summary += "\n" + " ｜ ".join(
+            "账号%d 总积分 %.2f" % (idx, bal) for idx, bal in points_rows)
     if expire_alerts:
         notify_summary += "\n" + "\n".join(
             expire_alert_line(info, idx) for idx, info in expire_alerts)

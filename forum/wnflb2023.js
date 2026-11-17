@@ -10,13 +10,15 @@ function logStartup(total) {
 const ACC_RULE = '='.repeat(70);
 /*=========================================================
 # name:  福利吧
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 10 0 * * *
 =========================================================*/
 
 // ────────────────────────────────────────────
 // 【测试版】与 forum/wnflb2023.js 的差异：
 //   · Cookie 三级兜底：本地缓存（主） → 账号密码登录（辅） → WNFLB_COOKIE 环境变量（最后兜底）
+//   · 图片验证码自动识别（2026-11-17a）：登录页要求 seccode 时，取图 → 本地 python3 + ddddocr
+//     识别 → 随登录提交；图片全程内存、不落盘。需青龙容器装 ddddocr（pip install --user ddddocr）
 //   · 无代理（N1 容器实测直连 200 / 1.12s；走 mihomo 7890 反而 6.38s）
 //   · 通知：只推错误日志（执行出错才发），由青龙自带通知模块在收尾推送
 //   · 响应按声明的 charset 解码（本站实测为 utf-8，保留兼容以防站点换编码）
@@ -32,7 +34,7 @@ const ACC_RULE = '='.repeat(70);
 // 任务流程：
 //   1. 取 Cookie，按此顺序：
 //        ① 本地缓存（命中即用，不发任何网络请求）
-//        ② 账号密码登录（缓存缺失/失效时；成功写回缓存供下次使用）
+//        ② 账号密码登录（缓存缺失/失效时；含图片验证码自动识别；成功写回缓存供下次使用）
 //        ③ WNFLB_COOKIE 环境变量（只有①②都拿不到时才用，**不写回缓存**）
 //   2. 访问论坛首页，正则提取签到所需的 formhash
 //   3. 请求 fx_checkin 签到接口完成每日签到
@@ -49,6 +51,9 @@ const ACC_RULE = '='.repeat(70);
 //   WNFLB_PROBE         可选。=1 仅预检：网络诊断（DNS + 4 种地址族/URL 组合）+ 登录页 formhash，不登录、不签到
 //   WNFLB_DUMP_SIGN     可选。=1 签到成功/已签到时也把服务器响应原文打出来（默认关，排查用）
 //   WNFLB_TIMEOUT       可选。单次请求超时毫秒，默认 20000
+//   WNFLB_CAPTCHA       可选。=off 关闭图片验证码自动识别（退回旧登录）；默认自动识别
+//   WNFLB_CAPTCHA_TIMEOUT 可选。ddddocr 识别子进程超时毫秒，默认 30000
+//   WNFLB_LOGIN_ONLY    可选。=1 只验证登录链路（拿 auth 即退出，不签到、不写缓存），调试/验收用
 //   WNFLB_IPV6          可选。=1 不强制 IPv4，完全按系统默认地址族走（默认优先 IPv4）
 //   MY_PROXY            可选。http 代理（CONNECT 隧道），如 http://192.168.31.233:7890；直连不通时靠它。
 //                       与仓库其他脚本（southplus.py / xsijishe.py）统一用这个变量名
@@ -64,6 +69,7 @@ const ACC_RULE = '='.repeat(70);
 const https = require('https');
 const http = require('http');
 const tls = require('tls');
+const { spawnSync } = require('child_process');
 
 // ———————————— 错误通知（可选项，想用则用）————————————
 // 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
@@ -197,7 +203,7 @@ const { URL } = require('url');
 // ========== 配置 ==========
 // 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 // （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-const SCRIPT_VER = '2026-10-29a';
+const SCRIPT_VER = '2026-11-17a';
 // 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
 const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -224,6 +230,23 @@ const PROXY_DESC = NO_PROXY ? '已按 WNFLB_NO_PROXY=1 强制直连'
 // 本站 CDN 有 IPv4，故优先打 IPv4；第 2 次重试换回系统默认（auto），两个方向都留兜底。
 // 设 WNFLB_IPV6=1 则不强制，完全按系统默认走。
 const FAMILY_SEQ = truthy(process.env.WNFLB_IPV6) ? [0] : [4, 0];
+
+// ========== 图片验证码自动识别（ddddocr）==========
+// 站点登录页某些时候要求图片验证码（Discuz seccode）。识别走本地 python3 + ddddocr：
+//   · python 依赖必须装在青龙持久化目录（pip install --user ddddocr，即 /ql/data/dep_cache/python3）
+//   · 图片**全程内存**：下载到 Buffer → base64 经 stdin 传给 python → 识别码从 stdout 读回，
+//     不落任何临时文件，因此不存在「缓存越来越大」的问题。
+//   · WNFLB_CAPTCHA=off 可强制关闭自动识别（退回旧的纯账号密码登录，排查用）。
+const CAPTCHA_OFF = String(process.env.WNFLB_CAPTCHA || '').trim().toLowerCase() === 'off';
+const CAPTCHA_PY_TIMEOUT = Math.max(5000, parseInt(process.env.WNFLB_CAPTCHA_TIMEOUT || '30000', 10) || 30000);
+// ddddocr 初始化会打印广告横幅，show_ad=False 可抑制；只把识别码 print 到 stdout，其余走 stderr。
+const CAPTCHA_PY = [
+    'import sys, base64, ddddocr',
+    'raw = sys.stdin.buffer.read()',
+    'img = base64.b64decode(raw)',
+    'ocr = ddddocr.DdddOcr(show_ad=False)',
+    'sys.stdout.write(ocr.classification(img))',
+].join('\n');
 
 let COOKIE = '';                            // 当前生效的 Cookie（发送时使用）
 
@@ -370,6 +393,7 @@ function readCache() {
 
 function writeCache(cookie, source) {
     if (!cookie) return;
+    if (truthy(process.env.WNFLB_LOGIN_ONLY)) return;   // 验收模式：绝不写缓存，保持零副作用
     try {
         fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
         const payload = JSON.stringify({
@@ -583,6 +607,80 @@ function isAuthValid(cookieStr) {
     return !!v && !isDeletedCookieVal(v);
 }
 
+// ========== 图片验证码：取图 + 本地识别（全程内存，不落盘）==========
+// 用 ddddocr 识别登录页的 seccode 图片。图片 buf 经 base64 走 stdin 传入 python，
+// 识别码从 stdout 读回；show_ad=False 已关掉广告横幅，stdout 只有识别结果。
+// 返回识别字符串，失败返回 ''（调用方据此决定是否降级/重试）。
+function recognizeCaptcha(imgBuf) {
+    if (!imgBuf || !imgBuf.length) return '';
+    try {
+        const r = spawnSync('python3', ['-c', CAPTCHA_PY], {
+            input: Buffer.from(imgBuf).toString('base64'),
+            encoding: 'utf8',
+            timeout: CAPTCHA_PY_TIMEOUT,
+            maxBuffer: 1024 * 64,
+        });
+        const code = String((r.stdout || '')).trim();
+        if (r.error) {
+            warn(`⚠️ 验证码识别进程启动失败: ${r.error.message}（确认已 pip install --user ddddocr）`);
+            return '';
+        }
+        if (r.status !== 0) {
+            const tail = String(r.stderr || '').trim().split('\n').slice(-2).join(' | ');
+            warn(`⚠️ 验证码识别进程退出码 ${r.status}: ${tail}`);
+            return '';
+        }
+        if (!code) {
+            warn('⚠️ 验证码识别返回空结果');
+            return '';
+        }
+        return code;
+    } catch (e) {
+        warn(`⚠️ 验证码识别异常: ${e.message}`);
+        return '';
+    }
+}
+
+// 走登录页同一个 jar 取验证码图片。返回 { idhash, imgBuf } 或 null。
+// Discuz 流程：登录页有 updateseccode('IDHASH', ...) → GET misc.php?mod=seccode&action=update
+// 返回的 JS 里含图片 src（misc.php?mod=seccode&update=N&idhash=IDHASH）→ GET 图片得 PNG。
+// ⚠️ 必须复用外层登录 jar：验证码与登录提交绑定同一个 sid，update/取图刷新的 Cookie 也要留在这个 jar 里。
+async function fetchSeccode(pageText, jar, loginPageUrl) {
+    const m = pageText.match(/updateseccode\(['"]([^'"]+)['"]/);
+    if (!m) return null;                       // 登录页无验证码容器 → 不需要识别
+    const idhash = m[1];
+    const cookie = jar.toString();
+    try {
+        const updUrl = `${SITE}/misc.php?mod=seccode&action=update&idhash=${encodeURIComponent(idhash)}&inajax=1&ajaxtarget=seccode_${encodeURIComponent(idhash)}`;
+        const upd = await request(updUrl, { cookie, headers: { 'Referer': loginPageUrl, 'X-Requested-With': 'XMLHttpRequest' } });
+        jar.absorb(upd.headers);
+        const updText = textOf(upd);
+        const im = updText.match(/src=["']([^"']*mod=seccode[^"']*)["']/i);
+        if (!im) {
+            warn(`⚠️ 验证码 update 响应里未找到图片 src（HTTP ${upd.status}）`);
+            return null;
+        }
+        let imgPath = im[1].replace(/^.*?misc\.php/i, 'misc.php').replace(/&amp;/g, '&');
+        if (/^https?:\/\//i.test(im[1])) {
+            // 极端情况：服务端给了绝对地址，直接用它
+            const imgResp = await request(im[1], { cookie: jar.toString(), headers: { 'Referer': loginPageUrl } });
+            jar.absorb(imgResp.headers);
+            return { idhash, imgBuf: imgResp.raw };
+        }
+        const imgUrl = SITE + '/' + imgPath;
+        const imgResp = await request(imgUrl, { cookie: jar.toString(), headers: { 'Referer': loginPageUrl } });
+        jar.absorb(imgResp.headers);
+        if (!imgResp.raw || imgResp.raw.length < 50) {
+            warn(`⚠️ 验证码图片异常（${imgResp.raw ? imgResp.raw.length : 0} 字节，HTTP ${imgResp.status}）`);
+            return null;
+        }
+        return { idhash, imgBuf: imgResp.raw };
+    } catch (e) {
+        warn(`⚠️ 取验证码图片失败: ${e.message}`);
+        return null;
+    }
+}
+
 // ========== 账号密码登录（兜底）==========
 // 单次登录尝试。返回 { state, cookie }，state 含义：
 //   'ok'      拿到有效 auth（非 deleted）+ saltkey
@@ -606,18 +704,47 @@ async function loginAttempt(user, pass, attemptNo) {
             return null;
         }
         const formhash = lfm[1];
+        // 本站 Discuz 用 ajaxpost 表单：action 里带动态 loginhash，表单里带 referer 隐藏字段。
+        // 缺了这两个会被服务端当成"重新弹登录框"（showWindow），始终拿不到 auth —— 2026-11-17 实测踩坑。
+        const lhm = pageText.match(/loginhash=([A-Za-z0-9]+)/);
+        const loginhash = lhm ? lhm[1] : '';
+        const rfm = pageText.match(/name=["']referer["']\s+value=["']([^"']+)["']/i);
+        const referer = rfm ? rfm[1] : (SITE + '/.');
+        if (!loginhash) warn('⚠️ 登录页未取到 loginhash（新版 Discuz ajaxpost 表单必需），登录可能失败');
 
-        // 2) 提交登录（该站登录页无验证码，纯账号密码即可）
-        const loginUrl = SITE + '/member.php?mod=logging&action=login&loginsubmit=yes&infloat=yes&lssubmit=yes&inajax=1';
+        // 2) 图片验证码：登录页有 updateseccode(...) 容器时，取图 → 本地 ddddocr 识别 → 随登录提交
+        let seccodeBody = '';
+        if (!CAPTCHA_OFF) {
+            const cap = await fetchSeccode(pageText, jar, loginPageUrl);
+            if (cap) {
+                const code = recognizeCaptcha(cap.imgBuf);
+                if (code) {
+                    log(`🔤 验证码已识别（idhash=${cap.idhash}，${cap.imgBuf.length} 字节图片）：${code}`);
+                    seccodeBody = '&seccodehash=' + encodeURIComponent(cap.idhash)
+                                + '&seccodemodid=&seccodeverify=' + encodeURIComponent(code);
+                } else {
+                    warn('⚠️ 验证码识别失败，本次登录不带 seccode 提交（可能仍被站点要求验证码）');
+                }
+            }
+        } else {
+            log('⏭️ WNFLB_CAPTCHA=off：跳过图片验证码自动识别');
+        }
+
+        // 3) 提交登录
+        // 对齐真实表单 action：loginsubmit=yes + 动态 loginhash（+ infloat/inajax 走 AJAX 返回）
+        const loginUrl = SITE + '/member.php?mod=logging&action=login&loginsubmit=yes'
+                       + (loginhash ? '&loginhash=' + loginhash : '')
+                       + '&infloat=yes&inajax=1';
         const bodyStr = [
             'formhash=' + formhash,
+            'referer=' + encodeURIComponent(referer),
             'username=' + encodeURIComponent(user),
             'password=' + encodeURIComponent(pass),
-            'cookietime=2592000',
             'questionid=0',
             'answer=',
-            'loginsubmit=yes'
-        ].join('&');
+            'cookietime=2592000',
+            'loginsubmit=true'
+        ].join('&') + seccodeBody;
         log(`📤 提交登录${attemptNo > 1 ? `...（第 ${attemptNo} 次尝试）` : '...'}`);
         const r = await request(loginUrl, {
             method: 'POST',
@@ -633,7 +760,7 @@ async function loginAttempt(user, pass, attemptNo) {
         jar.absorb(r.headers);
         const rText = textOf(r);
 
-        // 3) 判定：必须拿到**有效** auth（deleted 不算）+ saltkey
+        // 4) 判定：必须拿到**有效** auth（deleted 不算）+ saltkey
         const auth = jar.get(AUTH_KEY);
         const saltkey = jar.get(SALT_KEY);
         const authOk = !!auth && !isDeletedCookieVal(auth);
@@ -668,6 +795,11 @@ async function loginAttempt(user, pass, attemptNo) {
             dumpResp('登录POST', r);
             return { state: 'cred', resp: r };
         }
+        // 验证码识别错了：站点会回「验证码错误/不正确」，这是可修正问题 → 返回 captcha 让外层换一张图重试
+        if (/验证码\s*(错误|不正确|不对)|seccode.*(error|invalid|wrong)/i.test(rText)) {
+            warn('🔤 验证码识别有误，返回 captcha 状态换一张图重试');
+            return { state: 'captcha', resp: r };
+        }
         if (/验证码|seccode|secqaa|安全提问/.test(rText)) {
             warn('🚫 站点要求验证码/安全提问：本次登录已被风控，建议先用浏览器登录一次或稍后再试');
         } else if (!auth) {
@@ -683,9 +815,10 @@ async function loginAttempt(user, pass, attemptNo) {
     }
 }
 
-// 外层封装：先试一次；只有「auth 被清成 deleted」这种**非凭据问题**才会重试一次
-// （实测该站首次登录常返回 auth=deleted，第二次即正常；凭据错误则绝不重试，避免打满 Discuz 的失败计数）
-const MAX_LOGIN_ATTEMPT = 2;
+// 外层封装：只有「非凭据问题」才重试（auth=deleted / 验证码识别错误），凭据错误 cred 绝不重试。
+// 每次重试都会重新访问登录页 → 取一张新验证码图 → 重新识别，正好覆盖「识别错了换一张」的场景。
+// （Discuz 验证码错误通常不计入密码失败次数 loginperm，但仍克制在有限次数内，避免触发风控。）
+const MAX_LOGIN_ATTEMPT = 3;
 async function loginAndGetCookie(user, pass) {
     if (!user || !pass) {
         warn('⚠️ 未配置账号密码（WNFLB_ACCOUNT=账号#密码），无法自动登录');
@@ -694,11 +827,13 @@ async function loginAndGetCookie(user, pass) {
     for (let i = 1; i <= MAX_LOGIN_ATTEMPT; i++) {
         const r = await loginAttempt(user, pass, i);
         if (r.state === 'ok') return r.cookie;
-        if (r.state === 'deleted' && i < MAX_LOGIN_ATTEMPT) {
-            warn(`🔁 登录态被服务端清空（非账号密码问题），重试登录（第 ${i + 1}/${MAX_LOGIN_ATTEMPT} 次）...`);
+        if ((r.state === 'deleted' || r.state === 'captcha') && i < MAX_LOGIN_ATTEMPT) {
+            const why = r.state === 'captcha' ? '验证码识别有误，换一张图' : '登录态被服务端清空（非账号密码问题）';
+            warn(`🔁 ${why}，重试登录（第 ${i + 1}/${MAX_LOGIN_ATTEMPT} 次）...`);
             continue;
         }
-        if (r.state === 'deleted') warn('🚫 连续两次都被清成 deleted：站点可能在风控 / 要求安全提问，建议先用浏览器登录一次');
+        if (r.state === 'deleted') warn('🚫 连续多次都被清成 deleted：站点可能在风控 / 要求安全提问，建议先用浏览器登录一次');
+        if (r.state === 'captcha') warn('🚫 连续多次验证码识别错误：可能是 ddddocr 模型不适配该验证码样式，或站点已升级验证码；可先用浏览器登录更新缓存');
         return null;
     }
     return null;
@@ -1011,6 +1146,13 @@ async function main() {
     await resolveCookie(USER, PASS);
     if (!isAuthValid(COOKIE)) {
         failLog(`❌ 无法获取 Cookie（按「缓存 → 账号密码登录 → WNFLB_COOKIE」三级都失败；请检查 WNFLB_ACCOUNT=账号#密码，或配一个 WNFLB_COOKIE 兜底；缓存路径: ${CACHE_FILE}）`);
+        return;
+    }
+
+    // 1.5 只验证登录模式：拿到有效 auth 就收工，不访问首页、不签到、不写缓存（调试/验收用）
+    if (truthy(process.env.WNFLB_LOGIN_ONLY)) {
+        log(`🧪 WNFLB_LOGIN_ONLY=1：登录链路验证通过（auth 有效），不签到、不写缓存`);
+        log(`🍪 Cookie 字段数: ${String(COOKIE).split(';').length}｜${AUTH_KEY}=${getCookieVal(AUTH_KEY, COOKIE).substring(0, 12)}***`);
         return;
     }
 

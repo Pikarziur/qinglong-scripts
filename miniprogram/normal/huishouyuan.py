@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  回收猿旧衣服回收
-# version: 2026-10-29a
+# version: 2026-11-17b
 # cron: 0 5,15 * * *
-# 积分有效期：未知
+# 奖励金说明：提现型奖励金，永久有效、不过期（满 1 元可提现）
+# 提现提醒：每年 6/30 与 12/31 汇总打印并通知用户手动提现
 # =========================================================
 
 # 环境变量：
@@ -19,17 +20,20 @@
 #       仓库内为同目录 / 上一级），在面板「通知设置」配一次即全站通用。
 #       口径：只推错误 —— 本次运行出现 ERROR 日志才推送一次；无错误完全静默。
 # 日志规范：[LEVEL] [HSY] message   （LEVEL: INFO / WARN / ERROR）
+# 提现提醒：奖励金永久有效不过期；每年 6/30、12/31 汇总打印并独立强推，
+#           提醒用户进入小程序手动提现（脚本不自动提现，避免误操作真实资金）。
 #
 # 作者 lcmovie  https://github.com/lcmovie/YYB-GO-Script-i
 
 import hashlib
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 import json
 import os
 import sys
 import time
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -70,6 +74,13 @@ YYB_RETRY_DELAY = int(os.getenv("HUISHOUYUAN_YYB_RETRY_DELAY", "4") or 4)  # 重
 # 内部配置：直接改这里，省去去面板设环境变量
 # 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
 YYB_ONLY_REFS = []
+
+# ── 提现提醒（2026-11-17 新增）────────────────────────────────────
+# 奖励金为提现型、永久有效不过期。故不做"过期提醒"，改为每年 6/30 与 12/31
+# 汇总打印 + 独立强推，提醒用户进入小程序手动提现（脚本绝不自动提现真实资金）。
+ENABLE_WITHDRAW_REMIND = True
+WITHDRAW_REMIND_MONTHS_DAYS = ((6, 30), (12, 31))  # 每年这两个日期提醒
+WITHDRAW_MIN_AMOUNT = Decimal("1")                 # 可提现达到该金额才提醒（HAR: award_cash=1）
 
 # ===================== 日打标（今日完成标记） =====================
 # 今日已完成的账号当天再次运行时直接跳过，避免浪费 YYB 取码/取号配额
@@ -225,8 +236,55 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17b"
 _ACC_RULE = "=" * 70
+
+
+# ====================== 提现提醒（半年一次） ======================
+def in_withdraw_window(today: date = None) -> bool:
+    """今天是否是提现提醒日：每年 6/30 与 12/31（UTC+8 本地日期）。"""
+    today = today or date.today()
+    return (today.month, today.day) in WITHDRAW_REMIND_MONTHS_DAYS
+
+
+def notify_withdraw_alert(lines: list) -> bool:
+    """提现提醒强推：独立于「只推 ERROR」的错误通知，命中即推。"""
+    if not lines or _qn_send is None:
+        return False
+    if not any(os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，提现提醒未推送（可在青龙「通知设置」或环境变量中配置）",
+              flush=True)
+        return False
+    title = "【%s】奖励金提现提醒" % _QN_SITE
+    body = "\n".join(lines)
+    try:
+        _qn_send(title, body)
+        return True
+    except Exception as _e:
+        print("[QL] 提现提醒推送失败：%s" % _e, flush=True)
+        return False
+
+
+def check_withdraw_remind(results: list) -> None:
+    """6/30 与 12/31：任一账号可提现 >= 门槛，则汇总打印 + 独立强推提醒手动提现。"""
+    if not ENABLE_WITHDRAW_REMIND or not in_withdraw_window():
+        return
+    hits = []
+    for r in results:
+        cashable = r.get("withdrawable")
+        if isinstance(cashable, Decimal) and cashable >= WITHDRAW_MIN_AMOUNT:
+            hits.append((r.get("label") or "账号", cashable))
+    if not hits:
+        return
+    log(_ACC_RULE)
+    log("💰 [提现提醒] 检测到可提现奖励金（每半年提醒一次，请进入回收猿小程序手动申请提现）：")
+    for label, cashable in hits:
+        log(f"   · {label}：可提现 {cashable:.2f} 元")
+    log(_ACC_RULE)
+    push_lines = ["检测到可提现奖励金，请进入回收猿小程序手动申请提现："]
+    push_lines += [f"{label}：可提现 {cashable:.2f} 元" for label, cashable in hits]
+    if notify_withdraw_alert(push_lines):
+        log("📣 [提现提醒] 已推送通知")
 
 
 # ====================== 日打标（今日完成标记） ======================
@@ -267,8 +325,9 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", withdrawable: Any = None,
+                    total_points: Any = None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存当天可提现金额与奖励金余额，供跳过时读回）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -278,9 +337,31 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "withdrawable": str(withdrawable) if withdrawable is not None else None,
+        "totalPoints": str(total_points) if total_points is not None else None,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def withdrawable_from_done(server: str) -> Decimal:
+    """从当天打标记录读回可提现金额（供本次被跳过、未走 run_one 的账号使用）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or "withdrawable" not in entry:
+        return Decimal("0")
+    return amount(entry.get("withdrawable"))
+
+
+def total_points_from_done(server: str) -> Optional[Decimal]:
+    """从当天打标记录读回奖励金余额（本站积分单位为元），供被跳过的账号在汇总里显示。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict) or "totalPoints" not in entry:
+        return None
+    raw = entry.get("totalPoints")
+    if raw is None:
+        return None
+    val = amount(raw)
+    return val if val is not None else None
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -554,17 +635,27 @@ def join_zero_event(session, username):
     return results or ["0 元夺宝：未发现可处理活动"]
 
 
-def manual_withdrawal_reminder(session, username):
-    # 仅查询可提现金额；提现申请由用户在小程序中完成。
+def query_withdrawable(session, username):
+    """查可提现金额（awardlist.data.award_amount）。成功返回 Decimal，失败返回 None。
+
+    HAR 依据：envcash.php?action=awardlist&type=award → data.award_amount（可提现余额）、
+    data.award_check（在途/审核中金额）。这里只取可提现余额，不发起提现。
+    """
     available = api(session, "envcash.php", {
         "action": "awardlist", "appkey": APP_KEY, "genre": "0", "merchant_id": MERCHANT_ID,
         "type": "award", "username": username,
     })
     if not success(available):
-        return f"可提现金额查询失败：{message(available)}"
+        return None
     info = available.get("data") or {}
-    cashable = amount(info.get("award_amount"))
-    if cashable >= Decimal("1"):
+    return amount(info.get("award_amount"))
+
+
+def manual_withdrawal_reminder(cashable):
+    """根据可提现金额生成提醒文案；未达门槛返回 None。金额由 query_withdrawable 查得。"""
+    if cashable is None:
+        return None
+    if cashable >= WITHDRAW_MIN_AMOUNT:
         return f"可提现 {cashable:.2f} 元，请进入回收猿小程序手动申请提现"
     return None
 
@@ -572,6 +663,8 @@ def manual_withdrawal_reminder(session, username):
 def run_one(index, server, ref, context):
     result = [f"账号 {index}（YYB {ref}）"]
     ok, errmsg = True, ""
+    withdrawable = None
+    balance = None
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 MicroMessenger/7.0.20.1781 MiniProgramEnv/Windows"})
     try:
@@ -584,14 +677,17 @@ def run_one(index, server, ref, context):
         time.sleep(1)
         final, _ = center(session, username)
         result.append(f"最终奖励金：{final:.2f} 元")
-        reminder = manual_withdrawal_reminder(session, username)
+        # 账户奖励金余额（本站积分单位为「元」，即总积分）
+        balance = final
+        withdrawable = query_withdrawable(session, username)
+        reminder = manual_withdrawal_reminder(withdrawable)
         if reminder:
             result.append(reminder)
     except Exception as exc:
         ok, errmsg = False, str(exc)
         result.append(f"失败：{exc}")
     print(" | ".join(result))
-    return result, ok, errmsg
+    return result, ok, errmsg, withdrawable, balance
 
 
 def main():
@@ -611,29 +707,51 @@ def main():
     log("回收猿：签到、抽奖与 0 元夺宝 · 共 %d 个账号" % total)
     ok_count = 0
     skipped = 0
+    withdraw_results = []  # 供半年一次提现提醒使用：{"label", "withdrawable"}
     for index, (server, ref) in enumerate(accounts, 1):
+        label = f"账号 {index}（YYB {ref}）"
         # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
         key = done_key(server, ref)
         if is_done_today(key):
             log(f"⏭️ [打标] 账号 {index}/{total} 今日任务已完成，跳过")
             skipped += 1
+            # 从打标缓存读回当天可提现金额，保证下午 cron 跳过时仍能提醒
+            withdraw_results.append({"label": label, "withdrawable": withdrawable_from_done(key),
+                                     "total": total_points_from_done(key)})
             continue
-        _lines, ok, errmsg = run_one(index, server, ref, context)
+        _lines, ok, errmsg, withdrawable, balance = run_one(index, server, ref, context)
+        withdraw_results.append({"label": label, "withdrawable": withdrawable, "total": balance})
         if ok:
             ok_count += 1
             # _lines 顺序：账号行 / 初始奖励金 / 签到结果；签到失败不算今日完成
             sign_msg = _lines[2] if len(_lines) > 2 else "签到成功"
             if "失败" not in sign_msg:
-                mark_done_today(key, sign_msg)
+                mark_done_today(key, sign_msg, withdrawable, balance)
         else:
             err("❌ 账号 %d 失败：%s" % (index, errmsg))
     fail_count = total - ok_count - skipped
     _tail = "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok_count, fail_count, skipped)
     log(_ACC_RULE)
     log("📊 [执行汇总] 回收猿 · %s" % _tail)
+    # 总积分（奖励金余额）汇总：无论是否跳过、任务是否已完成，都在这里显示
+    for item in withdraw_results:
+        total = item.get("total")
+        if total is None:
+            continue
+        log(f"💎 总积分({total:.2f} 元)（{item.get('label') or '账号'}）")
     log(_ACC_RULE)
+    # 提现提醒：6/30 与 12/31，任一账号可提现达标则汇总打印 + 独立强推
+    try:
+        check_withdraw_remind(withdraw_results)
+    except Exception as _e:
+        warn(f"⚠️ [提现提醒] 检查异常：{_e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-    flush_notify("回收猿", _tail, logger=log)
+    _notify_tail = _tail
+    _point_lines = [f"{item.get('label')} 总积分 {item.get('total'):.2f} 元"
+                    for item in withdraw_results if item.get("total") is not None]
+    if _point_lines:
+        _notify_tail += "\n" + " ｜ ".join(_point_lines)
+    flush_notify("回收猿", _notify_tail, logger=log)
     return 0 if fail_count == 0 else 1
 
 

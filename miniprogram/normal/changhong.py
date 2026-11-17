@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  长虹智慧家居
-# version: 2026-10-29a
+# version: 2026-11-17b
 # cron: 12 4,14 * * *
-# 积分有效期：每年12月31日
+# 积分有效期：本年获取的积分，下一年12月31日过期
+# 检测过期积分：每年 12-25 ~ 12-31 检查「上年获取」的积分，汇总后提醒并推送通知；过期积分：上年获取总量 − 上年消费；
 # =========================================================
 
 
@@ -13,6 +14,9 @@
 #   2. 调用 YYBGO 的 /wxapp/getCode 获取每个账号的 wx.login code
 #   3. 用 code 完成微信登录，进入长虹小程序会话
 #   4. 执行签到任务并查询积分，输出汇总
+#   5. 仅 12-24 ~ 12-31：查积分流水（add 获取 / consume 消费），
+#      汇总「上年获取 − 上年消费」的净额（次年 12-31 到期）；上上年的不计入。
+#      有则在汇总下输出 💰 提醒并强制推送一次通知（平时不发请求）
 # 可控参数：
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
@@ -41,6 +45,18 @@ import urllib3.util.connection
 APP_ID = "wx36c3413e8fe39263"
 BASE = "https://hongke.changhong.com/gw/applet"
 TITLE = "长虹智慧家居签到"
+
+# ——— 积分过期提醒（2026-11-16 新增）—————————————————————
+# 规则：本年获取的积分次年 12-31 过期；因此每年 12-24 ~ 12-31 检查
+#       「上年获取」的积分并求和，到期日写作当年 12-31。
+# 净额口径（预设先扣旧的）：上年获取总量 − 上年消费，下限 0。
+# 真机抓包：GET /gw/point/api/v1/integral/u/logs/query
+#   ?pageNum=1&rows=10&flag=add&phone=<用户手机号>
+#   data.rows[] = {time:"2026-11-16 04:12:45", integral:5, remarks:"指定签到", ...}
+POINT_LOGS_URL = "https://hongke.changhong.com/gw/point/api/v1/integral/u/logs/query"
+EXPIRE_CHECK_START_DAY = 24
+EXPIRE_CHECK_END_DAY = 31
+POINT_LOGS_MAX_PAGES = 20    # 防止接口异常时无限翻页
 # YYB-GO 请求超时（与业务接口分开）：YYB-GO 内部会轮询多个上游长连接节点
 # （实测候选 6 个），失败路径约 40 秒才返回。超时太紧会把真实错误码
 # （如 manual_auth -10）吞成 "Read timed out"，看不到根因。
@@ -134,13 +150,14 @@ def collect_error(line):
     return True
 
 
-def flush_notify(_site=None, summary="", logger=None, **_kw):
-    """收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 notify 时只提示一行。
+def flush_notify(_site=None, summary="", logger=None, force=False, **_kw):
+    """收尾调用：有 ERROR，或 force=True（积分即将过期）才推送，一次运行最多一条。
 
-    前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
+    force 只决定「该不该推」；能否发出仍取决于青龙 notify.py 与通知渠道配置，
+    未配置时只在日志提示一行，不影响脚本结果。站点名以 _QN_SITE 为准。
     """
     global _qn_flushed
-    if _qn_flushed or not _qn_errors:
+    if _qn_flushed or (not _qn_errors and not force):
         return False
     _qn_flushed = True
     if _qn_send is None:
@@ -151,7 +168,9 @@ def flush_notify(_site=None, summary="", logger=None, **_kw):
         return False
     _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
     try:
-        _qn_send("【%s】执行出错" % _QN_SITE, _body)
+        # 有错误仍沿用原标题；仅「积分即将过期」触发时改用汇总标题
+        _title = "执行出错" if _qn_errors else "执行汇总"
+        _qn_send("【%s】%s" % (_QN_SITE, _title), _body)
         return True
     except Exception as _e:
         print("[QL] 错误日志推送失败：%s" % _e, flush=True)
@@ -218,7 +237,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17b"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -270,8 +289,14 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, note: str = "", expire_info: Dict[str, Any] = None,
+                    total_points=None) -> None:
+    """给该账号打上「今日已完成」标记；顺带缓存本轮查到的过期积分汇总。
+
+    缓存 expireInfo 是为了当天第二轮（账号被日打标跳过、不重新登录）也能
+    在汇总下输出提醒；跨天随打标记录一起清理。
+    total_points 同理：缓存账户总积分，跳过时读回，保证汇总里总积分始终可见。
+    """
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -281,6 +306,8 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expireInfo": expire_info if isinstance(expire_info, dict) else None,
+        "totalPoints": total_points,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -294,6 +321,18 @@ def clear_daily_done(server: str = "") -> None:
     else:
         cache = {}
     save_daily_done(cache)
+
+
+def is_expire_window():
+    """北京时间每年 12-24 ~ 12-31 才检查积分过期。"""
+    now = datetime.now(timezone(timedelta(hours=8)))
+    return now.month == 12 and EXPIRE_CHECK_START_DAY <= now.day <= EXPIRE_CHECK_END_DAY
+
+
+def expire_alert_line(info: Dict[str, Any], idx: int) -> str:
+    """日志与通知共用：💰 积分(10.00)即将过期： 2026-12-31（账号1）"""
+    return "💰 积分(%.2f)即将过期： %s（账号%d）" % (
+        float(info.get("amount") or 0), str(info.get("expire_date") or ""), idx)
 
 
 def daily_key(line):
@@ -401,6 +440,9 @@ def entry_ref(line):
 class Changhong:
     def __init__(self, server, ref):
         self.server, self.ref = server, ref
+        self.user_phone = ""        # 从 getAppletUser 取，供积分流水接口使用
+        self.expire_info = None     # 本轮查到的「上年获取、即将过期」积分汇总
+        self.total_points = None    # 本轮查到的账户总积分（数值，失败为 None）
         self.yyb = requests.Session()
         self.yyb.trust_env = False
         self.web = requests.Session()
@@ -513,8 +555,11 @@ class Changhong:
         # 实测静默登录返回token时isRegistered=0；手机号登录HAR为1。
         # 不能把该分支标记当作登录成败，必须用token访问业务接口验证。
         self.web.headers.update({"token": data["token"], "smarthome": data["token"]})
-        # 实际业务查询验证登录态，不能仅凭拿到code/token判定成功。
-        self.api("GET", "/mine/getAppletUser")
+        # 实际业务查询验证登录态，不能仅凭拿到code/token判定成功；
+        # 顺带留下 userPhone，供 12 月末的积分流水查询使用（不再多发一次请求）。
+        profile_data = self.api("GET", "/mine/getAppletUser")
+        if isinstance(profile_data, dict):
+            self.user_phone = str(profile_data.get("userPhone") or "")
 
     def activity_id(self):
         explicit = os.getenv("CH_AGGR_ID", "").strip()
@@ -556,6 +601,68 @@ class Changhong:
             raise TaskError("签到组件或状态无法识别")
         return signs[0]
 
+    def _point_logs(self, flag):
+        """按 flag=add/consume 拉取积分流水全部页，返回 rows 列表；失败抛 TaskError。"""
+        params = {"pageNum": 1, "rows": 10, "flag": flag}
+        if self.user_phone:
+            params["phone"] = self.user_phone
+        body = request(self.web, "GET", POINT_LOGS_URL, "积分流水(" + flag + ")", params=params)
+        if str(body.get("code")) != "200":
+            raise TaskError("业务码异常")
+        first = body.get("data") or {}
+        pages = min(int(first.get("totalPage") or 1), POINT_LOGS_MAX_PAGES)
+        rows = list(first.get("rows") or [])
+        for page in range(2, pages + 1):
+            params["pageNum"] = page
+            more = request(self.web, "GET", POINT_LOGS_URL, "积分流水(" + flag + ")", params=params)
+            if str(more.get("code")) != "200":
+                break
+            rows.extend((more.get("data") or {}).get("rows") or [])
+        return rows
+
+    def expiring_points(self):
+        """汇总「上年获取、当年 12-31 过期」的净积分。
+
+        只在 12-24 ~ 12-31 调用；接口异常只记 WARN，不影响签到结果。
+        净额口径（预设先扣旧的）：上年获取总量 − 上年消费；上上年的不计入，下限 0。
+        消费记录的 integral 符号未实测（当前账号无消费），取绝对值兼容正负两种记法。
+        返回 {"expire_date": "YYYY-12-31", "amount": float, "from_year": int,
+              "gained": float, "consumed": float}。
+        """
+        now = datetime.now(timezone(timedelta(hours=8)))
+        from_year = now.year - 1
+        expire_date = "%04d-12-31" % now.year
+        gained = 0.0
+        consumed = 0.0
+        try:
+            for row in self._point_logs("add"):
+                if not isinstance(row, dict):
+                    continue
+                if not str(row.get("time") or "").startswith(str(from_year)):
+                    continue
+                try:
+                    value = float(row.get("integral") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    gained += value
+            # 净额口径：上年消费同样从「上年获取」这批里扣（预设先扣旧的）
+            for row in self._point_logs("consume"):
+                if not isinstance(row, dict):
+                    continue
+                if not str(row.get("time") or "").startswith(str(from_year)):
+                    continue
+                try:
+                    consumed += abs(float(row.get("integral") or 0))
+                except (TypeError, ValueError):
+                    continue
+        except (TaskError, TypeError, ValueError) as exc:
+            warn("⚠️ [积分过期] 流水查询失败: " + str(exc)[:120])
+            return None
+        amount = max(0.0, gained - consumed)
+        return {"expire_date": expire_date, "amount": amount, "from_year": from_year,
+                "gained": gained, "consumed": consumed}
+
     def run(self):
         self.login()
         aggr_id = self.activity_id()
@@ -582,6 +689,7 @@ class Changhong:
                     if points != 0:
                         break
             if isinstance(points, (int, float)) and not isinstance(points, bool):
+                self.total_points = points
                 status += f"，当前积分：{points}"
                 if before["isSignin"] == 0 and points == 0:
                     status += "（接口可能尚未更新，请稍后查看）"
@@ -589,6 +697,15 @@ class Changhong:
                 status += "，积分格式无法识别"
         except TaskError:
             status += "，积分查询失败"
+        # 仅 12 月末窗口内查询「上年获取、即将过期」的积分；失败只 WARN，不改签到结果
+        if is_expire_window():
+            self.expire_info = self.expiring_points()
+            if isinstance(self.expire_info, dict):
+                log("ℹ️ [积分过期] 上年获取 %.2f − 上年消费 %.2f = 净额 %.2f（%s 到期）" % (
+                    float(self.expire_info.get("gained") or 0),
+                    float(self.expire_info.get("consumed") or 0),
+                    float(self.expire_info.get("amount") or 0),
+                    self.expire_info.get("expire_date")))
         return status
 
 
@@ -604,6 +721,8 @@ def main():
             log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(lines)))
     results, fail_count = [], 0
     skipped = 0
+    expire_alerts = []   # [(账号序号, 上年积分过期汇总)]
+    points_rows = []     # [(账号序号, 总积分)]
     if not lines:
         results.append("未配置 YYB_SERVER")
         fail_count = 1
@@ -615,6 +734,15 @@ def main():
             log(f"⏭️ [打标] 账号 {index}/{len(lines)} 今日任务已完成，跳过")
             skipped += 1
             results.append(f"账号{index}：今日任务已完成，已跳过")
+            # 当天第二轮被跳过时，从打标缓存读回上午查到的结果，不重新登录取码
+            cached = load_daily_done().get(key)
+            info = cached.get("expireInfo") if isinstance(cached, dict) else None
+            if isinstance(info, dict) and float(info.get("amount") or 0) > 0:
+                expire_alerts.append((index, info))
+            # 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
+            tp = cached.get("totalPoints") if isinstance(cached, dict) else None
+            if isinstance(tp, (int, float)) and not isinstance(tp, bool):
+                points_rows.append((index, float(tp)))
             continue
         acc_banner(index, len(lines), "标识：" + str(entry_ref(line) or line))
         client = None
@@ -638,7 +766,13 @@ def main():
             log("✅ " + msg)
         # 账号流程完整走完（未抛异常）才算今日完成；异常路径不打标
         if not failed:
-            mark_done_today(key, result)
+            info = client.expire_info if client else None
+            total_points = client.total_points if client else None
+            mark_done_today(key, result, info, total_points)
+            if isinstance(info, dict) and float(info.get("amount") or 0) > 0:
+                expire_alerts.append((index, info))
+            if isinstance(total_points, (int, float)) and not isinstance(total_points, bool):
+                points_rows.append((index, float(total_points)))
         results.append(msg)
         acc_footer(index, len(lines))
     if not lines:
@@ -648,13 +782,22 @@ def main():
     _ok = _n - fail_count - skipped
     log(_ACC_RULE)
     log(f"📊 [执行汇总] {TITLE} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}")
+    # 账户总积分（无论是否跳过、任务是否已完成，都在这里汇总）
+    for idx, bal in points_rows:
+        log(f"💎 总积分({bal:.2f})（账号{idx}）")
+    # 积分过期提醒：仅 12-24 ~ 12-31 且上年有积分时输出，每轮都推一次汇总通知
+    for idx, info in expire_alerts:
+        log(expire_alert_line(info, idx))
     log(_ACC_RULE)
-    # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-    flush_notify(
-        "长虹智慧家居",
-        f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}",
-        logger=log,
-    )
+    notify_summary = f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}"
+    if points_rows:
+        notify_summary += "\n" + " ｜ ".join(
+            f"账号{idx} 总积分 {bal:.2f}" for idx, bal in points_rows)
+    if expire_alerts:
+        notify_summary += "\n" + "\n".join(
+            expire_alert_line(info, idx) for idx, info in expire_alerts)
+    flush_notify("长虹智慧家居", notify_summary, logger=log,
+                 force=bool(expire_alerts))
     return 1 if fail_count else 0
 
 

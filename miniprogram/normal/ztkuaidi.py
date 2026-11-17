@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  中通快递
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 30 6,16 * * *
-# 积分有效期：次年6月30日
+# 积分有效期：次年6月30日【1+0.5】
+# 检测过期积分：每年6月30日前七天检测并提醒（即将过期积分=上年已获取-上年已使用）
 # =========================================================
 #
 # 任务流程：
@@ -48,7 +49,7 @@ import requests
 import os
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 # ———————————— 错误通知（可选项，想用则用）————————————
@@ -83,8 +84,12 @@ def now_text() -> str:
     # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17a"
 ACC_RULE = "=" * 70
+
+# 签到前状态预检开关：查 queryRecentSign 判断今日是否已签，已签跳过签到写请求（防二次写请求）。
+# 查询异常/无今日记录一律照常签到，防漏签。与本地日打标互补。想关闭改成 False。
+ENABLE_SIGN_STATE_CHECK = True
 
 
 _QN_SITE = "中通快递"
@@ -199,9 +204,15 @@ _sys.excepthook = _qn_excepthook
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
 
 # 「日打标」：记录今天已完成的账号，当天再次运行时直接跳过，避免重复消耗取码配额。
-# 结构：{ "<server>@<ref>": {"date": "2026-11-07", "doneTime": "...", "note": "..."} }
+# 结构：{ "<server>@<ref>": {"date": "2026-11-07", "doneTime": "...", "note": "...", "expirePoints": null} }
 # 跨天自动失效；文件在脚本同目录、非隐藏，面板文件管理里可见/可删。
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ztkuaidi_daily_done.json")
+
+# ===================== 积分过期提醒 =====================
+# 每年 6 月 30 日前七天（6/24~6/30，含 6/30 当天）检测并连续提醒；
+# 即将过期积分 = 上年获取 - 上年已使用。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_DAYS = 7
 
 
 # ====================== 日打标（今日完成标记） ======================
@@ -239,6 +250,23 @@ def done_key(server: str, ref: str) -> str:
     return f"{server}@{ref}"
 
 
+def in_expire_window() -> bool:
+    """是否处于积分过期提醒窗口（每年 6 月 28~30 日，含 30 号）。"""
+    if not ENABLE_EXPIRE_REMIND:
+        return False
+    now = datetime.now()
+    if now.month != 6:
+        return False
+    last_day = 30
+    return now.day > last_day - EXPIRE_REMIND_DAYS
+
+
+def expire_deadline() -> str:
+    """本次窗口对应的积分过期日。"""
+    now = datetime.now()
+    return f"{now.year}-06-30"
+
+
 def is_done_today(key: str) -> bool:
     """该账号今天是否已打过标（是则本次直接跳过）。"""
     entry = load_daily_done().get(key)
@@ -247,7 +275,19 @@ def is_done_today(key: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(key: str, note: str = "") -> None:
+def expire_points_from_done(key: str):
+    """读取打标缓存里的即将过期积分（当天第二轮被跳过时用于继续提醒）。"""
+    entry = load_daily_done().get(key)
+    if not isinstance(entry, dict):
+        return None
+    val = entry.get("expirePoints")
+    try:
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def mark_done_today(key: str, note: str = "", expirePoints=None) -> None:
     """给该账号打上「今日已完成」标记。"""
     cache = load_daily_done()
     today = _today()
@@ -258,6 +298,7 @@ def mark_done_today(key: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expirePoints": expirePoints,
     }
     save_daily_done(cache)
 
@@ -580,6 +621,118 @@ class AutoTask:
                 self.log(f"⚠️ [积分] 查询失败: {e}", level="warning")
         return None
 
+    def get_year_points_summary(self, session, target_year):
+        """上年获取 - 上年已使用。失败返回 None。
+
+        接口 POST /member/getMemberPointsDetail（application/x-www-form-urlencoded）:
+            recordType: 1=获取，2=消耗
+            pageNum / pageSize: 翻页参数
+        每条记录: quantity（正数=积分绝对值）、recordType（1/2）、pointDate（YYYY-MM-DD HH:MM:SS）。
+        """
+        try:
+            income = 0
+            expense = 0
+            # 先算获取（recordType=1），再算消耗（recordType=2）。接口 total 独立，互不影响。
+            for rt in ("1", "2"):
+                page = 1
+                scanned = 0
+                # 翻页上限 30 * 50 = 1500 条，理论上足够覆盖一年流水
+                while page <= 30:
+                    response = session.post(
+                        "https://membergateway.zto.com/member/getMemberPointsDetail",
+                        data={"recordType": rt, "pageNum": page, "pageSize": 50},
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=20,
+                    )
+                    response.raise_for_status()
+                    resp_json = response.json()
+                    if not resp_json.get("success"):
+                        break
+                    data = resp_json.get("data") or {}
+                    items = data.get("list") or []
+                    if not items:
+                        break
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        date_str = str(item.get("pointDate") or "")
+                        try:
+                            y = int(date_str[:4])
+                        except Exception:
+                            continue
+                        if y != target_year:
+                            continue
+                        q = item.get("quantity")
+                        try:
+                            q = float(q)
+                        except Exception:
+                            continue
+                        # 明细里的 quantity 已是绝对值（正号），直接用
+                        if rt == "1":
+                            income += q
+                        else:
+                            expense += q
+                    scanned += len(items)
+                    total = int(data.get("total") or 0)
+                    if scanned >= total:
+                        break
+                    page += 1
+            result = income - expense
+            self.log(f"📅 [积分] {target_year} 年 已获取 {income:g} - 已使用 {expense:g} = {result:g}")
+            return result
+        except Exception as e:
+            self.log(f"⚠️ [积分] 查询年度明细失败: {e}", level="warning")
+            return None
+
+    def query_signed_today(self, session):
+        """签到前状态预检：查 queryRecentSign 判断今日是否已签（只读，不触发任何写请求）。
+
+        HAR 2026-11-17 证实：POST /member/activity/queryRecentSign
+        返回 result.dailyList，每天一条含 date / isSigned / isToday。
+        今日那条 isSigned=true 即服务端确认今日已签。
+
+        返回：True=今日已签 / False=今日未签 / None=无法判断（异常、无今日记录、业务码异常）。
+        调用方仅在 True 时跳过签到写请求，其余情况照常签到防漏签。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+        end = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
+        try:
+            response = session.post(
+                "https://membergateway.zto.com/member/activity/queryRecentSign",
+                json={"startDate": start, "endDate": end},
+                timeout=20,
+            )
+            response.raise_for_status()
+            resp_json = response.json()
+            daily = (resp_json.get("result") or {}).get("dailyList")
+            if not isinstance(daily, list):
+                self.log("⚠️ [状态预检] 响应无 dailyList，无法判断今日签到状态", level="warning")
+                return None
+            # 优先用服务端标记的 isToday，回退按 date == 今天
+            entry = None
+            for item in daily:
+                if isinstance(item, dict) and item.get("isToday") is True:
+                    entry = item
+                    break
+            if entry is None:
+                for item in daily:
+                    if isinstance(item, dict) and str(item.get("date") or "") == today:
+                        entry = item
+                        break
+            if entry is None:
+                self.log(f"⚠️ [状态预检] 未找到今日({today})签到记录，无法判断", level="warning")
+                return None
+            signed = entry.get("isSigned")
+            if not isinstance(signed, bool):
+                self.log("⚠️ [状态预检] isSigned 字段异常，无法判断今日签到状态", level="warning")
+                return None
+            self.log(f"🔍 [状态预检] 今日({today})已签到: {signed}")
+            return signed
+        except Exception as e:
+            self.log(f"⚠️ [状态预检] 查询失败: {e}，照常签到（防漏签）", level="warning")
+            return None
+
     def log_points_change(self, before, after):
         """用一条清晰日志显示签到前后的积分。"""
         if before is None or after is None:
@@ -617,6 +770,7 @@ class AutoTask:
                         "final_points": None,
                         "normal": False,
                         "skipped": True,
+                        "expirePoints": expire_points_from_done(_done_key),
                     })
                     self.acc_footer(index, len(all_entries))
                     continue
@@ -694,10 +848,38 @@ class AutoTask:
                         self.cache_set_token(server, ref, self._last_token)
 
                 initial_points = self.get_points(session)
-                sign_success, sign_message = self.sign_in(session)
-                time.sleep(random.randint(1, 3))
+
+                # 签到前状态预检：今日已签则跳过签到写请求（防二次写请求/黑号）
+                if ENABLE_SIGN_STATE_CHECK:
+                    signed_today = self.query_signed_today(session)
+                else:
+                    signed_today = None
+
+                if signed_today is True:
+                    sign_success = True
+                    sign_message = "今日已签到（状态预检）"
+                    self.log("⏭️ [状态预检] 今日已签到，跳过签到写请求")
+                else:
+                    # 未签 / 无法判断（None）→ 照常签到，防漏签
+                    if signed_today is None:
+                        self.log("ℹ️ [状态预检] 无法确认今日签到状态，照常签到（防漏签）")
+                    sign_success, sign_message = self.sign_in(session)
+                    time.sleep(random.randint(1, 3))
+
                 final_points = self.get_points(session)
                 self.log_points_change(initial_points, final_points)
+
+                # 积分过期提醒：窗口内查上年获取-上年消耗；平时不请求
+                expire_pts = None
+                if in_expire_window():
+                    last_year = datetime.now().year - 1
+                    expire_pts = self.get_year_points_summary(session, last_year)
+                    if expire_pts is not None and expire_pts > 0:
+                        self.log(f"⏳ [积分] 即将过期积分: {expire_pts:g}")
+                    elif expire_pts is not None:
+                        # 上年收支相抵或为负：不提醒、不打标缓存
+                        expire_pts = None
+
                 _done = sign_success or sign_message == "今日已签到"
                 self.account_results.append({
                     "index": index,
@@ -706,10 +888,11 @@ class AutoTask:
                     "initial_points": initial_points,
                     "final_points": final_points,
                     "normal": _done,
+                    "expirePoints": expire_pts,
                 })
                 # 签到成功或今日已签 → 打上「今日已完成」标记
                 if _done:
-                    mark_done_today(_done_key, sign_message)
+                    mark_done_today(_done_key, sign_message, expire_pts)
                     self.log(f"✅ [打标] 今日任务已完成，已记录（{_today()}）")
 
                 self.acc_footer(index, len(all_entries))
@@ -723,6 +906,20 @@ class AutoTask:
             _fail = _n - _ok - _sk
             self.log("=" * 70)
             self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail} ｜ 跳过 {_sk}")
+            # 汇总类别里打印每个账号的总积分
+            for _i, _r in enumerate(self.account_results, 1):
+                _pt = _r.get("final_points")
+                if _pt is None:
+                    _pt = _r.get("initial_points")
+                if _pt is None:
+                    _pt = _r.get("point")
+                if _pt is not None and _pt != "-":
+                    self.log(f"💰 [总积分] 账号{_i}：{_pt}")
+            # 积分过期提醒：窗口内汇总打印 + 独立强推（与错误推送分开，命中即推）
+            try:
+                check_expire_remind(self.account_results)
+            except Exception as exc:
+                self.log(f"⚠️ [积分过期提醒] 检查异常: {exc}", level="warning")
             self.log("=" * 70)
             # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
             flush_notify(
@@ -739,6 +936,33 @@ class AutoTask:
                          f"（成功 {_ok} / 跳过 {_sk} / 共 {_n}）", level="error")
             else:
                 self.log(f"✅ 全部 {_n} 个账号执行成功")
+
+def check_expire_remind(rows):
+    """汇总区打印积分过期提醒；窗口内独立强推，连续多天提醒。"""
+    if not in_expire_window():
+        return
+    hits = [r for r in (rows or [])
+            if r and r.get("expirePoints") is not None and float(r.get("expirePoints")) > 0]
+    if not hits:
+        return
+    deadline = expire_deadline()
+    print("⏳ [积分过期提醒]", flush=True)
+    for r in hits:
+        print(f"   · 账号{r.get('index', '?')}：{float(r['expirePoints']):g} 积分（{deadline} 过期）", flush=True)
+    if _qn_send is None:
+        print(_QN_NOMOD, flush=True)
+        return
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
+        print("[QL] 未配置通知渠道，积分过期提醒未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
+        return
+    try:
+        body = "\n".join(
+            f"- 账号{r.get('index', '?')}：{float(r['expirePoints']):g} 积分（{deadline} 过期）" for r in hits
+        )
+        _qn_send(f"【{_QN_SITE}】积分即将过期提醒", body)
+    except Exception as _e:
+        print(f"[QL] 积分过期提醒推送失败：{_e}", flush=True)
+
 
 if __name__ == "__main__":
     auto_task = AutoTask("中通快递")

@@ -2,20 +2,21 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  WorkBuddy 签到
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 31 7,12,23 * * *
-# 积分有效期：
 # =========================================================
+
+
 """
 name: WorkBuddy 签到
-cron: 31 7,12 * * *
+cron: 31 7,12,23 * * *
 
 ════════════════════════════════════════════════════════════════
 该脚本引用自原作者：https://github.com/L0NE-6/WorkBuddy-Daily
 修改作者：lcmovie https://github.com/lcmovie/YYB-GO-Script-i
 修改后主要适配：https://github.com/525815266/YYB-Go-Enhanced，实现无感取码，自动打卡 + 全部成长任务！
 ════════════════════════════════════════════════════════════════
-🌱 WorkBuddy Daily - 全能签到脚本 v3.15（YYB 无感取码版）
+🌱 WorkBuddy Daily - 全能签到脚本 v3.48（YYB 无感取码版）
 ════════════════════════════════════════════════════════════════
 
 📌 这是什么
@@ -23,17 +24,18 @@ cron: 31 7,12 * * *
    积分/用量查询、18 项成长任务、8 项互动玩法、小程序成长任务、
    自动领奖，全部无人值守。
 
+
 ✨ 特性
    🔐 无感取码       只配一个 YYB_SERVER 变量，脚本自动 wx.login 取码登录 + 自动续期
-   ✅ 成长任务       17 项云端任务全覆盖（含轻量云专家；小程序链式见下一行）
-   📱 小程序任务     Tasks_1~7 链式任务（每日零点解锁一环，日志给出解锁日期）
+   ✅ 成长任务       已适配的云端及动态专家任务（执行前确认来源、登记和状态）
+   📱 小程序任务     Tasks_1~6 小程序链式任务；第 7 环为 PC 灵感任务
    🎮 8 项互动玩法   抽奖、盲盒、Buddy、派猫猫旅行、连签兑换、补签卡、礼包补偿、徽章
    💰 三类查询       积分剩余合计+明细、用量统计、成长数据（等级/两种连签/能量）
    🎁 自动领奖       按进度扫描全部已达标任务；桌面/小程序分别补领
-   📢 错误通知       只推错误：本次出现 ERROR 才推送一次；走青龙自带 notify.py（面板「通知设置」配一次全站通用）
+   📢 青龙通知       优先 notify.py，回落到 PushPlus / Server酱 / 企业微信 / Bark
    🧩 幂等安全       重复运行只补缺口，不会重复领取或重复操作
    🔄 API 重试       网络/5xx 自动指数退避重试，写动作间隔可调（--gap）
-   🔗 稳定指纹       每账号 md5 派生固定 machineId，桌面/web/小程序三域对齐官方埋点
+   🔗 稳定指纹       按账号派生稳定 machineId，桌面/web/小程序三域对齐官方埋点
    🐧 青龙友好       非 Windows 走指纹上报，纯 API 直接跑
    📦 已归档         开学季等已结束/已下架的限时任务代码已移除（上游移入 archive/）
    🔥 每日活跃       签到后补发一条 chat_request_send 点亮成长中心热力墙（活跃连登，幂等）
@@ -41,14 +43,13 @@ cron: 31 7,12 * * *
 🚀 使用方法（YYB 版）
    1. 设置变量     YYB_SERVER = 每行一个 "YYB地址@微信账号标识"（多账号换行分隔）
                    例：yyb-go:8000@1
-   2. 定时任务     31 7,12 * * *     日常全流程
-                   31 23 * * *      夜猫子活动窗口（23:00-08:00，必须单独排程）
+   2. 定时任务     31 7,12,23 * * *  沿用现有定时，23 点覆盖夜间任务窗口
 
 ⌨️ 命令行参数
    --only 3          只跑第 3 个账号（可用逗号 3,4,5）
    --query           仅查询积分/用量/签到状态，不执行任务
    --no-desktop      跳过桌面任务（非 Windows 默认走指纹上报）
-   --no-notify       本次不推送错误通知（默认只推错误，无错误本就静默）
+   --no-notify       不发送青龙通知
    --gap 2.0         写动作间隔秒数（默认 1.5，最低 1.0）
    --mp-gap 15       mp 对话事件间隔（默认 45，上游反作弊要求真人节奏）
    --tasks checkin,travel        只跑白名单子任务
@@ -58,7 +59,6 @@ cron: 31 7,12 * * *
    YYB_SERVER           【必填】每行一个 "YYB地址@微信账号标识"
    YYB_API_KEY          【可选】对应 YYB_PROTOCOL_TOKEN，设置后带 Authorization 头
    WB_ACCOUNT_FILTER    【可选】等价 --only，逗号分隔账号编号
-   YYB_ONLY_REFS        【可选】脚本内账号序号白名单（1 起），列表形式如 [1,3]；留空 [] 跑全部，非空时优先于 WB_ACCOUNT_FILTER / --only
    WB_CACHE_DIR         【可选】缓存目录，默认 /ql/data/config/workbuddy_yyb
    WB_NO_NOTIFY         【可选】=1 关闭通知
    WORKBUDDY_TASKS      【可选】白名单：只跑列出的子任务（逗号/空格分隔）
@@ -70,18 +70,24 @@ cron: 31 7,12 * * *
         想两者兼得：WORKBUDDY_TASKS=checkin,travel,chat_5（保留一个对话类任务）
      例：只想每天做签到+旅行 → WORKBUDDY_TASKS=checkin,travel（其余任务以后想做时再放开）
    WORKBUDDY_MP_GAP     【可选】mp 对话事件间隔秒数（默认 45，可调小提速）
-   WB_NO_NOTIFY / --no-notify   【可选】关闭错误推送（默认只推错误）
    WORKBUDDY_MAKEUP_MAX_PER_RUN
                         【可选】每轮最多补签几张（默认 1，最多 10）
    WORKBUDDY_BENEFIT_STATE
                         【可选】补偿/礼包本地期次防重文件路径
+   WORKBUDDY_ACTIVITY_CHAT_FALLBACK
+                        【可选】每日活跃合成事件未计分时，用一次真实对话兜底（默认 1）
+   WORKBUDDY_NOTIFY     【可选】推送策略：always（默认，每次推）/ fail（仅异常时推）/ 0（关闭）
+   WORKBUDDY_STATE_DIR  【可选】状态文件目录（活跃去重 / 礼包补偿防重）；默认脚本同级目录
+   PUSH_PLUS_TOKEN / PLUSPLUS_TOKEN / PUSH_KEY / QYWX_KEY / BARK_PUSH
+                        【可选】脚本自带通知通道（青龙 notify.py 未配置时回落）
 
-📦 任务清单（对齐上游 v3.7）
-   ☁️ 成长中心任务（17 项）：每日签到 · 设计创意模式 · 探索优秀灵感 · 桌面端对话 ·
+📦 任务清单（参考上游 v3.48，以下任务以实际下发为准）
+   ☁️ 已适配成长任务：每日签到 · 设计创意模式 · 探索优秀灵感 · 桌面端对话 ·
       尝鲜热门技能 · 体验资料库 · 腾讯轻量云专家 · 和平精英主题 · 发现应用 ·
       企鹅教师助手 · GLM-5.2模型对话 · 和AI聊天5次 · 夜猫子活动 · 召唤3次专家团 ·
       召唤5次专家 · 使用5个模板 · 设置自动化任务 · 领取Buddy
-   📱 小程序成长任务（7 项，Sequential_Tasks_1~7）
+   📱 链式任务：Sequential_Tasks_1~6 为小程序，第 7 环为 PC 灵感
+   🧑‍💼 专家任务：轻量云、无畏契约及动态 expert_use_*（桌面/小程序双来源）
    🎮 互动玩法（8 项）：抽奖 · 盲盒 · Buddy信息 · 派猫猫旅行 · 连签兑换 · 补签卡 ·
       礼包补偿 · 徽章
    📦 已归档（活动结束 / 服务端已下架，代码已移除，对齐上游 archive/）
@@ -102,7 +108,7 @@ cron: 31 7,12 * * *
    · mp 真人节奏：Sequential 对话判据逐条 45s±10s 上报（上游有反作弊：连发会先计数、
      后被整体回滚，claim 报 400）；--mp-gap / WORKBUDDY_MP_GAP 可调
    · accept 后回读：mp 任务接受后重读真实 target，避免"少报→误判达标→claim 400"
-   · mp 指纹：按官方源码口径（ideVersion/extVersion=2.2.8、android 14/arm64、source=mini_program）
+   · mp 元数据：公共 base 为 2.4.0，部分专家/灵感事件保留 2.2.8；android 14/arm64
    · locked 任务：任务行 locked=true（未到上线时间）直接跳过并给出解锁日，不空跑不误判
    · mp 对话 id：conversationId / requestId / traceId 同值传递（源码同值）
    · 瞬时错误重试：签到/余额/用量对网络与 5xx 做 2s/4s 有界重试，业务错误不重试
@@ -110,6 +116,17 @@ cron: 31 7,12 * * *
    · 旅行领奖：claim 携带服务端 record_id，只有回执含 reward_credit 才确认到账
    · 补签日历：按服务端 today/launch_date/当月边界选断点，排除 makeup_dates，默认只补最近一张
    · 礼包补偿：先查 active/claimed/credit_num，再按回执 credit 判定本次到账；本地按活动期防重
+   · 桌面元数据：WorkBuddy 5.9.3 / CLI 2.165.0，构建字段沿用上次已适配值
+   · 每日活跃：合成事件后回读热力图分数确认；未计分自动用真实对话兜底，仍未计分不写本地标记
+   · 网页会话：撞 10105 时仅收尾归属记录中的脚本旧会话；排除用户会话及本轮在用会话
+   · 专家任务：桌面/小程序双来源发现；先登记后对话，来源确认后领奖；保留 ID 校验
+   · PC 灵感：Sequential_Tasks_7 走桌面 playbook 事件链（对话链 + cta_click + prompt_send）
+   · 任务发现：桌面 /v2 + 小程序 /v2 + 等级族 /activity 三源合并去重
+   · 未下发任务：accept_status 为 None（已下线/未开放）直接跳过，不发对话不白扣积分
+   · mp 延迟 target：accept 后 target 未下发时有界回读（30×2.5s），仍空则留待下一轮不冒领
+   · 任务查询：统一间隔与 429 有界等待；查询失败不冒充任务未下发
+   · 会话归属：workbuddy_conversation_state.json 独立保存脚本创建的真实会话 ID
+   · 推送策略：WORKBUDDY_NOTIFY=always（默认）/ fail（仅异常）/ 0（关闭）
 
 📄 依赖：requests（pip3 install requests）
 
@@ -119,10 +136,13 @@ cron: 31 7,12 * * *
 """
 
 import argparse
-from datetime import datetime
 import base64
+import contextlib
 import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -136,133 +156,9 @@ import uuid
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit
 
 import requests
-
-# ———————————— 错误通知（可选项，想用则用）————————————
-# 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
-# 直接调用青龙自带的通知模块（容器内为 /ql/data/scripts/notify.py，仓库内为同目录/上一级的 notify.py）——
-#   在青龙面板「通知设置」里配一次即可全站通用（该文件由青龙官方维护，支持其全部推送渠道）。
-# 找不到该文件、或未配置任何通知渠道时，只在日志末尾提示一行，不报错、不中断。
-import os as _os
-import sys as _sys
-
-_QN_SITE = "WorkBuddy"
-# 青龙官方通知渠道环境变量（任一存在即视为已配置），清单见青龙 sample/config.sample.sh
-_QN_ENVS = (
-    "PUSH_KEY", "BARK_PUSH", "TG_BOT_TOKEN", "DD_BOT_TOKEN", "QYWX_KEY", "QYWX_AM",
-    "IGOT_PUSH_KEY", "PUSH_PLUS_TOKEN", "WE_PLUS_BOT_TOKEN", "GOBOT_URL", "GOTIFY_URL",
-    "DEER_KEY", "CHAT_URL", "AIBOTK_KEY", "CHRONOCAT_URL", "SMTP_SERVER", "SMTP_EMAIL",
-    "PUSHME_KEY", "FSKEY", "QMSG_KEY", "NTFY_URL", "WXPUSHER_APP_TOKEN",
-    "WXPUSHER_SPT_LIST", "WEBHOOK_URL", "OPENILINK_APP_TOKEN", "WPUSH_APIKEY",
-)
-_qn_send = None
-_qn_load_err = ""
-_qn_dirs = ["/ql/data/scripts", "/ql/scripts"]
-try:
-    _qn_here = _os.path.dirname(_os.path.abspath(__file__))
-    _qn_dirs += [_qn_here, _os.path.dirname(_qn_here)]
-except NameError:
-    pass
-try:
-    for _p in _qn_dirs:
-        if _p and _os.path.isfile(_os.path.join(_p, "notify.py")):
-            if _p not in _sys.path:
-                _sys.path.insert(0, _p)
-            from notify import send as _qn_send
-            break
-except Exception as _qn_e:
-    _qn_send = None
-    _qn_load_err = str(_qn_e)
-_QN_NOMOD = (
-    "[QL] 青龙通知模块 notify.py 加载失败（%s），错误日志未推送" % _qn_load_err
-    if _qn_load_err else
-    "[QL] 未找到青龙通知模块 notify.py，错误日志未推送"
-)
-
-_qn_errors = []
-_qn_seen = set()
-_qn_flushed = False
-
-
-def collect_error(line):
-    """由日志出口调用：收集 ERROR 行（去重，最多 30 条）。"""
-    _s = str(line).strip()
-    if not _s or _s in _qn_seen:
-        return False
-    _qn_seen.add(_s)
-    if len(_qn_errors) < 30:
-        _qn_errors.append(_s)
-    return True
-
-
-def flush_notify(_site=None, summary="", logger=None, **_kw):
-    """收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 notify 时只提示一行。
-
-    前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
-    """
-    global _qn_flushed
-    if _qn_flushed or not _qn_errors:
-        return False
-    if _os.getenv("WB_NO_NOTIFY") == "1":
-        return False
-    _qn_flushed = True
-    if _qn_send is None:
-        print(_QN_NOMOD, flush=True)
-        return False
-    if not any(_os.getenv(_k) for _k in _QN_ENVS):
-        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
-        return False
-    _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
-    try:
-        _qn_send("【%s】执行出错" % _QN_SITE, _body)
-        return True
-    except Exception as _e:
-        print("[QL] 错误日志推送失败：%s" % _e, flush=True)
-        return False
-
-import atexit as _atexit
-
-
-def _qn_atexit():
-    """兜底：脚本中途 return / sys.exit 时补一次（未配置则只提示一行）。"""
-    if _qn_flushed or _os.getenv("WB_NO_NOTIFY") == "1":
-        return
-    if _qn_send is None:
-        print(_QN_NOMOD, flush=True)
-        return
-    if not any(_os.getenv(_k) for _k in _QN_ENVS):
-        print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
-        return
-    if _qn_errors:
-        flush_notify(_QN_SITE, "脚本提前结束，未走到收尾汇总")
-
-
-_atexit.register(_qn_atexit)
-
-
-def _qn_excepthook(exc_type, exc, tb):
-    """兜底：脚本顶层未捕获异常时，也把错误推一次。"""
-    if exc_type is KeyboardInterrupt:
-        _qn_sys_excepthook(exc_type, exc, tb)
-        return
-    try:
-        _qn_errors.append("[ERROR] [%s] %s: %s" % (_QN_SITE, exc_type.__name__, exc))
-    except Exception:
-        pass
-    if not _qn_flushed:
-        flush_notify(_QN_SITE, "脚本异常中断（未捕获异常）")
-    _qn_sys_excepthook(exc_type, exc, tb)
-
-
-_qn_sys_excepthook = _sys.excepthook
-_sys.excepthook = _qn_excepthook
-
-# 内部配置：直接改这里，省去去面板设环境变量
-# 账号序号白名单（1 起），仅运行指定序号，留空 [] 运行全部；例如 [1, 3]
-# 非空时优先于命令行 --only 与环境变量 WB_ACCOUNT_FILTER
-YYB_ONLY_REFS = [1]
 
 try:
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -270,85 +166,9 @@ try:
 except Exception:
     pass
 
-# ============================================================================ #
-# 统一日志：[LEVEL] [WORKBUDDY] [账号N] emoji message
-#   级别 INFO/WARN/ERROR；行首自带 emoji 时沿用，否则按级别补默认 emoji
-# ============================================================================ #
-SRC = "WORKBUDDY"
-_LEVEL_EMOJI = {"INFO": "ℹ️", "WARN": "⚠️", "ERROR": "❌"}
-_EMOJI_HEAD = re.compile(
-    "^(?:[\u2300-\u23ff\u2600-\u27bf\u2b00-\u2bff\u2139\ufe0f\U0001F300-\U0001FAFF]|[0-9]\ufe0f?\u20e3)"
-)
-
-
-def _level_of_line(line):
-    if line[:1] in ("\u274c", "\U0001F4A5"):      # ❌ 💥
-        return "ERROR"
-    if line[:1] == "\u26a0":                       # ⚠️
-        return "WARN"
-    return "INFO"
-
-
-def _emit(level, msg, tag=""):
-    """按统一格式逐行输出，返回格式化后的行列表（供汇总收集）。"""
-    text = "" if msg is None else str(msg)
-    out = []
-    _lv_of = []
-    for raw in text.split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        lv = level or _level_of_line(line)
-        head = "[%s] [%s]%s" % (lv, SRC, (" [%s]" % tag) if tag else "")
-        emoji = "" if _EMOJI_HEAD.match(line) else _LEVEL_EMOJI[lv] + " "
-        out.append("%s %s%s" % (head, emoji, line))
-        _lv_of.append(lv)
-    for _oi, item in enumerate(out):
-        print(item, flush=True)
-        if _lv_of[_oi] == "ERROR":
-            collect_error(item)
-    return out
-
-
-def log(msg):
-    return _emit(None, msg)
-
-
-def warn(msg):
-    return _emit("WARN", msg)
-
-
-def err(msg):
-    return _emit("ERROR", msg)
-
-
-# ———————————— 账号分隔标识 ————————————
-# 多账号同跑时，用醒目的横线 + 账号信息把各账号的日志隔开，便于阅读与定位。
-def now_text() -> str:
-    # 兼容两种导入: from datetime import datetime / import datetime
-    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
-    return _dt.strftime("%Y-%m-%d %H:%M:%S")
-# ========== 启动信息 ==========
-def log_startup(total: int = 0) -> None:
-    log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
-    if total:
-        log("🔢 账号数量: %d" % total)
-    log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
-_ACC_RULE = "=" * 70
-
-def acc_banner(idx, total, ident=""):
-    """打印账号分隔标识（开始）。"""
-    log(_ACC_RULE)
-    log("👤 账号 %d/%d%s" % (idx, total, (" ｜ " + str(ident)) if ident else ""))
-    log(_ACC_RULE)
-
-def acc_footer(idx, total):
-    """打印账号分隔标识（结束）。"""
-    log("🔚 账号 %d/%d 处理结束" % (idx, total))
-
-VERSION = "1.7.0"
+VERSION = "1.9.6"
+UPSTREAM_VERSION = "3.48"
+UPSTREAM_COMMIT = "94e7f14832fc02760e97f641ab0fc9fa30871126"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
 LOGIN_URL = "https://www.codebuddy.cn/v2/plugin/login/token"
 PROFILE_URL = "https://www.codebuddy.cn/v2/as/wechatmp/user/profile"
@@ -357,7 +177,7 @@ STATUS_URL = "https://www.workbuddy.cn/v2/billing/meter/checkin-activity-status"
 CHECKIN_URL = "https://www.workbuddy.cn/v2/billing/meter/daily-checkin"
 
 BASE = "https://www.workbuddy.cn"
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) WorkBuddy/5.5.4 Chrome/138.0.7204.251 Electron/37.10.3 Safari/537.36"
+UA = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -366,6 +186,25 @@ HEADERS = {
     "Origin": BASE,
     "Referer": BASE + "/profile/growth-center",
 }
+
+
+def _state_dir():
+    """状态文件目录：`WORKBUDDY_STATE_DIR` 优先，未设置时用脚本同级目录（原行为）。
+
+    需要把状态放进数据卷/持久目录时（容器、只读的脚本目录、面板类调度器升级会
+    覆盖脚本目录）设这个变量，避免状态文件随脚本一起被替换。
+    """
+    custom = os.environ.get("WORKBUDDY_STATE_DIR", "").strip()
+    if custom:
+        try:
+            os.makedirs(custom, exist_ok=True)
+        except Exception:
+            pass
+        return custom
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+STATE_DIR = _state_dir()
 
 _SETUP_DATA = (
     "eJw9zUEOwiAQheG7sG46hZpGu/UYpgsKJE5aQWEA0Xh3CSZuvsX/kpk3i35nM7sS3cMMkHPus/"
@@ -390,11 +229,16 @@ TASK_NAME_CN = {
     "first_buddy": "领取Buddy",
     "chat_5": "和AI聊天5次",
     "skill_1": "尝鲜热门技能",
+    "skill_share": "分享技能给好友",
     "expert_5": "召唤5次专家",
     "template_5": "使用5个模板",
     "automation_1": "设置自动化任务",
     "workstation_expert": "工作台搭建师",
     "WorkBuddy_Valorant": "无畏契约拼豆专家",
+    "expert_use_maidehao": "中国电商运营专家",
+    "expert_use_douyinyin": "抖音策略师",
+    "expert_use_shangjia_xuanchuan": "商家宣传页与海报设计师",
+    "expert_use_bowangwang": "直播电商教练",
     "wb_wechat_oa_subscribe_task": "关注公众号",
     "Sequential_Tasks_1": "小程序对话",
     "Sequential_Tasks_2": "小程序专家对话",
@@ -402,9 +246,49 @@ TASK_NAME_CN = {
     "Sequential_Tasks_4": "小程序定时任务",
     "Sequential_Tasks_5": "小程序GLM5.2",
     "Sequential_Tasks_6": "小程序对话10次",
-    "Sequential_Tasks_7": "小程序灵感功能",
+    "Sequential_Tasks_7": "PC灵感功能",
     "school_season": "校园日活动",
 }
+
+EXPERT_TASK_SPECS = {
+    "expert_use_maidehao": {
+        "id": "ex_GDl31WahyIH0",
+        "name": "卖得好",
+        "profession": "中国电商运营专家",
+        "version": "1.0.1",
+        "slug": "maidehao",
+    },
+    "expert_use_douyinyin": {
+        "id": "ex_FbY5nlWTqDod",
+        "name": "斗音音",
+        "profession": "抖音策略师",
+        "version": "1.0.2",
+        "slug": "douyinyin",
+    },
+    "expert_use_shangjia_xuanchuan": {
+        "id": "ex_Weo3x2EZuSDm",
+        "name": "商家宣传设计师",
+        "profession": "商家宣传页与海报设计师",
+        "version": "1.6.0",
+        "slug": "shangjia-xuanchuan",
+    },
+    "expert_use_bowangwang": {
+        "id": "ex_WZY136wV5aMt",
+        "name": "播旺旺",
+        "profession": "直播电商教练",
+        "version": "1.0.2",
+        "slug": "bowangwang",
+    },
+}
+DESKTOP_ONLY_TASK_CODES = frozenset(EXPERT_TASK_SPECS) | {
+    "Expert_lighthouse", "WorkBuddy_Valorant", "Sequential_Tasks_7",
+}
+LEVEL_TASK_CODES = {
+    "first_chat", "skill_installed", "wechat_linked",
+    "expert_summoned", "template_used",
+}
+_EXPERT_ID_RE = re.compile(r"^ex_[A-Za-z0-9]{6,64}$")
+_TRUSTED_JUMP_HOST_SUFFIXES = ("workbuddy.cn", "codebuddy.cn", "tencent.com")
 
 
 def task_cn(code):
@@ -495,7 +379,7 @@ MP_EXPERT_FALLBACK = {"WorkspaceBuilder": {"id": "WorkspaceBuilder", "name": "�
 MP_TASK_CODES = {
     "Sequential_Tasks_1", "Sequential_Tasks_2", "Sequential_Tasks_3",
     "Sequential_Tasks_4", "Sequential_Tasks_5", "Sequential_Tasks_6",
-    "Sequential_Tasks_7", "school_season",
+    "school_season",
 }
 
 MP_HEADER = {"X-Client-Platform": "miniprogram",
@@ -505,13 +389,22 @@ MP_REPORT_HEADERS = {
     "X-Client-Product": "workbuddy-mp", "X-Client-Version": "2.4.0",
     "X-Client-Platform": "mp-weixin", "X-Platform": "wechatmp",
 }
-DESKTOP_UA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+DESKTOP_UA = UA
+WORKBUDDY_UA_CN = DESKTOP_UA
+DESKTOP_VERSION_CN = "5.9.3"
+DESKTOP_COMMIT_CN = "d46924219e79332f49c37ccebf27292f87001b19"
+DESKTOP_RELEASE_CN = 1793093056315
+WEB_CONVERSATIONS_PATH = "/console/webchat/conversations"
+WEB_CONVERSATION_ACTIVE_STATUSES = ("working", "creating", "pending")
+WEB_CONVERSATION_PRUNE_KEEP = 8
 DESKTOP_BASE = "https://copilot.tencent.com"
 LIGHTHOUSE_EXPERT = {"id": "ex_2cvvUZQhDyeJ", "name": "腾讯轻量云专家", "version": "1.0.2"}
 PLAYBOOK_CASE = {"id": "01-ProductDesign", "name": "产品设计", "type": "document"}
 
 WRITE_GAP = 1.5  # 写动作间隔秒数（--gap 可覆盖，最低 1.0）
 MP_CHAT_GAP = 45.0  # mp 对话事件“真人节奏”间隔秒数（上游实测 45s；--mp-gap / WORKBUDDY_MP_GAP 可覆盖）
+MP_TARGET_WAIT_ROUNDS = 30
+MP_TARGET_WAIT_SECONDS = 2.5
 
 
 def _parse_task_filter(raw):
@@ -548,6 +441,10 @@ def want(*codes):
 # ============================================================================ #
 class SafeError(Exception):
     """Messages contain only stage names and numeric response codes."""
+
+
+class CheckinStatusError(SafeError):
+    """签到状态接口明确拒绝或回包结构无效。"""
 
 
 @dataclass(frozen=True)
@@ -697,6 +594,7 @@ class Reply:
     status: int
     code: object
     data: dict
+    message: str = ""
 
     @property
     def ok(self):
@@ -720,11 +618,11 @@ class Client:
         self.reauthenticated = False
         self.report = {}
 
-    def request(self, method, url, payload=None, headers=None, timeout=(10, 25)):
+    def request(self, method, url, payload=None, headers=None, *, verify=None):
         try:
             response = self.session.request(
                 method, url, json=payload, headers=headers or HEADERS,
-                timeout=timeout, allow_redirects=False,
+                timeout=(10, 25), allow_redirects=False, verify=verify,
             )
         except requests.RequestException:
             raise SafeError("网络请求失败或超时") from None
@@ -735,14 +633,28 @@ class Client:
         except ValueError:
             return Reply(response.status_code, None, {})
         data = body.get("data")
-        return Reply(response.status_code, body.get("code"), data if isinstance(data, dict) else {})
+        message = body.get("msg") or body.get("message")
+        return Reply(response.status_code, body.get("code"), data if isinstance(data, dict) else {},
+                     message if isinstance(message, str) else "")
 
     def yyb_code(self, route, extra=None):
         payload = {"ref": self.account.ref, "app_id": APP_ID}
         if extra:
             payload.update(extra)
-        # 取码用独立超时（连接 10 秒 / 读 60 秒）：取码经常要几十秒，与业务接口分开
-        reply = self.request("POST", self.account.server + route, payload, timeout=(10, 60))
+        credential = (os.getenv("YYB_API_KEY", "").strip()
+                      or os.getenv("YYB_PROTOCOL_TOKEN", "").strip())
+        headers = None
+        verify = None
+        if credential:
+            match = re.fullmatch(r"(?:Bearer +)?([!-~]+)", credential, re.IGNORECASE)
+            if not match:
+                raise SafeError("YYB 协议令牌格式错误，请检查 YYB_API_KEY 或 YYB_PROTOCOL_TOKEN")
+            headers = dict(HEADERS, Authorization="Bearer " + match[1])
+            if urlsplit(self.account.server).scheme == "https":
+                verify = True
+        reply = self.request("POST", self.account.server + route, payload, headers, verify=verify)
+        if reply.status == 401:
+            raise SafeError("YYB 协议鉴权失败（HTTP 401），请检查 YYB_API_KEY 或 YYB_PROTOCOL_TOKEN")
         result = reply.data.get("result", {})
         code = result.get("code") if isinstance(result, dict) else None
         if not reply.ok or not isinstance(code, str) or len(code) < 8:
@@ -850,41 +762,213 @@ class Client:
     def status(self):
         reply = self.authed("POST", STATUS_URL, {})
         if not reply.ok:
-            raise reply.error("签到状态查询")
+            raise CheckinStatusError(str(reply.error("签到状态查询")))
         if not isinstance(reply.data.get("today_checked_in"), bool):
-            raise SafeError("签到状态缺少有效字段")
+            raise CheckinStatusError("签到状态缺少有效字段")
         return reply.data
 
     def run_checkin(self):
         """每日签到（回读确认）。返回 (说明文本, 是否成功)。"""
         prepared = self.prepare()
-        before = self.status()
-        if before["today_checked_in"]:
-            return describe(before, "今日已签到，跳过", 0), True
-        if before.get("active") is not True:
-            raise SafeError("签到活动未开放")
-        after = before
-        reply = None
-        for attempt in range(2):
+        return _run_checkin(self, prepared=prepared)
+
+
+class SignRetries:
+    """调用方持有 State 运行锁；队列只包含 UID 哈希与当日调度信息。"""
+    def __init__(self):
+        custom = os.environ.get("WORKBUDDY_SIGN_RETRY", "").strip()
+        self.path = Path(custom) if custom else Path(STATE_DIR) / "workbuddy_sign_retry.json"
+        self.records = {}
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+                raise ValueError()
+            for key, record in data["accounts"].items():
+                if (not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(record, dict)
+                        or type(record.get("round")) is not int or record["round"] not in (0, 1, 2)
+                        or type(record.get("started_at")) is not int
+                        or record["started_at"] <= 0
+                        or record.get("next_at") != self._due_at(record)):
+                    raise ValueError()
+                if record.get("day") == beijing_today().isoformat():
+                    self.records[key] = dict(record)
+            if len(self.records) != len(data["accounts"]):
+                self.save()
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise SafeError("签到重试队列读取失败，请检查状态文件") from None
+
+    @staticmethod
+    def _due_at(record):
+        return None if record["round"] == 2 else record["started_at"] + (600, 2400)[record["round"]]
+
+    @staticmethod
+    def key(uid):
+        return hashlib.sha256(("workbuddy-sign-retry:" + uid).encode()).hexdigest()
+
+    def get(self, uid):
+        return self.records.get(self.key(uid))
+
+    def due(self, uid):
+        record = self.get(uid)
+        return bool(record and record["next_at"] is not None and time.time() >= record["next_at"])
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".sign-retry-", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"version": 1, "accounts": self.records}, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.path)
+        except OSError:
+            raise SafeError("签到重试队列保存失败") from None
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def schedule(self, uid):
+        if self.get(uid):
+            return
+        now = int(time.time())
+        self.records[self.key(uid)] = {
+            "day": beijing_today().isoformat(), "started_at": now, "round": 0, "next_at": now + 600,
+        }
+        self.save()
+
+    def reserve(self, uid):
+        if not self.due(uid):
+            return False
+        record = self.get(uid)
+        record["round"] += 1
+        record["next_at"] = self._due_at(record)
+        self.save()  # 发请求前消费轮次，异常退出也不会每分钟重复提交。
+        return True
+
+    def clear(self, uid):
+        if self.records.pop(self.key(uid), None) is not None:
+            self.save()
+
+    def pending(self, uid):
+        record = self.get(uid)
+        if record and record["round"] == 2:
+            return "签到重试两轮已耗尽，今日结果仍待确认", False
+        minutes = max(0, int((record["next_at"] - time.time() + 59) // 60)) if record else 0
+        return "签到待重试，约 %s 分钟后处理" % minutes, False
+
+
+def _retryable_checkin(reply):
+    return (reply is not None and reply.status == 500 and reply.code in (10001, "10001")
+            and "稍后重试" in reply.message)
+
+
+def _run_checkin(client, *, prepared=True, scheduled=False):
+    retries = SignRetries()
+    uid = client.uid
+    record = retries.get(uid)
+    if record and not scheduled:
+        if record["round"] < 2 and not retries.due(uid):
+            return retries.pending(uid)
+        scheduled = retries.reserve(uid)
+    try:
+        before = client.status()
+    except CheckinStatusError:
+        retries.clear(uid)
+        raise
+    except SafeError:
+        if scheduled:
+            return retries.pending(uid)
+        raise
+    if before["today_checked_in"]:
+        retries.clear(uid)
+        return describe(before, "今日已签到，跳过", 0), True
+    if before.get("active") is not True:
+        retries.clear(uid)
+        raise SafeError("签到活动未开放")
+    if record and record["round"] == 2 and not scheduled:
+        return retries.pending(uid)
+    for attempt in range(1 if scheduled else 2):
+        try:
+            reply = client.authed("POST", CHECKIN_URL, {})
+        except SafeError:
+            reply = None
+        try:
+            after = client.status()
+        except CheckinStatusError:
+            retries.clear(uid)
+            raise
+        except SafeError:
+            if _retryable_checkin(reply):
+                retries.schedule(uid)
+            if scheduled or retries.get(uid):
+                return retries.pending(uid)
+            raise SafeError("签到结果未确认（回读失败），下次运行将先查询状态") from None
+        if after["today_checked_in"]:
+            retries.clear(uid)
+            delta = number(after.get("total_credits")) - number(before.get("total_credits"))
+            receipt = _checkin_reward_text(reply, after, delta)
+            line = describe(after, "签到成功（回读确认）" + receipt, max(0, delta),
+                            pending_credit=receipt == "，积分待入账")
+            return line + ("；准备流程待重试" if not prepared else ""), True
+        if _retryable_checkin(reply):
+            retries.schedule(uid)
+            return retries.pending(uid)
+        retryable = reply is None or reply.status >= 500 or reply.ok
+        if scheduled:
+            if not retryable:
+                retries.clear(uid)
+                raise reply.error("签到")
+            return retries.pending(uid)
+        if not retryable or attempt == 1:
+            if reply and not reply.ok:
+                raise reply.error("签到")
+            raise SafeError("签到未到账，回读仍为未签到")
+        time.sleep(2)
+    raise SafeError("签到未确认")
+
+
+def run_sign_retry_only(accounts):
+    directory = os.getenv("WB_CACHE_DIR") or default_cache_dir()
+    state = State(directory)
+    try:
+        state.__enter__()
+    except SafeError as exc:
+        if str(exc) == "已有同一缓存目录的任务在运行":
+            print("签到重试：主任务正在运行，下次检查", flush=True)
+            return 0
+        raise
+    errors = 0
+    processed = 0
+    try:
+        retries = SignRetries()
+        for account in accounts:
+            entry = state.data["accounts"].get(account.key, {})
+            uid = entry.get("uid")
+            if not isinstance(uid, str) or not retries.due(uid):
+                continue
+            retries.reserve(uid)
+            processed += 1
+            client = Client(account, state)
             try:
-                reply = self.authed("POST", CHECKIN_URL, {})
-            except SafeError:
-                reply = None
-            try:
-                after = self.status()
-            except SafeError:
-                raise SafeError("签到结果未确认（回读失败），下次运行将先查询状态") from None
-            if after["today_checked_in"]:
-                delta = number(after.get("total_credits")) - number(before.get("total_credits"))
-                line = describe(after, "签到成功（回读确认）", max(0, delta))
-                return line + ("；准备流程待重试" if not prepared else ""), True
-            retryable = reply is None or reply.status >= 500 or reply.ok
-            if not retryable or attempt == 1:
-                if reply and not reply.ok:
-                    raise reply.error("签到")
-                raise SafeError("签到未到账，回读仍为未签到")
-            time.sleep(2)
-        raise SafeError("签到未确认")
+                client.authenticate()
+                if client.uid != uid:
+                    retries.clear(uid)
+                    raise SafeError("签到重试账号身份已变化")
+                line, _checked = _run_checkin(client, scheduled=True)
+                print("账号%d：%s" % (account.number, line), flush=True)
+            except SafeError as exc:
+                errors += 1
+                print("账号%d：%s" % (account.number, exc), flush=True)
+            finally:
+                client.session.close()
+            retries = SignRetries()
+    finally:
+        state.__exit__(None, None, None)
+    print("签到重试检查完成，本轮处理 %d 个账号" % processed, flush=True)
+    return 1 if errors else 0
 
 
 def number(value):
@@ -894,8 +978,23 @@ def number(value):
         return 0
 
 
-def describe(data, label, delta):
+def _checkin_reward_text(reply, after, delta):
+    if (reply is None or not reply.ok or isinstance(reply.code, bool)
+            or reply.data.get("task_status") in (3, "3")):
+        return ""
+    if reply.data.get("credit_delayed") is True and delta <= 0 and number(after.get("today_credit")) <= 0:
+        return "，积分待入账"
+    try:
+        credit = _credit_decimal(reply.data.get("credit"))
+        return "，回执 +%s 积分" % _format_credit(credit) if credit > 0 else ""
+    except (TypeError, ValueError, ArithmeticError):
+        return ""
+
+
+def describe(data, label, delta, *, pending_credit=False):
     today = number(data.get("today_credit")) if data.get("today_checked_in") is True else 0
+    if pending_credit:
+        today = "待入账"
     return (f"{label}；本次累计增量 {delta}；今日 {today}；"
             f"签到累计 {number(data.get('total_credits'))}；连续 {number(data.get('streak_days'))} 天")
 
@@ -937,14 +1036,383 @@ def _json_or_empty(r):
 
 def prog(s, code):
     try:
-        r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False).json()
-        for t in r.get("data", {}).get("tasks", []):
-            if t.get("task_code") == code:
-                pr = t.get("progress") or {}
-                return t.get("accept_status", ""), pr.get("current"), pr.get("target")
-    except Exception:
+        for task in growth_task_rows(s):
+            if task.get("task_code") == code:
+                progress = task.get("progress") or {}
+                return task.get("accept_status", ""), progress.get("current"), progress.get("target")
+    except (SafeError, requests.RequestException):
         pass
     return None, None, None
+
+
+def _growth_task_rows(s, headers=None, path="/v2/activity/growth/tasks"):
+    """任务发现复用统一的只读限速和有界重试，单源失败不阻断其他来源。"""
+    try:
+        return growth_task_rows(s, headers=headers, path=path)
+    except (SafeError, requests.RequestException):
+        return []
+
+
+def _growth_task_row(s, code):
+    """桌面成长任务原始行（含 jump_url / valid_end 等字段）；未下发返回 None。"""
+    for task in _growth_task_rows(s):
+        if task.get("task_code") == code or task.get("code") == code:
+            return task
+    return None
+
+
+def _heatmap_today_score(s):
+    """读取成长热力图今日 score；未找到或查询失败返回 None。"""
+    try:
+        payload = s.get(
+            BASE + "/v2/activity/growth/heatmap",
+            timeout=20, verify=False).json() or {}
+        data = payload.get("data") or {}
+        today_value = data.get("today")
+        if isinstance(today_value, dict):
+            today = str(today_value.get("date") or "")[:10]
+        else:
+            today = str(today_value or "")[:10]
+        if not today:
+            today = beijing_today().isoformat()
+        for cell in data.get("cells") or []:
+            if not isinstance(cell, dict):
+                continue
+            if str(cell.get("date") or "")[:10] != today:
+                continue
+            score = cell.get("score")
+            if type(score) in (int, float):
+                return score
+        return None
+    except Exception:
+        return None
+
+
+def _market_expert_by_id(s, keyword, expected_id):
+    """分页搜索专家市场，按 expert_id 精确落位；无 ID 时只接受唯一同名结果。"""
+    keyword = str(keyword or "").strip()
+    expected_id = str(expected_id or "").strip()
+    if not keyword:
+        return None
+    if expected_id and not _EXPERT_ID_RE.fullmatch(expected_id):
+        return None
+    candidates = {}
+    for page in range(1, 4):
+        try:
+            response = api_retry(
+                s, "POST", CBDOMAIN + "/v2/operation-platform/market/expert/list",
+                body={"page": page, "page_size": 20, "keyword": keyword},
+            )
+            data = response.json().get("data") or {}
+            rows = data.get("experts") or data.get("items") or []
+        except Exception:
+            break
+        if not rows:
+            break
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            expert_id = str(
+                row.get("expert_id") or row.get("source_id") or row.get("id") or "")
+            if not _EXPERT_ID_RE.fullmatch(expert_id):
+                continue
+            display = _extract_name(
+                row.get("display_name_zh") or row.get("displayName")
+                or row.get("name") or "")
+            profession = _extract_name(
+                row.get("profession_zh") or row.get("profession") or "")
+            version = row.get("version")
+            if not version:
+                meta = row.get("_meta") or {}
+                version = meta.get("version") if isinstance(meta, dict) else ""
+            candidate = {
+                "id": expert_id,
+                "name": display or expert_id,
+                "profession": profession or keyword,
+                "version": str(version or ""),
+            }
+            if expected_id and expert_id == expected_id:
+                return candidate
+            if not expected_id and keyword in (display, profession):
+                candidates[expert_id] = candidate
+        if len(rows) < 20:
+            break
+    if not expected_id and len(candidates) == 1:
+        return next(iter(candidates.values()))
+    return None
+
+
+def _expert_sources(s):
+    sources = {}
+    for name, headers in (("desktop", None), ("mp", MP_HEADER)):
+        try:
+            sources[name] = {"ok": True, "rows": growth_task_rows(s, headers=headers)}
+        except (SafeError, requests.RequestException):
+            sources[name] = {"ok": False, "rows": []}
+    return sources
+
+
+def _build_task_snapshot(s):
+    """动作前的任务视图，领奖与写后回读继续读取实时状态。"""
+    sources = _expert_sources(s)
+    try:
+        sources["level"] = {"ok": True, "rows": growth_task_rows(s, path="/activity/growth/tasks")}
+    except (SafeError, requests.RequestException):
+        sources["level"] = {"ok": False, "rows": []}
+    by_code = {}
+    for source in sources.values():
+        for row in source["rows"]:
+            code = row.get("task_code") or row.get("code")
+            if isinstance(code, str) and code:
+                by_code.setdefault(code, []).append(row)
+    complete = sources["desktop"]["ok"] and sources["mp"]["ok"]
+    return by_code, complete
+
+
+def _snapshot_skip_reason(snapshot, code):
+    rows, complete = snapshot
+    if code.startswith("expert_use_"):
+        return ""  # 动态专家可能在本轮稍后解锁，保留实时来源判断。
+    matching = rows.get(code, [])
+    if not matching:
+        return "未下发" if complete else ""
+    states = [row.get("accept_status") or row.get("status") for row in matching]
+    if any(state == "claimed" or _claimed_flag(row.get("claimed"))
+           for state, row in zip(states, matching)):
+        return "已领奖"
+    if not complete:
+        return ""
+    if all(state == "completed" or _task_claimable(row) for state, row in zip(states, matching)):
+        return "已达标，交给实时领奖"
+    if all(row.get("locked") is True for row in matching):
+        return "未解锁"
+    return ""
+
+def _expert_context(s, code):
+    sources = _expert_sources(s)
+    for name in sources:
+        sources[name]["row"] = next((row for row in sources[name]["rows"]
+            if (row.get("task_code") or row.get("code")) == code), None)
+    if not sources["desktop"]["ok"]:
+        raise SafeError("专家任务来源未确认（桌面任务列表读取失败）")
+    if sources["desktop"]["row"] is not None:
+        return "desktop", sources["desktop"]["row"], sources
+    if not sources["mp"]["ok"]:
+        raise SafeError("专家任务来源未确认（小程序任务列表读取失败）")
+    return "mp", sources["mp"]["row"], sources
+
+def _expert_task_row(s, code):
+    # 只读发现允许保留另一侧提供的信息；写动作另用 _expert_context 确认来源。
+    sources = _expert_sources(s)
+    for name in ("desktop", "mp"):
+        for row in sources[name]["rows"]:
+            if (row.get("task_code") or row.get("code")) == code:
+                return row
+    return None
+
+def _expert_prog(s, code):
+    _source, row, _sources = _expert_context(s, code)
+    if row is None:
+        return None, None, None
+    progress = row.get("progress") or {}
+    return row.get("accept_status", ""), progress.get("current"), progress.get("target")
+
+def _expert_unavailable(row):
+    if row.get("locked"):
+        return "任务未解锁"
+    today = beijing_today().isoformat()
+    for field, future in (("valid_start", True), ("valid_end", False)):
+        value = str(row.get(field) or "")[:10]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            if (future and value > today) or (not future and value < today):
+                return "任务未到开放日期" if future else "任务已到期"
+    return ""
+
+def _accept_expert_task(s, code, log):
+    source, row, _sources = _expert_context(s, code)
+    if row is None or _expert_unavailable(row):
+        return False
+    if row.get("accept_status") in ("accepted", "completed", "claimed"):
+        return True
+    headers = MP_HEADER if source == "mp" else None
+    # 只向已确认来源提交一次。响应丢失时先回读，不切换来源或重放写入。
+    try:
+        s.post(BASE + "/v2/activity/growth/tasks/accept", json={"task_codes": [code]},
+               timeout=20, verify=False, headers=headers)
+    except requests.RequestException:
+        pass
+    for attempt in range(2):
+        if attempt:
+            time.sleep(WRITE_GAP)
+        try:
+            rows = growth_task_rows(s, headers=headers)
+        except (SafeError, requests.RequestException):
+            continue
+        current = next((r for r in rows if (r.get("task_code") or r.get("code")) == code), None)
+        if current and current.get("accept_status") in ("accepted", "completed", "claimed"):
+            return True
+    log("   专家任务接受结果未确认，停止本任务")
+    return False
+
+def _task_claimable(task):
+    if not task or task.get("locked"):
+        return False
+    if task.get("accept_status") == "claimed" or str(task.get("claimed")).lower() == "true":
+        return False
+    if (task.get("task_code") or task.get("code")) == "skill_share":
+        return _skill_share_complete(task)
+    progress = task.get("progress") or {}
+    current, target = _as_int(progress.get("current")), _as_int(progress.get("target"))
+    return current >= target if target > 0 else task.get("accept_status") == "completed"
+
+def _conversation_owner_key(s):
+    uid = s.headers.get("X-User-Id", "")
+    return hashlib.sha256(uid.encode()).hexdigest() if isinstance(uid, str) and uid else ""
+
+def _conversation_owned(s):
+    key = _conversation_owner_key(s)
+    if not key:
+        return {}
+    path = Path(STATE_DIR) / "workbuddy_conversation_state.json"
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+        raise SafeError("会话归属记录格式异常")
+    rows = data["accounts"].get(key, {})
+    if not isinstance(rows, dict):
+        raise SafeError("会话归属记录格式异常")
+    return rows
+
+def _conversation_record(s, conversation_id, add=False):
+    """只记录实际创建返回的 ID；独立状态文件不涉及 YYB 或邀请缓存。"""
+    key = _conversation_owner_key(s)
+    if not key or not conversation_id:
+        return
+    try:
+        path = Path(STATE_DIR) / "workbuddy_conversation_state.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"version": 1, "accounts": {}}
+        if data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+            raise ValueError()
+        owned = data["accounts"].setdefault(key, {})
+        if add:
+            owned[conversation_id] = {"created": time.time()}
+        else:
+            if conversation_id not in owned:
+                return
+            owned.pop(conversation_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".wb-conversations-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=True, separators=(",", ":"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except (OSError, ValueError, AttributeError, TypeError):
+        print("⚠️ 会话归属记录读写失败，历史会话不自动清理", flush=True)
+
+
+def _expert_spec_for_task(s, code):
+    """返回内置专家定义；合法任务 jump_url 中的新 ID 优先于静态兜底。"""
+    stored = EXPERT_TASK_SPECS.get(code)
+    if not stored and not str(code).startswith("expert_use_"):
+        return {}
+    row = _expert_task_row(s, code) or {}
+    title = str(
+        row.get("title") or row.get("task_title") or row.get("task_name")
+        or TASK_NAME_CN.get(code) or code)
+    spec = dict(stored or {
+        "id": "",
+        "name": "",
+        "profession": title,
+        "version": "",
+        "slug": str(code),
+    })
+    dynamic_id = _expert_id_from_jump_url(row.get("jump_url"))
+    if dynamic_id:
+        spec["id"] = dynamic_id
+    return spec
+
+
+def _dynamic_expert_task_codes(s):
+    sources = _expert_sources(s)
+    return sorted({str(row.get("task_code") or row.get("code") or "").strip()
+        for source in sources.values() for row in source["rows"]
+        if str(row.get("task_code") or row.get("code") or "").startswith("expert_use_")})
+
+
+def _parse_expert_deeplink(value):
+    """只接受 workbuddy://experts?expertId=ex_xxx 这一种专家深链。"""
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme.lower() != "workbuddy":
+            return ""
+        if parsed.netloc.lower() != "experts" or parsed.path not in ("", "/"):
+            return ""
+        if parsed.fragment:
+            return ""
+        ids = parse_qs(parsed.query, keep_blank_values=True).get("expertId", [])
+        unique = {item.strip() for item in ids if item.strip()}
+        if len(ids) != 1 or len(unique) != 1:
+            return ""
+        expert_id = unique.pop()
+        return expert_id if _EXPERT_ID_RE.fullmatch(expert_id) else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _expert_id_from_jump_url(jump_url):
+    """从任务 jump_url 的 deeplink 参数提取专家 ID，不接受任意 URL 内嵌值。"""
+    if not isinstance(jump_url, str):
+        return ""
+    raw = jump_url.strip()
+    if not raw:
+        return ""
+    direct = _parse_expert_deeplink(raw)
+    if direct:
+        return direct
+    if raw.lower().startswith("deeplink="):
+        deeplinks = parse_qs(raw, keep_blank_values=True).get("deeplink", [])
+        if len(deeplinks) == 1:
+            return _parse_expert_deeplink(deeplinks[0])
+        return ""
+    try:
+        outer = urlparse(raw)
+        if outer.scheme.lower() not in ("http", "https", "workbuddy") or outer.fragment:
+            return ""
+        if outer.scheme.lower() in ("http", "https"):
+            host = (outer.hostname or "").rstrip(".").lower()
+            if not any(host == suffix or host.endswith("." + suffix)
+                       for suffix in _TRUSTED_JUMP_HOST_SUFFIXES):
+                return ""
+        deeplinks = parse_qs(outer.query, keep_blank_values=True).get("deeplink", [])
+        if len(deeplinks) != 1:
+            return ""
+        return _parse_expert_deeplink(deeplinks[0])
+    except (TypeError, ValueError):
+        return ""
+
+
+def _new_conversation_id():
+    """官方会话级 ID：UUID v4（36 字符，带横线）。"""
+    return str(uuid.uuid4())
+
+
+def _new_message_id():
+    """官方消息/请求级 ID：32 hex，前 48 bit 为毫秒时间戳。"""
+    return "%012x%s" % (int(time.time() * 1000), uuid.uuid4().hex[:20])
+
+
+def _env_enabled(name, default=True):
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
 
 
 def _as_int(value, default=0):
@@ -978,43 +1446,103 @@ def _dig(obj, key):
     return None
 
 
+def _claimed_flag(value):
+    return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
+def _row_claimed(row):
+    return (row.get("accept_status") or row.get("status")) == "claimed" or _claimed_flag(row.get("claimed"))
+
+
 def _claim_response_ok(response, payload):
-    """领取回执是否确认已处理（成功、幂等已领或明确 already claimed）。"""
-    code = payload.get("code") if isinstance(payload, dict) else None
-    data = payload.get("data") if isinstance(payload, dict) else None
+    code = payload.get("code")
+    data = payload.get("data")
     data = data if isinstance(data, dict) else {}
-    message = str(payload.get("msg") or "").lower() if isinstance(payload, dict) else ""
-    success = 200 <= response.status_code < 300 and _api_code_ok(code)
-    already = (200 <= response.status_code < 300 and (
-        bool(data.get("already_claimed"))
-        or any(marker in message for marker in ("already", "已领取", "已领过"))))
-    return success or already, data, message
+    message = str(payload.get("msg") or "").lower()
+    already = _claimed_flag(data.get("already_claimed")) or any(
+        marker in message for marker in ("already claimed", "already been claimed", "已领取", "已领过"))
+    if not 200 <= response.status_code < 300:
+        return False, data, False
+    if already:
+        return True, data, True
+    if isinstance(code, bool) or not _api_code_ok(code):
+        return False, data, False
+    if _claimed_flag(data.get("claimed")):
+        return True, data, False
+    for key in ("credit", "energy", "reward_credit", "reward_energy", "reward", "rewards"):
+        value = data.get(key)
+        if key in ("reward", "rewards") and isinstance(value, (dict, list)) and value:
+            return True, data, False
+        try:
+            if _credit_decimal(value) > 0:
+                return True, data, False
+        except (ValueError, ArithmeticError):
+            pass
+    return False, data, False
+
+
+def _claim_attempts(s):
+    attempts = getattr(s, "_workbuddy_claim_attempts", None)
+    if not isinstance(attempts, dict):
+        attempts = s._workbuddy_claim_attempts = {}
+    return attempts
+
+
+def _claim_readback(s, code, log, headers):
+    try:
+        rows = growth_task_rows(s, headers=headers)
+    except (SafeError, requests.RequestException):
+        return False
+    if any((row.get("task_code") or row.get("code")) == code and _row_claimed(row) for row in rows):
+        _claim_attempts(s)[code] = True
+        log("   🎁领奖[%s]: 已由实时任务状态确认" % code)
+        return True
+    return False
+
+
+def _claim_task(s, code, log, *, mp):
+    attempts = _claim_attempts(s)
+    if code in attempts:
+        return attempts[code]
+    attempts[code] = False
+    url = BASE + "/activity/growth/tasks/%s/claim" % code
+    headers = MP_HEADER if mp else None
+    try:
+        r = s.post(url, json={}, timeout=20, verify=False, headers=headers)
+        if not mp and r.status_code == 400:
+            r = s.post(url, json={}, timeout=20, verify=False,
+                       headers={"Origin": BASE, "Referer": BASE + "/profile/growth-center",
+                                "x-client-platform": "web"})
+    except requests.RequestException:
+        if _claim_readback(s, code, log, headers):
+            return True
+        log("   🎁领奖[%s]: 请求中断，等待回读，本轮暂缓重复提交" % code)
+        return False
+    payload = _json_or_empty(r)
+    ok, data, already = _claim_response_ok(r, payload)
+    attempts[code] = ok
+    if already:
+        log("   🎁领奖[%s]: 已领过" % code)
+    elif ok:
+        credit = data.get("credit", data.get("reward_credit"))
+        energy = data.get("energy", data.get("reward_energy"))
+        reward = "、".join("+%s%s" % (value, unit) for value, unit in (
+            (credit, "积分"), (energy, "能量")) if value is not None)
+        log("   🎁领奖[%s]: %s" % (code, reward or "回执确认已领"))
+    elif (200 <= r.status_code < 300 and (payload.get("code") is None or _api_code_ok(payload.get("code")))
+          or r.status_code >= 500 or r.status_code in (408, 429)):
+        if _claim_readback(s, code, log, headers):
+            return True
+        log("   🎁领奖[%s]: 回执缺少到账凭据，等待实时回读" % code)
+    else:
+        log("   领奖[%s]: 请求失败 HTTP %s" % (code, r.status_code))
+        if 200 <= r.status_code < 500:
+            attempts.pop(code, None)  # 明确被拒的请求仍可由后续达标扫描处理。
+    return ok
 
 
 def claim(s, code, log):
-    """领奖：chat 域 400 时自动降级 web 域（x-client-platform: web）。返回是否已处理。"""
-    r = s.post(BASE + "/activity/growth/tasks/%s/claim" % code, json={}, timeout=20, verify=False)
-    if r.status_code == 400:
-        r = s.post(BASE + "/activity/growth/tasks/%s/claim" % code, json={},
-                   timeout=20, verify=False,
-                   headers={"Origin": BASE, "Referer": BASE + "/profile/growth-center",
-                            "x-client-platform": "web"})
-    try:
-        payload = r.json() or {}
-    except Exception:
-        payload = {}
-    ok, data, message = _claim_response_ok(r, payload)
-    if data.get("already_claimed") or any(marker in message for marker in ("already", "已领取", "已领过")):
-        log("   🎁领奖[%s]: 已领过" % code)
-    elif ok and data.get("credit") is not None:
-        log("   🎁领奖[%s]: +%s积分+%s能量" % (
-            code, data.get("credit"), data.get("energy")))
-    elif ok:
-        log("   🎁领奖[%s]: 已处理，回执未提供实际到账额" % code)
-    else:
-        log("   领奖[%s]: 失败 HTTP %s %s" % (
-            code, r.status_code, message[:60]))
-    return ok
+    return _claim_task(s, code, log, mp=False)
 
 
 def derive_id(uid, salt):
@@ -1023,20 +1551,21 @@ def derive_id(uid, salt):
 
 def report(s, uid, nick, events, base=None, headers=None):
     """events: list of dict；自动补全信封。base/headers 可选：活跃上报走 CBDOMAIN 时用。"""
-    UA_SHORT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 WorkBuddy/5.5.4"
     mid = derive_id(uid, "machine")
     out = []
     for e in events:
         env = {"timestamp": int(time.time() * 1000), "reportDelay": 0,
                "userId": uid, "userNickname": nick,
-               "ideName": "WorkBuddy", "ideType": "WorkBuddy", "ideVersion": "5.5.6",
+               "ideName": "WorkBuddy", "ideType": "WorkBuddy",
+               "ideVersion": DESKTOP_VERSION_CN,
                "machineId": mid, "sessionId": derive_id(uid, "session"),
-               "mode": "CLOUD", "userAgent": UA_SHORT, "os": "Win32", "arch": "x64",
-               "osVersion": "10.0.26220", "timezone": "Asia/Shanghai",
-               "product": "SaaS", "releaseDate": 1789036585355,
-               "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
-               "extName": "workbuddy-desktop", "extVersion": "5.5.6",
-               "cpuCores": 20, "memorySize": 24}
+               "mode": "CLOUD", "userAgent": WORKBUDDY_UA_CN, "os": "Win32", "arch": "x64",
+               "osVersion": "10.0.28000", "timezone": "Asia/Shanghai",
+               "product": "SaaS", "releaseDate": DESKTOP_RELEASE_CN,
+               "commit": DESKTOP_COMMIT_CN, "qimei36": derive_id(uid, "qimei"),
+               "extName": "workbuddy-desktop", "extVersion": DESKTOP_VERSION_CN,
+               "cpuModel": "11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz",
+               "cpuCores": 8, "memorySize": 16}
         env.update(e)
         out.append(env)
     try:
@@ -1047,25 +1576,140 @@ def report(s, uid, nick, events, base=None, headers=None):
         return 0
 
 
+def _web_conversation_limit_hit(status, payload):
+    if status != 429 and (not isinstance(payload, dict)
+                          or payload.get("code") not in (10105, "10105")):
+        return False
+    try:
+        blob = json.dumps(payload, ensure_ascii=False).lower()
+    except Exception:
+        blob = str(payload).lower()
+    return ("10105" in blob
+            or "maximum number of active conversations" in blob)
+
+
+def _web_conversation_action(s, conversation_id, action):
+    """结束/删除网页会话；返回上游是否受理。清理失败不影响主流程。"""
+    if not conversation_id:
+        return False
+    try:
+        response = s.post(
+            BASE + WEB_CONVERSATIONS_PATH + "/"
+            + requests.utils.quote(str(conversation_id), safe="") + "/" + action,
+            json={}, timeout=15, verify=False)
+        payload = response.json() or {}
+        code = payload.get("code") if isinstance(payload, dict) else None
+        return 200 <= response.status_code < 300 and code in (0, None)
+    except Exception:
+        return False
+
+
+def _web_conversation_prune(s, prefix, keep=WEB_CONVERSATION_PRUNE_KEEP):
+    """账号级计数，跨任务只收尾有精确归属记录且本轮未在用的会话。"""
+    try:
+        response = s.get(BASE + WEB_CONVERSATIONS_PATH, params={"page": 1, "pageSize": 50},
+                         timeout=20, verify=False)
+        payload = _json_or_empty(response)
+        if not 200 <= response.status_code < 300 or payload.get("code") not in (0, None):
+            return 0
+        rows = (payload.get("data") or {}).get("conversations") or []
+        owned = _conversation_owned(s)
+    except (requests.RequestException, SafeError, OSError, ValueError, AttributeError):
+        return 0
+    active = [row for row in rows if isinstance(row, dict) and
+              str(row.get("status") or "").lower() in WEB_CONVERSATION_ACTIVE_STATUSES]
+    if len(active) < 10:
+        return 0
+    in_use = getattr(s, "_workbuddy_in_use_conversations", set())
+    if not isinstance(in_use, set):
+        in_use = set()
+    eligible = [row for row in active if row.get("id") in owned and row.get("id") not in in_use]
+    eligible.sort(key=lambda row: str(row.get("createdAt") or ""))
+    stopped = 0
+    for row in eligible:
+        if len(active) - stopped <= keep:
+            break
+        cid = row["id"]
+        if _web_conversation_action(s, cid, "stop"):
+            _conversation_record(s, cid)
+            stopped += 1
+    return stopped
+
+
+def _web_conversation_release(s, conversation_id, delete=False):
+    stopped = _web_conversation_action(s, conversation_id, "stop")
+    deleted = _web_conversation_action(s, conversation_id, "delete") if delete else False
+    in_use = getattr(s, "_workbuddy_in_use_conversations", set())
+    if isinstance(in_use, set):
+        in_use.discard(conversation_id)
+    if stopped or deleted:
+        _conversation_record(s, conversation_id)
+    return stopped or deleted
+
+
+def _web_conversation_create(s, conv_name):
+    body = {"name": conv_name + "-" + uuid.uuid4().hex[:8]}
+    try:
+        response = s.post(BASE + WEB_CONVERSATIONS_PATH, json=body,
+                          timeout=20, verify=False)
+        payload = response.json() or {}
+    except Exception:
+        return ""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    conversation_id = str(data.get("conversationId") or "") if isinstance(data, dict) else ""
+    if _web_conversation_limit_hit(response.status_code, payload):
+        freed = _web_conversation_prune(s, conv_name)
+        if not freed:
+            print("⚠️ 网页会话名额不足，未找到可安全收尾的脚本会话，请在客户端处理", flush=True)
+        if freed:
+            try:
+                response = s.post(BASE + WEB_CONVERSATIONS_PATH, json=body,
+                                  timeout=20, verify=False)
+                payload = response.json() or {}
+                data = payload.get("data") if isinstance(payload, dict) else None
+                conversation_id = (str(data.get("conversationId") or "")
+                                   if isinstance(data, dict) else "")
+            except Exception:
+                return ""
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if not (200 <= response.status_code < 300) or code not in (0, None):
+        return ""
+    if conversation_id:
+        _conversation_record(s, conversation_id, add=True)
+        in_use = getattr(s, "_workbuddy_in_use_conversations", None)
+        if not isinstance(in_use, set):
+            in_use = set()
+            s._workbuddy_in_use_conversations = in_use
+        in_use.add(conversation_id)
+    return conversation_id
+
+
 def webchat2(s, conv_name, prompt, meta=None, model="glm-5.2"):
-    conv = s.post(BASE + "/console/webchat/conversations", json={"name": conv_name + "-" + str(uuid.uuid4())[:8]},
-                  timeout=20, verify=False).json()
-    conv_id = conv.get("data", {}).get("conversationId", "")
+    """真实对话：返回 (conversationId, 回复正文, 服务端消息id)。
+
+    服务端消息 id 取 SSE 首块的 "id"（形如 cmb-<32hex>）——上游 panel 实测：专家/技能类
+    任务的 requestId / messageId 必须是真实会话的服务端 id，自造 uuid 不计数。
+    """
+    conv_id = _web_conversation_create(s, conv_name)
+    if not conv_id:
+        return "", "", ""
     payload = {"messages": [{"role": "user", "content": prompt}], "model": model, "stream": True,
                "conversationId": conv_id}
     if meta:
         payload["_meta"] = meta
-    headers = dict(s.headers)
-    headers["Accept"] = "text/event-stream"
-    txt = ""
-    srv_mid = ""
+    headers = dict(s.headers); headers["Accept"] = "text/event-stream"
+    txt = ""; srv_mid = ""
+    finished = False
     try:
         with s.post(BASE + "/console/chat/completions", json=payload, timeout=90, verify=False,
                     stream=True, headers=headers) as r:
+            if not (200 <= r.status_code < 300):
+                return conv_id, txt, srv_mid
             for line in r.iter_lines(decode_unicode=True):
                 if line and line.startswith("data: "):
                     d = line[6:]
                     if d.strip() in ("[DONE]", "[完成]", "[✅完成]"):
+                        finished = True
                         break
                     try:
                         jj = json.loads(d)
@@ -1079,6 +1723,11 @@ def webchat2(s, conv_name, prompt, meta=None, model="glm-5.2"):
                         pass
     except Exception:
         pass
+    else:
+        finished = finished or bool(txt or srv_mid)
+    finally:
+        # 网页会话占用上游活跃名额；无论成功失败都必须收尾。
+        _web_conversation_release(s, conv_id, delete=not finished)
     return conv_id, txt, srv_mid
 
 
@@ -1123,33 +1772,115 @@ def _clean_num(v):
     return ("%.2f" % r).rstrip("0").rstrip(".")
 
 
-def queryCredits(s):
-    """积分查询：剩余积分合计 + 各套餐明细（对齐客户端 App 顶部显示的剩余积分）。
+def _credit_decimal(value):
+    if value is None or isinstance(value, bool):
+        raise ValueError("积分数值缺失或类型错误")
+    result = Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError("积分数值无效")
+    return result
 
-    App 顶部"剩余积分"= 所有套餐 CycleRemainCapacity 之和（如 2425.4 = 主套餐1925.4
-    + 加量包1 500 + 加量包2 0），合计在前、明细在后，避免"看着不匹配"。
-    """
+def _format_credit(value):
+    number = _credit_decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if number == 0:
+        number = Decimal("0.00")
+    return format(number, "f").rstrip("0").rstrip(".")
+
+def _sample_credit(s, summary, phase, log):
+    meta = {}
     try:
-        # 瞬时错误（网络/5xx）有界重试：2s/4s 退避，业务错误不重试（上游 panel 同款口径）
-        r = api_retry(s, "POST", BASE + "/billing/meter/get-user-resource-summary", body={},
-                      retries=3, gap=2.0).json()
-        pkgs = r.get("data", {}).get("Packages", [])
-        paid = r.get("data", {}).get("IsPaidUser")
+        text, _paid = queryCredits(s, meta)
+        value = str(_credit_decimal(meta.get("total_remain")))
+    except Exception:
+        text, value = "余额查询失败", None
+    summary["credits_" + phase] = value
+    if value is not None:
+        summary["credits"] = text
+        summary["credits_detail_phase"] = phase
+    elif not summary.get("credits"):
+        summary["credits"] = text
+    if value is None:
+        log("   ⚠️%s余额查询失败，保留其他业务结果" % ("操作前" if phase == "before" else "操作后"))
+
+def _credit_lines(summary):
+    if summary.get("query") or summary.get("enterprise") or not any(k in summary for k in ("credits_before", "credits_after")):
+        return ["   💰 %s" % (summary.get("credits") or "暂无数据")]
+    values = []
+    for phase in ("before", "after"):
+        try:
+            values.append(_credit_decimal(summary.get("credits_" + phase)))
+        except (ValueError, InvalidOperation):
+            values.append(None)
+    before, after = values
+    labels = [_format_credit(value) if value is not None else "未知" for value in values]
+    if before is not None and after is not None:
+        delta = _credit_decimal(_format_credit(after - before))
+        sign = "+" if delta > 0 else ""
+        tail = "（本轮净变 %s%s）" % (sign, _format_credit(delta))
+    else:
+        tail = "（净变化未知）"
+    result = ["   💰 积分: %s → %s%s" % (labels[0], labels[1], tail)]
+    if summary.get("credits_detail_phase"):
+        label = "操作后" if summary["credits_detail_phase"] == "after" else "操作前"
+        result.append("   💳 %s套餐明细: %s" % (label, summary["credits"]))
+    return result
+
+def _finish_credit_sample(s, summary, log):
+    try:
+        _sample_credit(s, summary, "after", log)
+        before, after = summary.get("credits_before"), summary.get("credits_after")
+        if before is not None and after is not None:
+            summary["credits_delta"] = str(_credit_decimal(after) - _credit_decimal(before))
+        for line in _credit_lines(summary):
+            log(line.strip())
+    except Exception as exc:
+        log("   ⚠️余额收尾异常（%s），保留原始业务结果" % type(exc).__name__)
+
+def _settle_before_play(s, log):
+    # 单独判断每个开关，避免某一个黑名单项目屏蔽其他已启用玩法。
+    if not any(want(code) for code in ("badges", "blindbox", "buddy_info", "travel", "makeup", "redeem", "lottery")):
+        return
+    log("  🎁 ── 玩法前领奖 ──")
+    try:
+        claim_ready_tasks(s, log)
+    except Exception as exc:
+        log("   ⚠️玩法前领奖异常（%s），继续后续流程" % type(exc).__name__)
+
+
+def queryCredits(s, meta=None):
+    """保留文本/paid 返回值；仅确认成功的套餐回执可提供结构化余额。"""
+    if meta is not None:
+        meta.pop("total_remain", None)
+    try:
+        response = api_retry(s, "POST", BASE + "/billing/meter/get-user-resource-summary",
+                             body={}, retries=3, gap=2.0)
+        payload = _json_or_empty(response)
+        if (not 200 <= response.status_code < 300 or not _api_code_ok(payload.get("code"))
+                or isinstance(payload.get("code"), bool) or not isinstance(payload.get("data"), dict)):
+            raise SafeError("积分查询回执无效")
+        data = payload["data"]
+        packages = data.get("Packages")
+        if not isinstance(packages, list):
+            raise SafeError("积分查询缺少套餐数据")
+        total = Decimal(0)
         out = []
-        total_remain = 0.0
-        for i, p in enumerate(pkgs):
-            remain_f = float(p.get("CycleRemainCapacity", 0) or 0)
-            total_f = float(p.get("CycleTotalCapacity", 0) or 0)
-            used_f = float(p.get("CycleUsedCapacity", 0) or 0)
-            total_remain += remain_f
-            pkg_name = "主套餐" if i == 0 else "加量包%d" % i
-            out.append("%s剩余%s(共%s,已用%s)" % (pkg_name,
-                       _clean_num(remain_f), _clean_num(total_f), _clean_num(used_f)))
-        if not out:
-            return "暂无套餐", paid
-        return ("剩余积分合计%s（%s）" % (_clean_num(total_remain), "；".join(out))), paid
-    except Exception as e:
-        return "查询失败:" + str(e)[:40], False
+        for index, package in enumerate(packages):
+            if not isinstance(package, dict) or "CycleRemainCapacity" not in package:
+                raise SafeError("积分查询缺少余额字段")
+            remain = _credit_decimal(package["CycleRemainCapacity"])
+            total += remain
+            capacity = _format_credit(package["CycleTotalCapacity"]) if package.get("CycleTotalCapacity") is not None else "?"
+            used = _format_credit(package["CycleUsedCapacity"]) if package.get("CycleUsedCapacity") is not None else "?"
+            name = "主套餐" if index == 0 else "加量包%d" % index
+            out.append("%s剩余%s(共%s,已用%s)" % (name, _format_credit(remain), capacity, used))
+        text = "剩余积分合计%s（%s）" % (_format_credit(total), "；".join(out)) if out else "暂无套餐"
+        if meta is not None:
+            # 字符串保留十进制精度，且兼容潜在 JSON 摘要消费者。
+            meta["total_remain"] = str(total)
+        return text, data.get("IsPaidUser")
+    except Exception as exc:
+        # 不把接口正文、URL 或账号材料带入日志。
+        return "查询失败（%s）" % type(exc).__name__, False
 
 
 def queryUsage(s):
@@ -1188,9 +1919,10 @@ def t_daily_activity(s, uid, nick, log):
 
     签到接口只推进签到活动自己的连签；成长中心的 `growth/streak` 与热力图
     只认 `/v2/report` 的 `chat_request_send`。每天补发一条，幂等。
+    HTTP 200 只代表事件已受理，必须由热力图 score 确认真正计分后才写本地标记。
     """
     state_file = os.getenv("WORKBUDDY_ACTIVITY_STATE", "").strip() or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "workbuddy_activity_state.json")
+        STATE_DIR, "workbuddy_activity_state.json")
     today = beijing_today().isoformat()
     state = {}
     try:
@@ -1204,15 +1936,15 @@ def t_daily_activity(s, uid, nick, log):
         log("   🔥每日活跃: 今日已上报，跳过")
         return
     now = int(time.time() * 1000)
-    token = str(uuid.uuid4())
-    conv_id = "wb-daily-" + token
+    conv_id = _new_conversation_id()
+    request_id = _new_message_id()
     event = {
         "eventCode": "chat_request_send",
         "timestamp": now,
         "reportDelay": 0,
         "mode": "craft",
         "conversationId": conv_id,
-        "requestId": conv_id,
+        "requestId": request_id,
         "inputLength": 12,
         "requestModelId": "deepseek-v4-flash",
         "requestModelName": "DeepSeek V4 Flash",
@@ -1238,7 +1970,7 @@ def t_daily_activity(s, uid, nick, log):
         "fileUri": "",
         "presentAt": now,
         "traceId": "",
-        "rootRequestId": conv_id,
+        "rootRequestId": request_id,
         "parentConversationId": conv_id,
         "agentName": "default",
         "agentType": "conversation",
@@ -1250,13 +1982,38 @@ def t_daily_activity(s, uid, nick, log):
         headers={
             "Origin": CBDOMAIN,
             "Referer": CBDOMAIN + "/",
-            "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
+            "User-Agent": WORKBUDDY_UA_CN,
             "X-User-Id": uid,
             "X-Domain": "copilot.tencent.com",
         },
     )
     if status not in (200, 201):
         log("   🔥每日活跃: 上报失败 HTTP %s" % status)
+        return
+
+    # HTTP 200 只代表事件已受理，必须由热力图 score 确认真正计分。
+    score = _heatmap_today_score(s)
+    if score is None:
+        log("   🔥每日活跃: 合成事件已发送，热力图回读失败（不写本地完成标记）")
+    elif score > 0:
+        log("   🔥每日活跃: 热力图已点亮 %s 分" % score)
+    elif _env_enabled("WORKBUDDY_ACTIVITY_CHAT_FALLBACK", True):
+        log("   🔥每日活跃: 合成事件未计分，尝试一次真实对话兜底")
+        try:
+            conv_id, _reply, _message_id = webchat2(
+                s, "activity", "你好，回答OK即可")
+            if conv_id:
+                time.sleep(3)
+                score = _heatmap_today_score(s)
+                if score and score > 0:
+                    log("   🔥每日活跃: 真实对话兜底成功，热力图 %s 分" % score)
+        except Exception as exc:
+            log("   🔥每日活跃: 真实对话兜底失败 %s" % str(exc)[:60])
+    else:
+        log("   🔥每日活跃: 合成事件未计分，真实对话兜底已关闭")
+
+    if not score or score <= 0:
+        log("   🔥每日活跃: 今日计分仍未确认，下轮继续重试")
         return
     try:
         state[uid] = today
@@ -1280,10 +2037,30 @@ def t_daily_activity(s, uid, nick, log):
 # ============================================================================ #
 # 各任务配方（全部经过原版实测，移植保持原样）
 # ============================================================================ #
+def _accept_response_settled(status, message=""):
+    """接受回执是否已结算；already completed 以 message 形式出现时同样算完成。"""
+    status = str(status or "").strip().lower()
+    if status in ("accepted", "already_accepted", "completed", "already_completed", "claimed"):
+        return True
+    message = str(message or "").strip().lower()
+    return any(marker in message for marker in (
+        "task already completed",
+        "already completed",
+        "already been completed",
+        "already claimed",
+        "已领取",
+        "已完成",
+    ))
+
 def t_accept_all(s, uid, nick, log):
-    r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False).json()
-    todo = [t.get("task_code") for t in r.get("data", {}).get("tasks", [])
-            if isinstance(t, dict) and t.get("accept_status") == "not_accepted"]
+    try:
+        rows = growth_task_rows(s)
+    except (SafeError, requests.RequestException):
+        log("   📋批量接受读取任务失败，本轮跳过登记")
+        return
+    todo = list(dict.fromkeys(t.get("task_code") for t in rows
+            if t.get("task_code") and t.get("accept_status") == "not_accepted"
+            and not t.get("locked") and not _row_claimed(t)))
     if not todo:
         return
     resp = {}
@@ -1291,22 +2068,24 @@ def t_accept_all(s, uid, nick, log):
     try:
         r2 = s.post(BASE + "/v2/activity/growth/tasks/accept",
                     json={"task_codes": todo}, timeout=20, verify=False)
+        if r2.status_code != 200:
+            raise SafeError("HTTP %s" % r2.status_code)
         d2 = r2.json()
         for x in ((d2.get("data") or {}).get("results") or []):
             if isinstance(x, dict) and x.get("task_code"):
                 resp[x["task_code"]] = (x.get("status") or "", x.get("message") or "")
-        ok = [c for c in todo if resp.get(c, ("", ""))[0] == "accepted"]
-        bad = [(c, resp[c][0], resp[c][1]) for c in todo if c in resp and resp[c][0] != "accepted"]
+        ok = [c for c in todo if _accept_response_settled(*resp.get(c, ("", "")))]
+        bad = [(c, resp[c][0], resp[c][1]) for c in todo if c in resp and not _accept_response_settled(*resp[c])]
         nolog = [c for c in todo if c not in resp]
-        log("   📋批量接受 %d 项 → 成功 %d / 未登记 %d%s" % (
+        log("   📋批量接受 %d 项 → 已结算 %d / 待回读 %d%s" % (
             len(todo), len(ok), len(bad) + len(nolog),
             ("（%d 项无返回）" % len(nolog)) if nolog else ""))
         for c, st, m in bad[:6]:
-            log("      ✗ %s: %s %s" % (c, st, m[:70]))
+            log("      … %s 待回读: %s %s" % (c, st, m[:70]))
         if len(bad) > 6:
             log("      ...另 %d 项" % (len(bad) - 6))
     except Exception as e:
-        log("   📋批量接受异常: %s" % str(e)[:60])
+        log("   📋批量接受异常: %s" % type(e).__name__)
     need = {}
     for c, st, m in bad:
         if "prerequisite not met:" in m:
@@ -1321,15 +2100,29 @@ def t_accept_all(s, uid, nick, log):
                 log("      ⚠️ 服务端仍无 Buddy 实例：该账号需先在桌面端/小程序完成一次领养引导，本次 %d 项保持未登记" % len(ptasks))
         else:
             log("      ⚠️ 前置「%s」脚本暂无法自动完成" % pcode)
-    time.sleep(2)
-    pending = [c for c in todo if prog(s, c)[0] in (None, "not_accepted")]
+    pending = list(todo)
+    settled = ("accepted", "already_accepted", "completed", "claimed")
+    for round_index in range(ACCEPT_BATCH_TRIES):
+        time.sleep(ACCEPT_BATCH_SETTLE)
+        try:
+            fresh = {row.get("task_code"): row.get("accept_status") for row in growth_task_rows(s)}
+        except (SafeError, requests.RequestException, ValueError, TypeError):
+            continue
+        pending = [c for c in todo if fresh.get(c) not in settled]
+        if not pending:
+            break
     if not pending:
         log("   ✅ 全部登记生效（%d 项）" % len(todo))
         return
     log("   🔁 %d 项未落账，逐个重试..." % len(pending))
     still = []
     for c in pending:
-        if not _accept_with_verify(s, c, log):
+        try:
+            accepted = _accept_with_verify(s, c, log)
+        except Exception as exc:
+            log("      ⚠️ %s 重试异常: %s" % (c, type(exc).__name__))
+            accepted = False
+        if not accepted:
             still.append(c)
         time.sleep(1.0)
     if still:
@@ -1340,17 +2133,25 @@ def t_accept_all(s, uid, nick, log):
 
 
 def t_team_3(s, uid, nick, log):
+    """召唤3次专家团：真实团队对话+全字段遥测"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    st, cur, tgt = prog(s, "Expert_team_use_3")
+    if st is None:
+        log("   Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
+        return
     teams = get_team_experts(10)
     if not teams:
         return
     for rd in range(3):
         st, cur, tgt = prog(s, "Expert_team_use_3")
+        if st is None:
+            log("   Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
+            break
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or 3):
             break
         team = teams[rd % len(teams)]
         prompt = "你好，请简单介绍一下你们团队能帮我做什么，回答OK即可"
-        req_id = str(uuid.uuid4())
-        msg_id = "cmb-" + str(uuid.uuid4())
+        req_id = str(uuid.uuid4()); msg_id = "cmb-" + str(uuid.uuid4())
         ge = [{"eventCode": "ExpertActualUse", "id": team["id"],
                "extra": {"name": team["name"], "expertTitle": team.get("profession", ""),
                          "type": team.get("industryId", "") or "", "expertType": "team",
@@ -1376,17 +2177,30 @@ def t_team_3(s, uid, nick, log):
 
 
 def t_buddy_apps(s, uid, nick, log):
+    """发现应用/企鹅教师助手：desktop_buddy5_sequence + report_desktop_events"""
     for task in ("Buddy_App", "Buddy_App_QQ"):
         st, cur, tgt = prog(s, task)
+        if st is None:
+            # 未下发（如 Buddy_App_QQ 已下线）→ 不发 buddyapp 五连
+            log("   %s: 当前任务列表未下发（可能已下线），跳过" % task)
+            continue
         if st in ("completed", "claimed"):
             continue
         buddy_id = QQ_TPL if "QQ" in task else "buddy-app-default"
         buddy_name = "企鹅教师助手" if "QQ" in task else "发现应用"
         evs = desktop_buddy5_sequence(uid, nick, buddy_id, buddy_name)
         try:
-            report_desktop_events(s, uid, nick, evs)
-            log("   %s: buddyapp 五连 OK" % task)
-            time.sleep(WRITE_GAP)
+            report_status = report_desktop_events(s, uid, nick, evs)
+            if report_status < 200 or report_status >= 300:
+                log("   %s: buddyapp 五连上报失败 HTTP %s" % (
+                    task, report_status))
+                continue
+            time.sleep(4)
+            st2, cur2, tgt2 = prog(s, task)
+            log("   %s: buddyapp 五连已受理，回读 %s %s/%s" % (
+                task, st2, cur2, tgt2))
+            if st2 == "completed":
+                claim(s, task, log)
         except Exception as e:
             log("   %s: buddyapp failed %s" % (task, str(e)[:60]))
     log("   发现应用/企鹅教师助手: %s / %s" % (prog(s, "Buddy_App")[0], prog(s, "Buddy_App_QQ")[0]))
@@ -1395,7 +2209,7 @@ def t_buddy_apps(s, uid, nick, log):
 def _fetch_hp_theme(s):
     try:
         d = s.post(BASE + "/v2/operation-platform/appearance/resources",
-                   json={"platform": "client", "kind": "theme", "version": "5.5.6", "lang": "zh-CN"},
+                   json={"platform": "client", "kind": "theme", "version": DESKTOP_VERSION_CN, "lang": "zh-CN"},
                    timeout=20, verify=False).json()
         for x in ((d.get("data") or {}).get("resources") or []):
             nm = x.get("name") or ""
@@ -1437,15 +2251,44 @@ def t_library(s, uid, nick, log):
     if st in ("completed", "claimed"):
         log("   体验资料库: 已 %s" % st)
         return
-    report_web_event(s, uid, nick, "web_element_click", LIB_DOC_URL,
-                     "library_doc_intro_click", "WorkBuddy资料库介绍")
+    response = report_web_event(
+        s, uid, nick, "web_element_click", LIB_DOC_URL,
+        "library_doc_intro_click", "WorkBuddy资料库介绍",
+    )
+    status_code = getattr(response, "status_code", 0)
+    try:
+        payload = response.json() or {}
+    except Exception:
+        payload = {}
+    if status_code < 200 or status_code >= 300 or not _api_code_ok(
+            payload.get("code")):
+        log("   体验资料库: 上报失败 HTTP %s code=%s %s" % (
+            status_code,
+            payload.get("code", "?"),
+            str(payload.get("msg") or "")[:60],
+        ))
+        return
     time.sleep(6)
-    log("   体验资料库: %s" % prog(s, "Library_read")[0])
+    status, current, target = prog(s, "Library_read")
+    log("   体验资料库: %s %s/%s" % (status, current, target))
+    if status == "completed":
+        claim(s, "Library_read", log)
 
 
 def t_chat_n(s, uid, nick, log, code, n, prompts):
     for i in range(n):
-        st, cur, tgt = prog(s, code)
+        try:
+            rows = growth_task_rows(s)
+        except (SafeError, requests.RequestException) as exc:
+            reason = str(exc) if isinstance(exc, SafeError) else type(exc).__name__
+            log("   %s: %s，停止追加对话" % (code, reason))
+            return
+        row = next((t for t in rows if t.get("task_code") == code), None)
+        if row is None:
+            log("   %s: 当前任务未下发，停止追加对话" % code)
+            return
+        progress = row.get("progress") or {}
+        st, cur, tgt = row.get("accept_status"), progress.get("current"), progress.get("target")
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or n):
             break
         conv_id, txt = webchat(s, code, prompts[i % len(prompts)])
@@ -1459,6 +2302,9 @@ def t_chat_n(s, uid, nick, log, code, n, prompts):
 
 def t_black_cat(s, uid, nick, log):
     st, cur, tgt = prog(s, "black_cat")
+    if st is None:
+        log("   夜猫子: 当前任务列表未下发 black_cat（可能已下线），跳过")
+        return
     if st in ("completed", "claimed"):
         log("   夜猫子: 已 %s %s/%s" % (st, cur, tgt))
         return
@@ -1481,8 +2327,13 @@ def t_black_cat(s, uid, nick, log):
 
 
 def t_expert_5(s, uid, nick, log):
-    experts = get_normal_experts(20)
+    """召唤5次专家：普通专家遥测"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     st0, cur0, tgt0 = prog(s, "expert_5")
+    if st0 is None:
+        log("   expert_5: 当前任务列表未下发（可能已下线），跳过")
+        return
+    experts = get_normal_experts(20)
     need = max(0, (tgt0 or 5) - (cur0 or 0))
     if st0 in ("completed", "claimed"):
         need = 0
@@ -1491,13 +2342,14 @@ def t_expert_5(s, uid, nick, log):
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or 5):
             break
         e = experts[i % len(experts)] if experts else {"id": "expert-" + str(uuid.uuid4())[:8], "name": "Expert", "profession": ""}
+        rid = _new_message_id()
         report(s, uid, nick, [
             {"eventCode": "expert_summoned", "id": e["id"], "name": e["name"], "type": "agent",
              "expertTitle": e.get("profession", ""), "expertType": "agent"},
             {"eventCode": "expert_actual_use", "id": e["id"], "name": e["name"], "type": e.get("industryId", "") or "",
              "expertType": "agent", "source": "builtin", "version": "", "cost": 0, "characterCount": 12,
-             "conversationId": "conv-" + str(uuid.uuid4()), "requestId": str(uuid.uuid4()),
-             "messageId": "msg-" + str(uuid.uuid4()),
+             "conversationId": _new_conversation_id(), "requestId": rid,
+             "messageId": "msg-" + rid[-8:],
              "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash"}])
         time.sleep(3)
     st, cur, tgt = prog(s, "expert_5")
@@ -1517,12 +2369,25 @@ def _fetch_scenes(s):
 
 
 def t_template_5(s, uid, nick, log):
+    """使用5个模板：真实场景 id（/console/as/support/scenes）+ 事件组上报
+
+    上游实测：一组 agent_task_created_with_template + template_used 计 1/5 进度；
+    template_id 服务端不校验真实性，但用真实场景 id 更稳（旧版写死的 01-ProductDesign
+    形态并不存在于线上场景表）。
+    """
+    initial_state = prog(s, "template_5")
+    if initial_state[0] is None:
+        log("   template_5: 当前任务列表未下发（可能已下线），跳过")
+        return
     scenes = _fetch_scenes(s)[:5]
     for tid, tname in scenes:
         st, cur, tgt = prog(s, "template_5")
+        if st is None:
+            log("   template_5: 当前任务列表未下发（可能已下线），跳过")
+            break
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or 5):
             break
-        rid = "wb2api-tpl-%d-%s" % (int(time.time() * 1000), tid)
+        rid = _new_message_id()
         report(s, uid, nick, [
             {"eventCode": "agent_task_created", "source": "CLOUD", "name": "", "mode": "craft",
              "requestModelId": "default", "action": tid, "has_template": True, "template_id": tid,
@@ -1556,7 +2421,10 @@ def _desktop_run(s, uid, nick, conv_name, prompt, extra_events):
 
 
 def t_canvas_automation(s, uid, nick, log):
-    if prog(s, "create_canvas")[0] not in ("completed", "claimed"):
+    canvas_st = prog(s, "create_canvas")[0]
+    if canvas_st is None:
+        log("   设计创意画布: 当前任务列表未下发（可能已下线），跳过")
+    elif canvas_st not in ("completed", "claimed"):
         def _canvas_evs(cid, mid):
             return [{"eventCode": "wbx_design_canvas_task_create", "conversationId": cid, "requestId": mid,
                      "source": "summon_keyword", "isCustomModel": False, "name": "", "inputLength": 12,
@@ -1571,7 +2439,9 @@ def t_canvas_automation(s, uid, nick, log):
                                   {"eventCode": "wbx_design_canvas_task_create"}])
             time.sleep(3)
     st, cur, tgt = prog(s, "automation_1")
-    if st not in ("completed", "claimed"):
+    if st is None:
+        log("   自动化任务: 当前任务列表未下发（可能已下线），跳过")
+    elif st not in ("completed", "claimed"):
         report(s, uid, nick, [{"eventCode": "agent_task_created", "source": "CLOUD", "name": "", "mode": "craft",
                                "requestModelId": "default", "task_mode": "automation",
                                "isAutomationBackground": True},
@@ -1587,7 +2457,10 @@ def t_canvas_automation(s, uid, nick, log):
                                "prompt": "每周五自动整理本周工作，生成一份周报。"},
                               {"eventCode": "automated_task_execute", "action": "execute"}])
         time.sleep(3)
-    if prog(s, "playbook_prompt")[0] not in ("completed", "claimed"):
+    playbook_st = prog(s, "playbook_prompt")[0]
+    if playbook_st is None:
+        log("   优秀灵感: 当前任务列表未下发（可能已下线），跳过")
+    elif playbook_st not in ("completed", "claimed"):
         def _pb_evs(cid, mid):
             payload = {"id": PLAYBOOK_CASE["id"], "name": PLAYBOOK_CASE["name"],
                        "type": PLAYBOOK_CASE["type"], "categoryId": "", "categoryName": ""}
@@ -1658,29 +2531,41 @@ def t_lottery(s, uid, nick, log):
 
 def t_blindbox(s, uid, nick, log):
     try:
-        q = s.get(BASE + "/v2/activity/growth/buddy/quota", timeout=20, verify=False).json()
-        qd = q.get("data", {})
-        affordable = qd.get("affordable", 0)
-        if not affordable or affordable <= 0:
-            log("   📦盲盒: 能量不足 (%s/10)" % qd.get("balance", "?"))
-            return
-        n = min(affordable, 5)
+        response = s.get(BASE + "/v2/activity/growth/buddy/quota", timeout=20, verify=False)
+        payload = _json_or_empty(response)
+        if (not 200 <= response.status_code < 300 or not _api_code_ok(payload.get("code"))
+                or isinstance(payload.get("code"), bool) or not isinstance(payload.get("data"), dict)):
+            raise SafeError("盲盒额度回执无效")
+        data = payload["data"]
+        affordable = _credit_decimal(data.get("affordable"))
+        balance = _credit_decimal(data.get("balance"))
+        if affordable < 0 or affordable != affordable.to_integral_value():
+            raise ValueError()
+    except Exception as exc:
+        log("   📦盲盒查询失败（%s），本次不开启" % type(exc).__name__)
+        return
+    if affordable == 0:
+        if balance < 10:
+            log("   📦盲盒: 能量不足 (%s/10)" % _format_credit(balance))
+        else:
+            log("   📦盲盒: 当前无可开启次数（能量 %s）" % _format_credit(balance))
+        return
+    try:
         got = []
-        for _ in range(n):
-            rr = s.post(BASE + "/v2/activity/growth/buddy/open", json={"count": 1}, timeout=20, verify=False).json()
-            if rr.get("code") == 0:
-                results = rr.get("data", {}).get("results", [])
+        for _ in range(min(int(affordable), 5)):
+            payload = s.post(BASE + "/v2/activity/growth/buddy/open", json={"count": 1}, timeout=20, verify=False).json()
+            if payload.get("code") == 0:
+                results = payload.get("data", {}).get("results", [])
                 if results:
-                    it = results[0]
-                    ins = it.get("instance", {})
-                    tpl = it.get("template", {})
-                    got.append("%s(%s)" % (ins.get("name", tpl.get("name", "?")), ins.get("rarity", tpl.get("rarity", ""))))
+                    item = results[0]
+                    instance, template = item.get("instance", {}), item.get("template", {})
+                    got.append("%s(%s)" % (instance.get("name", template.get("name", "?")), instance.get("rarity", template.get("rarity", ""))))
             else:
                 break
             time.sleep(1.5)
         log("   📦盲盒: %s" % ("、".join(got) if got else "开启失败"))
-    except Exception as e:
-        log("   📦盲盒异常: %s" % str(e)[:50])
+    except Exception as exc:
+        log("   📦盲盒异常（%s）" % type(exc).__name__)
 
 
 def t_buddy_info(s, uid, nick, log):
@@ -1694,7 +2579,18 @@ def t_buddy_info(s, uid, nick, log):
         pass
 
 
-def t_travel(s, uid, nick, log):
+def _travel_status(s):
+    response = s.get(BASE + "/v2/activity/growth/buddy/travel/status", timeout=20, verify=False)
+    payload = _json_or_empty(response)
+    data = payload.get("data")
+    if (200 <= response.status_code < 300 and _api_code_ok(payload.get("code"))
+            and not isinstance(payload.get("code"), bool)
+            and isinstance(data, dict) and data.get("state") in ("idle", "traveling", "arrived")):
+        return data
+    raise SafeError("旅行状态未确认，本轮跳过盲盒与派出")
+
+
+def _travel_prepare(s, log, claim_arrived):
     try:
         vis = s.get(BASE + "/v2/activity/growth/buddy/visible", timeout=20, verify=False).json()
         if vis.get("code") == 0:
@@ -1702,13 +2598,12 @@ def t_travel(s, uid, nick, log):
             if not vd.get("buddy_visible", True) or not vd.get("has_buddy", True):
                 log("   🐾旅行: 无Buddy，跳过")
                 return
-        st = s.get(BASE + "/v2/activity/growth/buddy/travel/status", timeout=20, verify=False).json()
-        if not _api_code_ok(st.get("code")):
-            log("   🐾旅行: 状态获取失败")
-            return
-        sd = st.get("data", {})
-        state = sd.get("state", "idle")
+        sd = _travel_status(s)
+        state = sd["state"]
         if state == "arrived":
+            if not claim_arrived:
+                log("   🐾旅行: 已到达，旅行关闭，本轮不领礼也不开盲盒")
+                return
             record_id = sd.get("record_id")
             if record_id in (None, "", 0):
                 log("   🐾旅行: 已到达但状态缺少 record_id，本轮不领奖也不重新派出")
@@ -1729,14 +2624,27 @@ def t_travel(s, uid, nick, log):
                 log("   🐾旅行: 领取未确认 %s" % str(
                     rr.get("msg") or "HTTP %s" % claim_response.status_code)[:60])
                 return
-            # 领取成功后不提前返回：继续向下判断次数并立即派出下一轮（上游 v3.13 闭环）
+            sd = _travel_status(s)
+            if sd["state"] != "idle":
+                log("   🐾旅行: 领礼后尚未回到空闲，本轮跳过盲盒与派出")
+                return
+            return sd
         if state == "traveling":
             remain = max(0, (sd.get("arrive_at", 0) - sd.get("server_now", 0)) // 60)
             log("   🐾旅行: 旅行中，约%s分钟后到达" % remain)
             return
-        if sd.get("daily_limit_reached"):
-            log("   🐾旅行: 今日次数已用尽")
-            return
+        return sd
+    except SafeError as exc:
+        log("   🐾" + str(exc))
+    except Exception as exc:
+        log("   🐾旅行状态查询失败（%s），跳过盲盒与派出" % type(exc).__name__)
+
+
+def _travel_depart(s, log, state):
+    if state.get("daily_limit_reached"):
+        log("   🐾旅行: 今日次数已用尽")
+        return
+    try:
         cfg = s.get(BASE + "/v2/activity/growth/buddy/travel/config", timeout=20, verify=False).json()
         locs = cfg.get("data", {}).get("locations", [])
         if not locs:
@@ -1751,6 +2659,19 @@ def t_travel(s, uid, nick, log):
             log("   🐾旅行: 出发失败 %s" % str(rr.get("msg", ""))[:40])
     except Exception as e:
         log("   🐾旅行异常: %s" % str(e)[:50])
+
+
+def _travel_blindbox_cycle(s, uid, nick, log):
+    do_travel, do_blindbox = want("travel"), want("blindbox")
+    if not (do_travel or do_blindbox):
+        return
+    state = _travel_prepare(s, log, claim_arrived=do_travel)
+    if not state or state["state"] != "idle":
+        return
+    if do_blindbox:
+        t_blindbox(s, uid, nick, log)
+    if do_travel:
+        _travel_depart(s, log, state)
 
 
 def t_redeem(s, uid, nick, log, streak_days=None):
@@ -1803,8 +2724,7 @@ def t_badges(s, uid, nick, log):
         pass
 
 
-BENEFIT_STATE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "workbuddy_benefit_state.json")
+BENEFIT_STATE_FILE = os.path.join(STATE_DIR, "workbuddy_benefit_state.json")
 
 
 def _benefit_state_path():
@@ -2243,32 +3163,66 @@ def t_lighthouse(s, uid, nick, log):
 VALORANT_EXPERT = {"id": "ex_xQHHD1u5Jkua", "name": "无畏契约拼豆专家", "version": "1.2.1"}
 
 
-def t_valorant(s, uid, nick, log):
-    """无畏契约拼豆专家：真实对话 + 专家召唤/使用桌面链。"""
-    st, cur, tgt = prog(s, "WorkBuddy_Valorant")
+def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expert"):
+    """LOCAL 专家任务共用链：真实对话 + 召唤 + actual_use(mode:LOCAL)。"""
+    label = expert.get("profession") or expert.get("name") or task_code
+    _source, row, _sources = _expert_context(s, task_code)
+    if row is not None and _expert_unavailable(row):
+        log("   %s: %s，跳过" % (label, _expert_unavailable(row)))
+        return
+    progress = (row or {}).get("progress") or {}
+    st, cur, tgt = ((row or {}).get("accept_status") if row is not None else None,
+                    progress.get("current"), progress.get("target"))
     if st is None:
-        log("   无畏契约拼豆专家: 不在当前任务列表，跳过")
+        log("   %s: 不在当前任务列表，跳过" % label)
         return
     if st in ("completed", "claimed"):
-        log("   无畏契约拼豆专家: %s %s/%s" % (st, cur, tgt))
+        log("   %s: %s %s/%s" % (label, st, cur, tgt))
         return
-    expert = dict(VALORANT_EXPERT)
+    if st in ("", "not_accepted"):
+        if not _accept_expert_task(s, task_code, log):
+            log("   %s: 接受任务失败，停止本任务" % label)
+            return
+        st, cur, tgt = _expert_prog(s, task_code)
+        if st in ("completed", "claimed"):
+            log("   %s: %s %s/%s" % (label, st, cur, tgt))
+            return
+        if st != "accepted":
+            log("   %s: 接受后状态未确认，停止本任务" % label)
+            return
+    expert = dict(expert)
+    if expert.get("id") and not _EXPERT_ID_RE.fullmatch(str(expert.get("id") or "")):
+        log("   %s: 专家 ID 格式无效，跳过" % label)
+        return
+    profession = expert.get("profession") or expert.get("name") or task_code
     try:
-        for item in get_normal_experts(20):
-            if (item.get("id") or "") == expert["id"] or "无畏契约" in (item.get("name") or ""):
-                expert["id"] = item.get("id") or expert["id"]
-                expert["name"] = item.get("name") or expert["name"]
-                expert["version"] = item.get("version") or expert["version"]
-                break
+        market = _market_expert_by_id(s, profession, expert.get("id", ""))
+        if market:
+            expert.update(market)
+        else:
+            for item in get_normal_experts(100):
+                if (item.get("id") or "") == expert["id"]:
+                    expert["id"] = item.get("id") or expert["id"]
+                    expert["name"] = item.get("name") or expert["name"]
+                    expert["profession"] = (
+                        item.get("profession") or expert.get("profession") or profession)
+                    expert["version"] = item.get("version") or expert["version"]
+                    break
     except Exception:
         pass
-    prompt = "你好，请简单介绍一下无畏契约拼豆玩法，回答OK即可"
+    if not _EXPERT_ID_RE.fullmatch(str(expert.get("id") or "")):
+        log("   %s: 专家市场返回了无效 ID，跳过" % label)
+        return
+    display_name = expert.get("name") or expert["id"]
+    expert_title = expert.get("profession") or profession
+    label = expert_title
+    prompt = "你好，请简单介绍一下%s，回答OK即可" % expert_title
     conv_id = ""
     mid = ""
     try:
         growth_events = [{
             "eventCode": "ExpertActualUse", "id": expert["id"],
-            "extra": {"name": expert["name"], "expertTitle": expert["name"],
+            "extra": {"name": display_name, "expertTitle": expert_title,
                       "expertType": "agent", "source": "builtin",
                       "version": expert["version"], "cost": 0,
                       "characterCount": len(prompt)},
@@ -2279,29 +3233,32 @@ def t_valorant(s, uid, nick, log):
             "promptRequestId": str(uuid.uuid4()),
             "clientSendTime": int(time.time() * 1000), "userId": uid,
             "mode": "LOCAL", "model": "fast-model", "expertId": expert["id"],
-            "expert": {"id": expert["id"], "name": expert["name"], "prompt": prompt[:50]},
+            "expert": {"id": expert["id"], "name": display_name, "prompt": prompt[:50]},
             "tags": ["expert:" + expert["id"]],
         }}
-        conv_id, _txt, mid = webchat2(s, "valorant", prompt, meta)
+        conv_id, _txt, mid = webchat2(s, conv_name, prompt, meta)
     except Exception as exc:
-        log("   无畏契约拼豆专家: 对话异常 %s" % str(exc)[:50])
+        log("   %s: 对话异常 %s" % (label, str(exc)[:50]))
+    if not conv_id or not mid:
+        log("   %s: 真实对话结果未确认（缺少会话或消息 ID），停止上报" % label)
+        return
     if conv_id and mid:
         summon = [
-            {"eventCode": "expert_summon_click", "id": expert["id"], "name": expert["name"],
-             "expertTitle": expert["name"], "type": "agent", "expertType": "agent",
+            {"eventCode": "expert_summon_click", "id": expert["id"], "name": display_name,
+             "expertTitle": expert_title, "type": "agent", "expertType": "agent",
              "source": "builtin", "mode": "LOCAL"},
-            {"eventCode": "expert_summoned", "id": expert["id"], "name": expert["name"],
-             "expertTitle": expert["name"], "type": "agent", "expertType": "agent",
+            {"eventCode": "expert_summoned", "id": expert["id"], "name": display_name,
+             "expertTitle": expert_title, "type": "agent", "expertType": "agent",
              "source": "builtin", "version": expert["version"], "mode": "LOCAL"},
         ]
         chain = desktop_chat_sequence(uid, nick, conv_id, mid, mid)
         for event in chain:
             if event.get("eventCode") == "agent_task_created":
                 event.update({"has_expert": True, "expert_id": expert["id"],
-                              "expert_name": expert["name"], "expert_industry_id": ""})
+                              "expert_name": display_name, "expert_industry_id": ""})
         chain.append({
-            "eventCode": "expert_actual_use", "id": expert["id"], "name": expert["name"],
-            "expertTitle": expert["name"], "type": "", "expertType": "agent",
+            "eventCode": "expert_actual_use", "id": expert["id"], "name": display_name,
+            "expertTitle": expert_title, "type": "", "expertType": "agent",
             "source": "builtin", "version": expert["version"], "cost": 0,
             "characterCount": len(prompt), "mode": "LOCAL",
             "conversationId": conv_id, "requestId": mid, "messageId": mid,
@@ -2310,34 +3267,54 @@ def t_valorant(s, uid, nick, log):
         try:
             report_desktop_events(s, uid, nick, summon + chain)
         except Exception as exc:
-            log("   无畏契约拼豆专家: 桌面链上报失败 %s" % str(exc)[:50])
+            log("   %s: 桌面链上报失败 %s" % (label, str(exc)[:50]))
         time.sleep(4)
-        status = prog(s, "WorkBuddy_Valorant")[0]
+        status = _expert_prog(s, task_code)[0]
         if status in ("completed", "claimed"):
-            st, cur, tgt = prog(s, "WorkBuddy_Valorant")
-            log("   无畏契约拼豆专家: %s %s/%s" % (st, cur, tgt))
+            st, cur, tgt = _expert_prog(s, task_code)
+            log("   %s: %s %s/%s" % (label, st, cur, tgt))
             return
     try:
-        request_id = mid or str(uuid.uuid4())
-        conversation_id = conv_id or ("conv-" + str(uuid.uuid4()))
+        request_id = mid
+        conversation_id = conv_id
         report(s, uid, nick, [
-            {"eventCode": "expert_summoned", "id": expert["id"], "name": expert["name"],
-             "type": "agent", "expertTitle": expert["name"], "expertType": "agent",
+            {"eventCode": "expert_summoned", "id": expert["id"], "name": display_name,
+             "type": "agent", "expertTitle": expert_title, "expertType": "agent",
              "source": "builtin", "timestamp": int(time.time() * 1000)},
-            {"eventCode": "expert_actual_use", "id": expert["id"], "name": expert["name"],
-             "expertTitle": expert["name"], "type": "agent", "expertType": "agent",
+            {"eventCode": "expert_actual_use", "id": expert["id"], "name": display_name,
+             "expertTitle": expert_title, "type": "", "expertType": "agent",
              "source": "builtin", "version": expert["version"], "cost": 0,
-             "characterCount": len(prompt), "conversationId": conversation_id,
+             "characterCount": len(prompt), "mode": "LOCAL",
+             "conversationId": conversation_id,
              "requestId": request_id, "messageId": request_id,
              "requestModelId": "fast-model", "requestModelName": "fast-model",
              "userId": uid},
         ])
         time.sleep(3)
     except Exception as exc:
-        log("   无畏契约拼豆专家: 失败 %s" % str(exc)[:60])
-    st, cur, tgt = prog(s, "WorkBuddy_Valorant")
-    log("   无畏契约拼豆专家: %s %s/%s" % (st, cur, tgt))
+        log("   %s: 失败 %s" % (label, str(exc)[:60]))
+    st, cur, tgt = _expert_prog(s, task_code)
+    log("   %s: %s %s/%s" % (label, st, cur, tgt))
+    if st not in ("completed", "claimed"):
+        log("   %s: 服务端进度未确认完成，本轮不报成功" % label)
 
+
+def t_valorant(s, uid, nick, log):
+    """无畏契约拼豆专家：真实对话 + 专家召唤/使用桌面链。"""
+    expert = dict(VALORANT_EXPERT)
+    _run_local_expert_task(
+        s, uid, nick, log, "WorkBuddy_Valorant", expert, conv_name="valorant")
+
+
+def t_expert_use_task(s, uid, nick, log, task_code):
+    """新增 expert_use 任务：内置 ID 兜底，任务 jump_url 可安全覆盖专家 ID。"""
+    expert = _expert_spec_for_task(s, task_code)
+    if not expert:
+        log("   %s: 缺少专家任务配置，跳过" % task_code)
+        return
+    _run_local_expert_task(
+        s, uid, nick, log, task_code, expert,
+        conv_name="expert-" + str(expert.get("slug") or "task"))
 
 # ---------- 小程序埋点 ----------
 def mp_machine_id(uid):
@@ -2353,8 +3330,8 @@ def mp_base(uid, nick):
     指纹（android 14 / arm64），与 mp_mini_expert_event、上游 task_runner 同口径。
     """
     now = int(time.time() * 1000)
-    return {"timestamp": now, "ideType": "WorkBuddy_MP", "ideVersion": "2.2.8",
-            "extName": "workbuddy-mp", "extVersion": "2.2.8", "product": "SaaS",
+    return {"timestamp": now, "ideType": "WorkBuddy_MP", "ideVersion": "2.4.0",
+            "extName": "workbuddy-mp", "extVersion": "2.4.0", "product": "SaaS",
             "ideName": "wx_app_cloud", "platform": "mini_program",
             "source": "mini_program",   # 官方源码口径：mp 身份 = wx_app_cloud + WorkBuddy_MP + source
             "os": "android", "osVersion": "14", "arch": "arm64",
@@ -2440,8 +3417,10 @@ def mp_mini_expert_event(uid, nick, expert_id, expert_name):
             "type": "send_message", "characterCount": 12, "expertType": "agent"}
 
 
-def mp_report(s, uid, nick, events):
+def mp_report(s, uid, nick, events, env_extra=None):
     base = mp_base(uid, nick)
+    if env_extra:
+        base.update(env_extra)
     arr = []
     for e in events:
         m = dict(base)
@@ -2464,12 +3443,11 @@ def mp_report(s, uid, nick, events):
 
 def _mp_prog(s, code):
     try:
-        r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False, headers=MP_HEADER)
-        for t in r.json().get("data", {}).get("tasks", []):
-            if t.get("task_code") == code:
-                pr = t.get("progress") or {}
-                return t.get("accept_status", ""), pr.get("current"), pr.get("target")
-    except Exception:
+        for task in growth_task_rows(s, headers=MP_HEADER):
+            if task.get("task_code") == code:
+                progress = task.get("progress") or {}
+                return task.get("accept_status", ""), progress.get("current"), progress.get("target")
+    except (SafeError, requests.RequestException):
         pass
     return None, None, None
 
@@ -2504,44 +3482,28 @@ def _mp_locked_hint(log, label, msg, indent="   "):
 
 
 def _mp_claim(s, code, log):
-    try:
-        r = s.post(BASE + "/activity/growth/tasks/%s/claim" % code, json={},
-                   timeout=20, verify=False, headers=MP_HEADER)
-        try:
-            payload = r.json() or {}
-        except Exception:
-            payload = {}
-        ok, data, message = _claim_response_ok(r, payload)
-        if data.get("already_claimed") or any(
-                marker in message for marker in ("already", "已领取", "已领过")):
-            log("   🎁领奖[%s]: 已领过" % code)
-        elif ok and data.get("credit") is not None:
-            log("   🎁领奖[%s]: +%s积分+%s能量" % (
-                code, data.get("credit"), data.get("energy")))
-        elif ok:
-            log("   🎁领奖[%s]: 已处理，回执未提供实际到账额" % code)
-        else:
-            log("   领奖[%s]: 失败 HTTP %s %s" % (
-                code, r.status_code, message[:60]))
-        return ok
-    except Exception as e:
-        log("   🎁领奖[%s]: 失败 %s" % (code, str(e)[:50]))
-        return False
+    return _claim_task(s, code, log, mp=True)
 
 
 def _mp_task_row(s, code):
-    """mp 口径任务原始行（含 locked / valid_start / reward_* 等字段）；未下发返回 None。
-
-    服务端每个任务行都带 locked；locked=true 表示未到上线时间（accept 会报
-    "task locked until <日期>"），此时上报与领奖都无意义且会被判无效。
-    """
+    """只读获取小程序任务（含 locked/valid_start），未下发返回 None。"""
     try:
-        r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False, headers=MP_HEADER)
-        for t in r.json().get("data", {}).get("tasks", []):
-            if t.get("task_code") == code:
-                return t
-    except Exception:
-        pass
+        return next((task for task in growth_task_rows(s, headers=MP_HEADER)
+                     if task.get("task_code") == code), None)
+    except (SafeError, requests.RequestException):
+        return None
+
+
+def _wait_mp_target(s, code, label, log):
+    """accept 后 target<=0 表示进度尚未下发；有界回读，禁止按 1 冒领。"""
+    for _ in range(max(1, MP_TARGET_WAIT_ROUNDS)):
+        time.sleep(max(0.0, MP_TARGET_WAIT_SECONDS))
+        status, current, target = _mp_prog(s, code)
+        if status in ("completed", "claimed"):
+            return status, current, target
+        if target is not None and target > 0:
+            return status, current, target
+    log("   %s: target 仍未下发，留待下一轮，不按 1 冒领" % label)
     return None
 
 
@@ -2588,9 +3550,23 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
             else:
                 log("   %s: 已领取，跳过" % label)
             return
-    # 缺口计算：cur 可能为 None（未激活时 progress 全空）→ 用 target 兜底
+    # target<=0 = 进度尚未下发，不能按 1 猜；有界回读后仍为空则留到下一轮。
+    if tgt is None or tgt <= 0:
+        state = _wait_mp_target(s, code, label, log)
+        if state is None:
+            return
+        st, cur, tgt = state
+        if st in ("completed", "claimed"):
+            if st == "completed":
+                _mp_claim(s, code, log)
+            else:
+                log("   %s: 已领取，跳过" % label)
+            return
+    # 缺口计算：cur 可能为 None（未激活时 progress 全空）
     cur = cur or 0
-    tgt = tgt or target
+    if tgt is None or tgt <= 0:
+        log("   %s: target 无效，跳过" % label)
+        return
     need = max(1, tgt - cur)
     try:
         sent = 0
@@ -2678,8 +3654,7 @@ def t_sequential_tasks_4(s, uid, nick, log):
                  "skills": "", "skillCount": 0,
                  "scheduleType": "daily"}]
     _mp_do_task(s, uid, nick, "Sequential_Tasks_4", log, _evs, "小程序定时任务", target=1)
-    st2, cur2, tgt2 = _mp_prog(s, "Sequential_Tasks_4")
-    if st2 in ("completed", "claimed"):
+    if _mp_prog(s, "Sequential_Tasks_4")[0] in ("completed", "claimed"):
         return
     # 回落：桌面域 automation 事件（旧口径，实测同样能点亮）
     try:
@@ -2711,48 +3686,973 @@ def t_sequential_tasks_6(s, uid, nick, log):
                 _mp_chat_evs(uid, nick, "wbmp6"), "小程序对话×10", target=10, pace=True)
 
 
+def _accept_with_verify(s, code, log):
+    """accept 并验证登记生效（以回读 accept_status 为准）。
+
+    ⚠️ 两个历史坑（线上日志实证）：
+      1) 上游对**已登记**的任务返回 `status="already_accepted"`，这不是失败；
+         旧实现只认 `status == "accepted"`，导致 14 项全部接受成功却被判成
+         「未落账」，随后整轮任务（skill_share / expert_use_* 等）被跳过。
+      2) accept 的落账是异步的：接口立刻回 accepted，任务列表要过几秒才翻状态。
+         所以每轮 post 之后读两次（间隔 1.5s），任一次读到 settled 就算成功。
+    """
+    settled = ("accepted", "completed", "claimed")
+    last_result = "无回执"
+    for attempt in (1, 2):
+        try:
+            r = s.post(BASE + "/v2/activity/growth/tasks/accept",
+                       json={"task_codes": [code]}, timeout=20, verify=False)
+            try:
+                d = r.json()
+            except Exception as exc:
+                last_result = "响应解析异常(%s)" % type(exc).__name__
+                if attempt < 2:
+                    time.sleep(WRITE_GAP)
+                continue
+            d = d if isinstance(d, dict) else {}
+            results = (d.get("data") or {}).get("results") or []
+            status = (results[0].get("status") or "") if results else (d.get("msg") or "")
+            ast = prog(s, code)[0]
+            if r.status_code == 200 and ast not in settled:
+                time.sleep(ACCEPT_SETTLE_GAP)
+                ast = prog(s, code)[0]
+            if r.status_code == 200 and ast in settled:
+                return True
+            last_result = "accept %s 回读=%s" % (status or "无返回", ast)
+        except Exception as exc:
+            last_result = type(exc).__name__
+        if attempt < 2:
+            time.sleep(WRITE_GAP)
+    log("      ✗ %s: %s" % (code, last_result))
+    return False
+
+
+def desktop_playbook_events(uid, nick, case_id="01-ProductDesign", case_name="产品设计"):
+    """Sequential_Tasks_7 的 PC 口径：桌面对话链 + 灵感点击/提示事件。"""
+    conversation_id = _new_conversation_id()
+    request_id = _new_message_id()
+    message_id = "msg-" + request_id[-8:]
+    events = desktop_chat_sequence(
+        uid, nick, conversation_id, request_id, message_id)
+    payload = {
+        "id": case_id, "name": case_name, "type": "document",
+        "categoryId": "", "categoryName": "",
+    }
+    cta = dict(payload)
+    cta.update({
+        "eventCode": "playbook_cta_click", "source": "discover",
+        "position": 0, "conversationId": conversation_id,
+        "requestId": request_id, "messageId": message_id,
+    })
+    send = dict(payload)
+    send.update({
+        "eventCode": "playbook_prompt_send", "source": "discover",
+        "promptLength": 30, "isOfficial": 1,
+        "conversationId": conversation_id, "requestId": request_id,
+        "messageId": message_id, "skills": "", "skillNames": "",
+    })
+    events.extend([cta, send])
+    return events
+
+
 def t_sequential_tasks_7(s, uid, nick, log):
-    def _evs(i):
-        evs = mp_playbook_events(uid, nick)
-        report_desktop_events(s, uid, nick, evs)
-        return evs
-    _mp_do_task(s, uid, nick, "Sequential_Tasks_7", log, _evs, "小程序灵感功能", target=1)
+    """Sequential_Tasks_7：PC 限定灵感任务（默认列表/accept/桌面事件/Web 领奖）。"""
+    code = "Sequential_Tasks_7"
+    row = _growth_task_row(s, code)
+    if row is None:
+        log("   PC灵感功能: 桌面任务列表未下发，跳过")
+        return
+    if row.get("locked"):
+        log("   PC灵感功能: 未到上线时间（解锁 %s），跳过" % (
+            str(row.get("valid_start") or "见任务页")[:10]))
+        return
+    status = row.get("accept_status") or row.get("status") or ""
+    if status == "claimed":
+        log("   PC灵感功能: 已领取，跳过")
+        return
+    progress = row.get("progress") or {}
+    current = _as_int(progress.get("current"))
+    target = _as_int(progress.get("target")) or 1
+    if current >= target:
+        claim(s, code, log)
+        return
+    if status in ("", "not_accepted") and not _accept_with_verify(s, code, log):
+        log("   PC灵感功能: 接受任务失败，跳过")
+        return
+    try:
+        events = desktop_playbook_events(uid, nick)
+        report_desktop_events(s, uid, nick, events)
+        time.sleep(4)
+    except Exception as exc:
+        log("   PC灵感功能: 桌面事件上报失败 %s" % str(exc)[:60])
+        return
+    status, current, target = prog(s, code)
+    if status not in ("completed", "claimed"):
+        log("   PC灵感功能: 已上报但进度未点亮 %s/%s，不领奖" % (
+            current, target))
+        return
+    if status == "completed":
+        claim(s, code, log)
+    log("   PC灵感功能: %s %s/%s" % (status, current, target))
+
+SKILL_SHARE_CHANNEL_URL = "https://open.workbuddy.cn/api/v2/open-platform/asset-shares/c2c/channels"
+
+
+def _skill_share_market_skill(s):
+    """从一个当前可分享的市场技能中提取官方 createShare 所需字段。"""
+    response = api_retry(
+        s, "POST", CBDOMAIN + "/v2/operation-platform/market/skill/list",
+        body={"page": 1, "page_size": 20},
+    )
+    payload = _json_or_empty(response)
+    if response.status_code < 200 or response.status_code >= 300:
+        return None
+    if isinstance(payload.get("code"), bool) or not _api_code_ok(payload.get("code")):
+        return None
+    data = payload.get("data")
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(skills, list):
+        return None
+    candidates = []
+    for row in skills:
+        if not isinstance(row, dict):
+            continue
+        skill_id = str(row.get("skill_id") or row.get("id") or "").strip()
+        if not skill_id:
+            continue
+        name = str(
+            row.get("display_name_zh")
+            or row.get("name")
+            or row.get("display_name_en")
+            or ""
+        ).strip()
+        if not name:
+            continue
+        candidates.append({
+            "id": skill_id,
+            "name": name,
+            "description": str(
+                row.get("description_zh")
+                or row.get("description")
+                or row.get("description_en")
+                or ""
+            ).strip()[:60],
+        })
+    if not candidates:
+        return None
+    return next(
+        (row for row in candidates if row["id"] == SKILL_FALLBACK[0]),
+        candidates[0],
+    )
+
+
+def _create_skill_share_channel(s, uid, skill):
+    """按 5.9.3 客户端官方请求体创建真实 asset-share 渠道。"""
+    skill_id = str(skill.get("id") or "").strip()
+    if not skill_id:
+        return {"success": False, "message": "市场技能 ID 为空"}
+    body = {
+        "asset_kind": "skill",
+        "asset_source": "market",
+        "asset_ref": json.dumps(
+            {"asset_id": skill_id}, separators=(",", ":")
+        ),
+        "ways": ["link", "wxacode", "wxapath"],
+        "extra": {
+            "name": skill.get("name") or "技能",
+            "description": skill.get("description") or "",
+            "shareKey": skill_id,
+            "marketplaceSource": "builtin-market",
+        },
+    }
+    headers = {
+        "Authorization": s.headers.get("Authorization", ""),
+        "X-User-Id": uid,
+        "X-Domain": "copilot.tencent.com",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": DESKTOP_UA,
+    }
+    response = s.post(
+        SKILL_SHARE_CHANNEL_URL, json=body, headers=headers,
+        timeout=30, verify=False,
+    )
+    payload = _json_or_empty(response)
+    if not payload:
+        return {
+            "success": False,
+            "http": response.status_code,
+            "message": "分享接口返回非 JSON",
+        }
+    if response.status_code < 200 or response.status_code >= 300:
+        return {
+            "success": False,
+            "http": response.status_code,
+            "message": str(payload.get("msg") or "")[:100],
+        }
+    if isinstance(payload.get("code"), bool) or not _api_code_ok(payload.get("code")):
+        return {
+            "success": False,
+            "http": response.status_code,
+            "code": payload.get("code"),
+            "message": str(payload.get("msg") or "")[:100],
+        }
+    data = payload.get("data")
+    data = data if isinstance(data, dict) else {}
+    share_code = data.get("share_code")
+    share_code = share_code.strip() if isinstance(share_code, str) else ""
+    link = ""
+    ways = data.get("ways")
+    for way in ways if isinstance(ways, list) else []:
+        if isinstance(way, dict) and way.get("share_way") == "link":
+            value = way.get("resource_ref")
+            link = value.strip() if isinstance(value, str) else ""
+            break
+    if not share_code or not link:
+        return {
+            "success": False,
+            "http": response.status_code,
+            "message": "分享接口缺少 share_code 或 link",
+        }
+    return {
+        "success": True,
+        "shareCode": share_code,
+        "channelId": str(data.get("channel_id") or ""),
+    }
+
+
+def _skill_share_channel_events(skill_id, skill_name, share_code):
+    common = {
+        "skillId": skill_id,
+        "skillName": skill_name,
+        "skillType": "market",
+    }
+    now = int(time.time() * 1000)
+    return [
+        {
+            "eventCode": "skill_share_channel_action",
+            **common,
+            "action": "link",
+            "panelAction": "click",
+            "panelType": "clipboard",
+            "isSuccessful": True,
+            "cost": 0,
+            "id": share_code,
+            "actionAt": now,
+        },
+        {
+            "eventCode": "skill_share_channel_action",
+            **common,
+            "action": "link",
+            "panelAction": "success",
+            "panelType": "clipboard",
+            "isSuccessful": True,
+            "cost": 0,
+            "id": share_code,
+            "actionAt": now,
+        },
+    ]
+
+
+def _skill_share_complete(row):
+    progress = row.get("progress")
+    if not isinstance(progress, dict):
+        return False
+    try:
+        return ((row.get("accept_status") or row.get("status")) == "completed"
+                and _credit_decimal(progress.get("current")) == _credit_decimal(progress.get("target")) == 1)
+    except (ValueError, ArithmeticError):
+        return False
+
+
+def t_skill_share(s, uid, nick, log):
+    code = "skill_share"
+    row = _growth_task_row(s, code)
+    if row is None:
+        log("   分享技能给好友：当前未下发，跳过")
+        return
+    if row.get("locked") or _row_claimed(row):
+        log("   分享技能给好友：未解锁或已领取，跳过")
+        return
+    if not _skill_share_complete(row):
+        status = row.get("accept_status") or row.get("status")
+        if status in (None, "", "not_accepted") and not _accept_with_verify(s, code, log):
+            log("   分享技能给好友：任务登记失败")
+            return
+        skill = _skill_share_market_skill(s)
+        if skill is None:
+            log("   分享技能给好友：未取得有效市场技能，本轮跳过")
+            return
+        channel = _create_skill_share_channel(s, uid, skill)
+        if not channel.get("success"):
+            log("   分享技能给好友：创建渠道失败（HTTP %s，业务码 %s）" % (
+                channel.get("http", "?"), channel.get("code", "?")))
+            return
+        events = _skill_share_channel_events(skill["id"], skill["name"], channel["shareCode"])
+        report_status = report_desktop_events(s, uid, nick, events)
+        if not 200 <= report_status < 300:
+            log("   分享技能给好友：事件上报失败（HTTP %s）" % report_status)
+            return
+        for attempt in range(5):
+            row = _growth_task_row(s, code)
+            if row and (_row_claimed(row) or _skill_share_complete(row)):
+                break
+            if attempt < 4:
+                time.sleep(3)
+        else:
+            log("   分享技能给好友：渠道已创建，进度未确认，本轮不领奖")
+            return
+    if _row_claimed(row):
+        log("   分享技能给好友：服务端已确认领取")
+        return
+    if not claim(s, code, log):
+        log("   分享技能给好友：领奖未确认")
+        return
+    for attempt in range(3):
+        fresh = _growth_task_row(s, code)
+        if fresh and _row_claimed(fresh):
+            log("   分享技能给好友：已回读 claimed")
+            return
+        if attempt < 2:
+            time.sleep(2)
+    log("   分享技能给好友：奖励回执已确认，任务状态尚待刷新")
+
+
+CAMPAIGN_BASE = "https://www.codebuddy.cn"
+
+
+CAMPAIGN_SPECS = [
+    {
+        "code": "campaign_starbucks_2026", "label": "星巴克协作",
+        # 真机埋点每条都带页面上下文（pageURL/pageName），活动判据按页认人
+        "page": {"pageURL": "subpackages/secondary/starbucks-activity-428/index",
+                 "pageName": "starbucks_activity"},
+        "tasks": [
+            {"task": "ai_chat", "label": "与 AI 对话3次", "kind": "chat",
+             "times": 3, "credit": 100},
+            {"task": "expert", "label": "召唤专家并对话", "kind": "expert",
+             "credit": 100},
+            # 需手机端 App 登录后与 AI 对话一次；脚本只负责到账，不伪造事件
+            {"task": "app", "label": "解锁 App 强大能力", "kind": "app",
+             "credit": 100},
+        ],
+    },
+    {
+        "code": "campaign_reporter_2026", "label": "记者节福利活动",
+        "page": {"pageURL": "subpackages/journalist-benefit/index",
+                 "pageName": "journalist_benefit"},
+        "tasks": [
+            {"task": "expert_chat", "label": "体验「媒体工作助理」专家", "kind": "expert",
+             "expert_id": "ex_NaiDbO06Adf3", "expert_name": "媒体工作助理", "credit": 50},
+            {"task": "skill_use", "label": "体验「采访素材整理」技能", "kind": "skill",
+             # 判据按**技能 slug** 认人：skillName/id 传 "采访素材整理" 不计数，
+             # 传 market 里 registry 的 name（interview-material-organizer）才推进度。
+             "skill_id": "skill_2117491159283752960",
+             "skill_name": "interview-material-organizer",
+             "credit": 50},
+            # 活动判据读取桌面灵感事件，id 使用产物目录 cnb-content-calendar。
+            {"task": "desktop_same", "label": "体验「内容发布排期」灵感", "kind": "desktop",
+             "case_id": "content-calendar", "credit": 100},
+        ],
+    },
+]
+
+
+def _campaign_headers(s, uid):
+    """活动页请求头：小程序身份（桌面 AT 直接可用，服务端按账号体系认人）。"""
+    hdr = dict(MP_REPORT_HEADERS)
+    hdr["Authorization"] = s.headers.get("Authorization", "")
+    if uid:
+        hdr["X-User-Id"] = uid
+    return hdr
+
+
+def _campaign_skill_events(skill_id, skill_name):
+    """技能体验判据：skill_info + 带 skillId 的 chat_request_send。"""
+    conv = _new_conversation_id()
+    rid = _new_message_id()
+    info = {"eventCode": "skill_info", "id": skill_name, "skillId": skill_id,
+            "skillName": skill_name, "skillType": "market", "skillSource": "market",
+            "position": 0, "conversationId": conv}
+    chat = {"eventCode": "chat_request_send", "inputLength": 14, "isPlan": False,
+            "isAutoExecuteTerminal": False, "isAutoModify": False, "codebaseEnable": False,
+            "maxToken": 0, "maxSteps": 500, "temperature": 0, "maxRetries": 0,
+            "mentionContexts": [], "knowledgeId": [], "knowledgeName": [],
+            "codebaseId": "", "mentionContextCount": 0, "command": "",
+            "recommendId": "", "skillId": skill_id, "skillCount": 1, "totalCount": 0,
+            "traceId": rid, "rootRequestId": rid,
+            "parentConversationId": conv, "conversationId": conv,
+            "messageId": "msg-" + rid[-8:], "agentName": "mp", "agentType": "main",
+            "codebuddy.session_id": conv,
+            "codebuddy.conversation_request_id": rid}
+    return [info, chat]
+
+
+CAMPAIGN_CASES = {
+    "content-calendar": {
+        # 上报用的 id 是产物目录名（cnb- 前缀），不是注册表里的 slug
+        "event_id": "cnb-content-calendar",
+        "name": "内容发布排期表",
+        "type": "table",
+        "prompt_length": 359,
+    },
+}
+
+
+def _campaign_desktop_events(case):
+    """桌面域 `playbook_prompt_send`：活动判据只认这一条。"""
+    return [{"eventCode": "playbook_prompt_send",
+             "id": case.get("event_id") or "",
+             "name": case.get("name") or "",
+             "type": case.get("type") or "other",
+             "promptLength": case.get("prompt_length") or 0,
+             "isOfficial": 1,
+             "source": "discover",
+             "query": "",
+             "ext1": "discover",
+             "requestId": str(uuid.uuid4()),
+             "conversationId": str(uuid.uuid4())}]
+
+
+def _campaign_desktop_same(s, uid, nick, spec, task, log):
+    """reporter desktop_same：一条 `playbook_prompt_send` 即可点亮。
+
+    判据按 `id` 认案例，且必须是产物目录名 `cnb-content-calendar`
+    （传 `content-calendar` 或中文名都不计数，2026-11-12 实测）。
+    """
+    case_id = task.get("case_id") or "content-calendar"
+    case = CAMPAIGN_CASES.get(case_id) or {}
+    if not case:
+        log("      ⚠️ %s: 未内置案例 %s" % (task["label"], case_id))
+        return False
+    try:
+        return report(s, uid, nick, _campaign_desktop_events(case)) == 200
+    except Exception:
+        return False
+
+
+ACCEPT_SETTLE_GAP = 1.5
+ACCEPT_BATCH_SETTLE = 2.0
+ACCEPT_BATCH_TRIES = 3
+CAMPAIGN_APP_HOST = "https://copilot.tencent.com"
+CAMPAIGN_APP_BOOT = 120
+CAMPAIGN_APP_WAIT = 30
+CAMPAIGN_APP_POLL = 5
+CAMPAIGN_APP_PROMPT = '你只需要回复"Hi"'
+CAMPAIGN_APP_BOX_DOMAINS = (
+    "tencent.com",
+    "codebuddy.cn",
+    "workbuddy.cn",
+    "workbuddy.agentos-worker.net",
+)
+CAMPAIGN_APP_SUCCESS_STOP_REASONS = ("end_turn",)
+
+
+def _campaign_app_machine(uid):
+    """按账号派生稳定的伪设备号（8 位十六进制）。
+
+    仓库里不留任何真实设备指纹：同账号每轮稳定，换账号即变，也不可反推设备。
+    """
+    seed = "workbuddy-app-machine:%s" % (uid or "")
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
+
+def _campaign_app_headers(token, uid, accept="application/json"):
+    """App 身份头：服务端按 x-client-product 判来源，缺了会被当成网页/桌面。"""
+    return {"Authorization": "Bearer " + (token or ""), "X-User-Id": uid,
+            "User-Agent": "WorkBuddyApp/2.8.0", "X-Client-Version": "2.8.0",
+            "X-Client-Product": "workbuddy-app", "X-Client-Platform": "android",
+            "Accept": accept}
+
+def _campaign_app_box_url(raw_url):
+    """校验服务端下发的 sandbox URL，避免把 Bearer token 发给任意主机。"""
+    raw_url = str(raw_url or "").strip().rstrip("/")
+    try:
+        parsed = urlparse(raw_url)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if (parsed.scheme != "https" or not host or parsed.username or parsed.password
+            or port not in (None, 443) or parsed.query or parsed.fragment
+            or any(ord(c) < 32 or ord(c) == 127 for c in raw_url)):
+        return ""
+    if not any(host == domain or host.endswith("." + domain)
+               for domain in CAMPAIGN_APP_BOX_DOMAINS):
+        return ""
+    return raw_url
+
+def _campaign_app_sse_payload(line):
+    """把 SSE line 解析成 JSON；兼容 requests 返回 str 或 bytes。"""
+    if isinstance(line, bytes):
+        line = line.decode("utf-8", "replace")
+    line = str(line or "").strip()
+    if not line or line.startswith(":"):
+        return None
+    if line.lower().startswith("event:"):
+        return {"_event": line.split(":", 1)[1].strip()}
+    if line.lower().startswith("data:"):
+        line = line.split(":", 1)[1].strip()
+    if not line:
+        return None
+    try:
+        payload = json.loads(line)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+def _campaign_app_sse_event(event_name, data_lines):
+    """按 SSE 帧语义拼接同一事件的多行 data，再解析成 JSON。"""
+    event_name = str(event_name or "").strip().lower()
+    if event_name == "error":
+        return {"_event": "error"}
+    data = "\n".join(str(line or "") for line in (data_lines or [])).strip()
+    if not data and event_name != "error":
+        return None
+    if data == "[DONE]":
+        data = "{}"
+    if not data:
+        payload = {}
+    else:
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    if event_name:
+        payload["_event"] = event_name
+    return payload
+
+def _campaign_app_terminal(payload):
+    """返回 (成功 stopReason, 错误标记)；只把结构化 end_turn 当作成功。"""
+    if not isinstance(payload, dict):
+        return None, None
+    event_kind = str(payload.get("_event") or payload.get("event") or "").strip().lower()
+    payload_kind = str(payload.get("type") or "").strip().lower()
+    if event_kind == "error" or payload_kind == "error" or payload.get("error"):
+        return None, "error"
+    if "stopReason" in payload:
+        reason = payload.get("stopReason")
+        if isinstance(reason, str) and reason.strip():
+            reason = reason.strip()
+            if reason in CAMPAIGN_APP_SUCCESS_STOP_REASONS:
+                return reason, None
+            return None, reason
+    for value in payload.values():
+        if isinstance(value, dict):
+            reason, error = _campaign_app_terminal(value)
+            if reason or error:
+                return reason, error
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    reason, error = _campaign_app_terminal(item)
+                    if reason or error:
+                        return reason, error
+    return None, None
+
+def _campaign_app_chat(s, uid, nick, log, prompt=None):
+    """app 任务：建会话 + 一次 ACP bootstrap 真跑完一轮对话（App 走的同一条路）。
+
+    判据是「云端会话真跑完一次对话」，补发埋点、网页会话都不计数。整条链路
+    只要 4 个请求：`POST /v2/as/conversations/` 建会话 → `POST {boxUrl}/acp/bootstrap`
+    把 initialize + session/new + session/prompt 一次带过去 → 读完流 → 外层领奖。
+    bootstrap 的响应头会下发 `Acp-Connection-Id`，所以不必先开 SSE 再握手，
+    也不接受客户端自己造的 id（会 404 connection not found）。
+    """
+    token = (s.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    if not token:
+        log("      ✗ %s: 缺少 access_token" % "解锁 App 强大能力")
+        return False
+    s2 = requests.Session()
+    s2.trust_env = False
+    stream = None
+    try:
+        r = s2.post(CAMPAIGN_APP_HOST + "/v2/as/conversations/",
+                    json={"name": "开始新对话", "conversationOrigin": "agents"},
+                    headers=_campaign_app_headers(token, uid), timeout=60, verify=True, allow_redirects=False)
+        if r.status_code != 200:
+            log("      ✗ 建会话失败：HTTP %s" % r.status_code)
+            return False
+        payload = r.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        data = data if isinstance(data, dict) else {}
+        sess = data.get("session") or {}
+        box, box_tok = sess.get("boxUrl") or "", sess.get("token") or ""
+        if not isinstance(box, str) or not isinstance(box_tok, str) or not box or not box_tok:
+            log("      ✗ 建会话失败：缺少沙箱连接信息")
+            return False
+        box = _campaign_app_box_url(box)
+        if not box:
+            log("      ✗ 建会话失败：boxUrl 不是受信任的 HTTPS 官方域名")
+            return False
+        info = {"ideType": "WorkBuddy_APP", "ideName": "app_cloud", "ideVersion": "2.8.0",
+                "extName": "WorkBuddy_APP", "extVersion": "2.8.0",
+                "machineId": _campaign_app_machine(uid), "userId": uid, "userNickname": nick}
+        meta = {"codebuddy.ai": {"telemetryClientInfo": info}}
+        span = uuid.uuid4().hex[:16]
+        body = {
+            "initialize": {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                           "params": {"protocolVersion": 1, "clientCapabilities": {},
+                                      "clientInfo": {"name": "WorkBuddyApp", "version": "2.8.0"}}},
+            "sessionNew": {"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                           "params": {"cwd": "/workspace", "mcpServers": [], "_meta": meta}},
+            "prompt": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                       "params": {"prompt": [{"type": "text",
+                                              "text": prompt or CAMPAIGN_APP_PROMPT}],
+                                  "_meta": meta}},
+        }
+        hdr = _campaign_app_headers(box_tok, uid, "application/json, text/event-stream")
+        hdr.update({"Content-Type": "application/json", "X-Span-Id": span,
+                    "X-Client-Request-Id": "sse_" + uuid.uuid4().hex[:10],
+                    "Traceparent": "00-%s-%s-01" % (uuid.uuid4().hex, span)})
+        stream = s2.post(box + "/acp/bootstrap?includeUserEcho=true", json=body,
+                         headers=hdr, stream=True, timeout=CAMPAIGN_APP_BOOT, verify=True, allow_redirects=False)
+        if stream.status_code != 200 or not stream.headers.get("Acp-Connection-Id"):
+            log("      ✗ bootstrap 失败：HTTP %s" % stream.status_code)
+            return False
+        deadline = time.monotonic() + CAMPAIGN_APP_BOOT
+        event_name = ""
+        data_lines = []
+
+        def finish_event():
+            nonlocal event_name, data_lines
+            payload = _campaign_app_sse_event(event_name, data_lines)
+            event_name = ""
+            data_lines = []
+            return _campaign_app_terminal(payload)
+
+        for line in stream.iter_lines(decode_unicode=True):
+            if time.monotonic() > deadline:
+                log("      ✗ 对话超时：未收到有效 stopReason")
+                return False
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", "replace")
+            text = str(line or "")
+            if not text.strip():
+                reason, error = finish_event()
+                if error:
+                    log("      ✗ 对话失败：收到错误或非正常终止事件")
+                    return False
+                if reason:
+                    return True
+                continue
+            if text.startswith(":"):
+                continue
+            if text.lower().startswith("event:"):
+                event_name = text.split(":", 1)[1].strip()
+                continue
+            if text.lower().startswith("data:"):
+                data_lines.append(text.split(":", 1)[1].lstrip())
+                continue
+            payload = _campaign_app_sse_payload(text)
+            if payload is None:
+                continue
+            reason, error = _campaign_app_terminal(payload)
+            if error:
+                log("      ✗ 对话失败：收到错误或非正常终止事件")
+                return False
+            if reason:
+                return True
+        reason, error = finish_event()
+        if error:
+            log("      ✗ 对话失败：收到错误或非正常终止事件")
+            return False
+        if reason:
+            return True
+        log("      ✗ 对话失败：流在 stopReason 前提前结束")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log("      ✗ 对话异常：%s" % type(exc).__name__)
+        return False
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        s2.close()
+
+def _campaign_fire(s, uid, nick, spec, task, log):
+    """按 kind 上报一次判据事件；返回是否已上报。"""
+    kind = task.get("kind")
+    page = spec.get("page") or None
+    if kind == "desktop":
+        return _campaign_desktop_same(s, uid, nick, spec, task, log)
+    if kind == "app":
+        return _campaign_app_chat(s, uid, nick, log)
+    if kind == "chat":
+        return mp_report(s, uid, nick, [mp_chat_event(uid, nick, _new_conversation_id())],
+                         env_extra=page) == 200
+    if kind == "expert":
+        eid = task.get("expert_id")
+        ename = task.get("expert_name")
+        if not eid:
+            eid, ename = _mp_pick_expert(s)
+        if not eid:
+            log("      ✗ %s: 取不到专家 id，跳过" % task["label"])
+            return False
+        return mp_report(s, uid, nick, mp_expert_use_events(
+            uid, nick, eid, ename, _new_conversation_id()), env_extra=page) == 200
+    if kind == "skill":
+        return mp_report(s, uid, nick, _campaign_skill_events(
+            task.get("skill_id"), task.get("skill_name")), env_extra=page) == 200
+    return False
+
+
+def _campaign_call(s, uid, method, path, body=None):
+    with requests.Session() as session:
+        session.trust_env = False
+        try:
+            response = session.request(method, CAMPAIGN_BASE + path, json=body,
+                                       headers=_campaign_headers(s, uid), timeout=20,
+                                       verify=False, allow_redirects=False)
+            return response.status_code, _json_or_empty(response)
+        except requests.RequestException:
+            return 0, {}
+
+
+def _campaign_ok(status, payload):
+    code = payload.get("code")
+    return status == 200 and not isinstance(code, bool) and code in (0, "0")
+
+
+def _campaign_count(value):
+    number = _credit_decimal(value)
+    if number < 0 or number != number.to_integral_value():
+        raise ValueError()
+    return int(number)
+
+
+def campaign_tasks(s, uid, camp, log):
+    status, payload = _campaign_call(
+        s, uid, "GET", "/portal/activity/tasks?" + urlencode({"activity_code": camp}))
+    data = payload.get("data")
+    if not _campaign_ok(status, payload) or not isinstance(data, dict):
+        log("   ⚠️活动任务读取失败[%s]（HTTP %s）" % (camp, status))
+        return None
+    tasks = data.get("tasks")
+    progress = data.get("progress") or []
+    if (not isinstance(tasks, list) or not isinstance(progress, list)
+            or any(not isinstance(row, dict) for row in tasks + progress)):
+        log("   ⚠️活动任务读取失败[%s]（结构无效）" % camp)
+        return None
+    by_code = {row.get("task_code"): row for row in progress}
+    result = {}
+    for task in tasks:
+        code = task.get("task_code")
+        if not isinstance(code, str) or not code:
+            continue
+        row = by_code.get(code, {})
+        try:
+            target = _campaign_count(task.get("target_count"))
+            current = _campaign_count(row.get("progress", 0))
+            if target == 0:
+                raise ValueError()
+        except (ValueError, ArithmeticError):
+            log("   ⚠️活动任务结构无效[%s/%s]" % (camp, code))
+            continue
+        try:
+            credit = _credit_decimal(task.get("reward_credit"))
+            if credit < 0:
+                raise ValueError()
+        except (ValueError, ArithmeticError):
+            credit = None
+        result[code] = {
+            "target": target, "progress": current, "credit": credit,
+            "completed_at": row.get("completed_at"), "claimed_at": row.get("claimed_at"),
+            "need_view": task.get("need_view", True) is not False,
+        }
+    return result
+
+
+def _campaign_poll(s, uid, camp, code, target, log, *, tries=6, gap=3):
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(gap)
+        rows = campaign_tasks(s, uid, camp, log)
+        if rows is None:
+            return None
+        row = rows.get(code)
+        if row is None:
+            return None
+        if row["claimed_at"] or row["completed_at"] or row["progress"] >= target:
+            return row
+    return row
+
+
+def _campaign_claim(s, uid, camp, code, log):
+    attempts = getattr(s, "_workbuddy_campaign_claims", None)
+    if not isinstance(attempts, set):
+        attempts = s._workbuddy_campaign_claims = set()
+    key = (camp, code)
+    if key in attempts:
+        return None
+    attempts.add(key)
+    path = "/portal/activity/tasks/%s/claim?%s" % (code, urlencode({"activity_code": camp}))
+    status, payload = _campaign_call(s, uid, "POST", path, {})
+    if not _campaign_ok(status, payload):
+        log("   ⚠️活动领奖失败[%s/%s]（HTTP %s）" % (camp, code, status))
+        return None
+    for attempt in range(5):
+        if attempt:
+            time.sleep(4)
+        rows = campaign_tasks(s, uid, camp, log)
+        row = rows.get(code) if rows is not None else None
+        if row and row["claimed_at"]:
+            value = row["credit"]
+            reward = "奖励金额未提供" if value is None else "+%s 积分" % _format_credit(value)
+            log("   🎁活动领奖[%s/%s]: %s（claimed_at 已回读）" % (camp, code, reward))
+            return row
+    log("   ⚠️活动领奖[%s/%s]: 已提交但未确认 claimed_at，留待下轮回读" % (camp, code))
+    return None
+
+
+def _run_campaign(s, uid, nick, spec, log):
+    camp = spec["code"]
+    result = {"label": spec["label"], "new_credit": "0", "confirmed": [],
+              "manual": [], "pending": [], "preclaimed": 0, "loaded": False}
+    rows = campaign_tasks(s, uid, camp, log)
+    if rows is None:
+        return result
+    result["loaded"] = True
+    if not rows:
+        log("   🎪%s：当前未下发活动任务" % spec["label"])
+        return result
+    gained = Decimal(0)
+    unknown_credit = False
+    for task in spec["tasks"]:
+        code = task["task"]
+        row = rows.get(code)
+        if row is None:
+            log("   🎪%s/%s：未下发，跳过" % (spec["label"], task["label"]))
+            continue
+        if row["claimed_at"]:
+            result["preclaimed"] += 1
+            continue
+        target = row["target"]
+        if not row["completed_at"] and row["progress"] < target:
+            if row["need_view"]:
+                status, payload = _campaign_call(s, uid, "POST",
+                    "/portal/activity/tasks/%s/viewed?%s" % (code, urlencode({"activity_code": camp})), {})
+                if not _campaign_ok(status, payload):
+                    log("   ⚠️活动查看登记失败[%s/%s]（HTTP %s）" % (camp, code, status))
+                    result["pending"].append(task["label"])
+                    continue
+            remaining = target - row["progress"]
+            if task["kind"] in ("desktop", "app"):
+                remaining = min(remaining, 1)
+            for _ in range(remaining):
+                if not _campaign_fire(s, uid, nick, spec, task, log):
+                    log("   ⚠️活动事件上报失败[%s/%s]" % (camp, code))
+                    break
+                row = _campaign_poll(s, uid, camp, code, target, log)
+                if row is None or row["claimed_at"] or row["completed_at"] or row["progress"] >= target:
+                    break
+            if row and not row["claimed_at"] and not row["completed_at"] and row["progress"] < target:
+                row = _campaign_poll(s, uid, camp, code, target, log, tries=6, gap=10)
+            if not row or (not row["claimed_at"] and not row["completed_at"] and row["progress"] < target):
+                result["pending"].append(task["label"])
+                log("   🎪%s：判据延迟未落库，留待下轮回读" % task["label"])
+                continue
+        if row["claimed_at"]:
+            continue
+        confirmed = _campaign_claim(s, uid, camp, code, log)
+        if confirmed:
+            result["confirmed"].append(task["label"])
+            if confirmed["credit"] is not None:
+                gained += confirmed["credit"]
+            else:
+                unknown_credit = True
+        else:
+            result["pending"].append(task["label"])
+    if "invite" in rows:
+        log("   🎪%s：邀请项仅展示状态，沿用现有邀请机制" % spec["label"])
+    result["new_credit"] = None if unknown_credit else _format_credit(gained)
+    return result
+
+
+def t_campaigns(s, uid, nick, log):
+    results = []
+    for spec in CAMPAIGN_SPECS:
+        if not want("campaign", spec["code"]):
+            continue
+        try:
+            results.append(_run_campaign(s, uid, nick, spec, log))
+        except Exception as exc:
+            log("   ⚠️活动处理异常[%s]（%s）" % (spec["code"], type(exc).__name__))
+    return results
 
 
 def t_unknown_tasks(s, uid, nick, log):
-    """任务列表体检：未覆盖的新任务提示 + 未完成任务的有效期预警
+    """任务列表体检：动态发现新任务 + 未完成任务的有效期预警
 
     服务端任务行带 valid_start / valid_end（如 Buddy_App_QQ 至 2026-10-10）——
     过期后就领不到了，所以对「未完成且 7 天内到期 / 已过期」的任务给出 ⏰ 提示。
+    桌面 /v2、小程序 /v2、等级族无 /v2 三源并不互为超集，合并后按 code 去重；
+    单侧失败不阻断另一侧或后续补领。
     """
     known = {"create_canvas", "playbook_prompt", "RichMeow_Chat", "Library_read", "Expert_lighthouse",
              "Expert_Philanthropy", "Hp_Appearance", "Buddy_App", "Buddy_App_QQ", "Model_chat_GLM5.2",
-             "black_cat", "Expert_team_use_3", "first_buddy", "chat_5", "skill_1", "expert_5",
+             "black_cat", "Expert_team_use_3", "first_buddy", "chat_5", "skill_share", "skill_1", "expert_5",
              "template_5", "automation_1", "workstation_expert", "WorkBuddy_Valorant",
+             "expert_use_maidehao", "expert_use_douyinyin",
+             "expert_use_shangjia_xuanchuan", "expert_use_bowangwang",
              "Sequential_Tasks_1", "Sequential_Tasks_2", "Sequential_Tasks_3",
              "Sequential_Tasks_4", "Sequential_Tasks_5",
              "Sequential_Tasks_6", "Sequential_Tasks_7"}
-    r = s.get(BASE + "/v2/activity/growth/tasks", timeout=25, verify=False).json()
-    rows = r.get("data", {}).get("tasks", [])
+    rows_by_code = {}
+    errors = []
+    sources = (
+        (None, "桌面", "/v2/activity/growth/tasks"),
+        (MP_HEADER, "小程序", "/v2/activity/growth/tasks"),
+        (None, "等级", "/activity/growth/tasks"),
+    )
+    for headers, label, path in sources:
+        try:
+            batch = growth_task_rows(s, headers=headers, path=path)
+        except Exception as e:
+            errors.append("%s: %s" % (label, str(e)[:50]))
+            continue
+        for t in batch:
+            if not isinstance(t, dict):
+                continue
+            code = str(t.get("task_code") or t.get("code") or "").strip()
+            if code and code not in rows_by_code:
+                item = dict(t)
+                item["_source"] = label
+                rows_by_code[code] = item
+    if errors:
+        log("   ⚠️任务发现部分口径失败: %s" % "；".join(errors))
+    rows = list(rows_by_code.values())
+    if not rows:
+        log("   ⚠️任务发现未取得任何任务行")
+        return
     for t in rows:
         if not isinstance(t, dict):
             continue
-        code = t.get("task_code", "")
-        st = t.get("accept_status", "")
-        if code in known or st in ("claimed", "completed"):
+        code = t.get("task_code") or t.get("code") or ""
+        st = t.get("accept_status") or t.get("status") or ""
+        if code in known or str(code).startswith("expert_use_") or st in ("claimed", "completed"):
             continue
-        desc = t.get("task_desc", "")[:50]
-        if "subscribe" in code.lower() or "公众号" in (t.get("title", "") + desc):
-            log("   ⚠️新任务需手动: %s %s (%s) — 需微信扫码关注公众号" % (code, t.get("title", ""), desc))
-        elif "donat" in code.lower() or "捐款" in desc or "公益" in t.get("title", ""):
-            log("   ⚠️新任务需手动: %s %s (%s) — 涉及真实捐款" % (code, t.get("title", ""), desc))
+        title = str(t.get("title") or t.get("task_title") or t.get("task_name") or "")
+        desc = str(t.get("task_desc") or t.get("description") or "")[:50]
+        if code in LEVEL_TASK_CODES:
+            if code == "wechat_linked":
+                log("   ⚠️等级任务需客户端: %s %s — 需在官方客户端绑定微信" % (code, title))
+            else:
+                log("   ℹ️等级任务(只发现): %s %s %s" % (code, title, st))
+        elif "subscribe" in code.lower() or "公众号" in (title + desc):
+            log("   ⚠️新任务需手动: %s %s (%s) — 需微信扫码关注公众号" % (code, title, desc))
+        elif "donat" in code.lower() or "捐款" in desc or "公益" in title:
+            log("   ⚠️新任务需手动: %s %s (%s) — 涉及真实捐款" % (code, title, desc))
         else:
-            log("   ⚠️未覆盖新任务: %s %s (%s) — 请反馈更新脚本" % (code, t.get("title", ""), desc))
+            log("   ⚠️未覆盖新任务: %s %s (%s) — 请反馈更新脚本" % (code, title, desc))
     # 有效期预警：未完成但即将过期（或已过期）的任务
     today = beijing_today()
     soon = []
     for t in rows:
-        if not isinstance(t, dict) or t.get("accept_status") in ("claimed", "completed"):
+        if not isinstance(t, dict) or (t.get("accept_status") or t.get("status")) in ("claimed", "completed"):
             continue
         ve = str(t.get("valid_end") or "")[:10]
         if len(ve) < 10:
@@ -2763,14 +4663,13 @@ def t_unknown_tasks(s, uid, nick, log):
             continue
         left = (d - today).days
         if left < 0:
-            soon.append((t.get("task_code", ""), ve, "已过期"))
+            soon.append((t.get("task_code") or t.get("code") or "", ve, "已过期"))
         elif left <= 7:
-            soon.append((t.get("task_code", ""), ve, "%d 天后到期" % left))
+            soon.append((t.get("task_code") or t.get("code") or "", ve, "%d 天后到期" % left))
     if soon:
         log("   ⏰ 任务有效期提醒（未完成）:")
         for code, ve, when in soon[:6]:
             log("      · %s %s（%s）" % (code, ve, when))
-
 
 # ---------- 桌面端换血任务（Windows 走真实桌面，非 Windows 走指纹） ----------
 _INFO_DIR = os.path.join(os.path.expanduser("~"), "AppData", "Local", "CodeBuddyExtension", "Data", "Public", "auth")
@@ -2781,38 +4680,113 @@ SESSION_DIRS = [os.path.join(os.path.expanduser("~"), ".workbuddy-ai", "sessions
                 os.path.join(os.path.expanduser("~"), ".workbuddy", "sessions")]
 
 
+_SWAP_MARK = "_wb_all_swapped"
+
+
 def swap_info(tok):
+    """把 .info 认证换成目标账号（自动备份）。
+
+    返回 False 表示认证文件不存在、不可读或令牌无效，调用方必须跳过换血流程。
+    """
+    if not os.path.exists(INFO_PATH):
+        return False
+    try:
+        pay = tok.split(".")[1]
+        pay += "=" * (4 - len(pay) % 4)
+        j = json.loads(base64.urlsafe_b64decode(pay))
+        expires = _credit_decimal(j.get("exp")) if isinstance(j, dict) else Decimal(0)
+        if (not isinstance(j, dict) or not isinstance(j.get("sub"), str) or not j["sub"]
+                or expires <= time.time()):
+            return False
+    except Exception:
+        return False
     bak = INFO_PATH + ".wb_all_bak"
-    if not os.path.exists(bak):
-        shutil.copy(INFO_PATH, bak)
-    d = json.load(open(INFO_PATH, encoding="utf-8"))
-    j = jwt_payload(tok)
+    try:
+        with open(INFO_PATH, encoding="utf-8") as handle:
+            d = json.load(handle)
+        if not isinstance(d, dict) or not isinstance(d.get("auth"), dict):
+            return False
+    except Exception:
+        return False
+    if d.get(_SWAP_MARK):
+        # 上次运行异常退出留下的换血态：先还原真认证，再建立本轮备份。
+        if not os.path.exists(bak):
+            return False
+        try:
+            shutil.copy2(bak, INFO_PATH)
+            with open(INFO_PATH, encoding="utf-8") as handle:
+                d = json.load(handle)
+            if not isinstance(d, dict) or not isinstance(d.get("auth"), dict):
+                return False
+        except Exception:
+            return False
+    else:
+        # 桌面端已改写文件（通常是用户重新登录），旧备份已经过期。
+        if os.path.exists(bak):
+            try:
+                os.remove(bak)
+            except OSError:
+                return False
+    try:
+        shutil.copy2(INFO_PATH, bak)
+    except OSError:
+        return False
     d["auth"]["accessToken"] = tok
     d["auth"]["refreshToken"] = ""
-    d["auth"]["expiresAt"] = j.get("exp", 0) * 1000
+    d["auth"]["expiresAt"] = int(expires * 1000)
 
     def fix(a, last):
         if isinstance(a, dict):
             a["uid"] = j.get("sub")
             for k in ("nickname", "phoneNumber"):
-                if k in a:
-                    a[k] = "脚本账号"
-            if "lastLogin" in a:
-                a["lastLogin"] = "True" if last else "False"
+                if k in a: a[k] = "脚本账号"
+            if "lastLogin" in a: a["lastLogin"] = "True" if last else "False"
         return a
     fix(d.get("account", {}), True)
     for k in ("accounts", "allAccounts"):
         if isinstance(d.get(k), list):
-            for a in d[k]:
-                fix(a, False)
-    json.dump(d, open(INFO_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+            for a in d[k]: fix(a, False)
+    d[_SWAP_MARK] = True
+    tmp = INFO_PATH + ".wb_all_tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(d, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, INFO_PATH)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def restore_info():
+    """还原被脚本换过的认证文件，绝不覆盖用户重新登录后的认证。"""
     bak = INFO_PATH + ".wb_all_bak"
-    if os.path.exists(bak):
-        shutil.copy(bak, INFO_PATH)
+    try:
+        with open(INFO_PATH, encoding="utf-8") as handle:
+            d = json.load(handle)
+        if not isinstance(d, dict):
+            return False
+    except Exception:
+        return False
+    if not d.get(_SWAP_MARK):
+        if os.path.exists(bak):
+            try:
+                os.remove(bak)
+            except OSError:
+                pass
+        return True
+    if not os.path.exists(bak):
+        return False
+    try:
+        shutil.copy2(bak, INFO_PATH)
         os.remove(bak)
+    except OSError:
+        return False
+    return True
 
 
 def ensure_local_skill():
@@ -2830,7 +4804,6 @@ def ensure_local_skill():
 
 
 def daemon_chat(prompt, blocks=None, meta_extra=None, deadline=280):
-    import websocket
     import glob as _glob
     s = requests.Session()
     s.trust_env = False
@@ -2954,8 +4927,9 @@ def restart_desktop():
 
 
 def cdp_ui_send(prompt):
-    import websocket
+    """通过 CDP 在桌面端 UI 用 Slate beforeinput 发送聊天（新账号兜底）"""
     try:
+        import websocket
         r = requests.get("http://127.0.0.1:9222/json", timeout=5, proxies={"http": None, "https": None})
         pt = [x for x in r.json() if x.get("type") == "page"][0]
         ws = websocket.create_connection(pt["webSocketDebuggerUrl"], timeout=10, suppress_origin=True)
@@ -2970,8 +4944,7 @@ def cdp_ui_send(prompt):
             t0 = time.time()
             while time.time() - t0 < 10:
                 try:
-                    ws.settimeout(1.0)
-                    raw = ws.recv()
+                    ws.settimeout(1.0); raw = ws.recv()
                 except websocket.WebSocketTimeoutException:
                     continue
                 except Exception:
@@ -3008,8 +4981,11 @@ def cdp_ui_send(prompt):
 
 
 def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
+    """桌面端任务：Windows 走真实桌面换血，非 Windows 自动降级为指纹上报。"""
     is_win = sys.platform == "win32"
+
     if is_win:
+        # ===== Windows：真实桌面换血流程 =====
         log("   🖥️ 桌面换血流程启动（结束后自动还原认证并重启桌面端）...")
         if need_skill:
             try:
@@ -3023,38 +4999,45 @@ def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
             except Exception:
                 pass
         ensure_local_skill()
-        swap_info(tok)
-        url = restart_desktop()
-        if not url:
-            log("   ⚠️ 桌面端守护进程未就绪，降级为指纹上报...")
-            restore_info()
-            subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
+        if not swap_info(tok):
+            log("   ⚠️ 未找到可用的桌面端认证文件，降级为指纹上报...")
             _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
             return
-        time.sleep(8)
-        if need_rich:
-            txt = daemon_chat("你好，请用一句话介绍你自己")
-            if not txt:
-                log("   守护进程会话未就绪，改用 CDP UI 发送...")
-                cdp_ui_send("你好，请用一句话介绍你自己")
-            log("   桌面对话: %s字" % len(txt))
+        try:
+            url = restart_desktop()
+            if not url:
+                log("   ⚠️ 桌面端守护进程未就绪，降级为指纹上报...")
+                _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
+                return
             time.sleep(8)
-        if need_skill:
-            blocks = [{"type": "resource_link", "uri": "skill://" + SKILL_NAME, "title": SKILL_NAME,
-                       "name": SKILL_NAME, "_meta": {"mentionType": "skill", "skillName": SKILL_NAME}},
-                      {"type": "text", "text": "你必须通过技能系统正式加载（load）该技能，加载成功后回答：技能已加载"}]
-            txt = daemon_chat("", blocks=blocks)
-            if not txt:
-                log("   守护进程不可用，改用 CDP UI 技能调用...")
-                cdp_ui_send("/" + SKILL_NAME + " 请按技能说明回答OK")
-            log("   技能加载: %s" % ("成功" if "加载" in txt else "回复%d字" % len(txt)))
-            time.sleep(8)
-        restore_info()
-        subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"], capture_output=True)
-        time.sleep(3)
-        subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
-        time.sleep(5)
+            if need_rich:
+                txt = daemon_chat("你好，请用一句话介绍你自己")
+                if not txt:
+                    log("   守护进程会话未就绪，改用 CDP UI 发送...")
+                    cdp_ui_send("你好，请用一句话介绍你自己")
+                log("   桌面对话: %s字" % len(txt))
+                time.sleep(8)
+            if need_skill:
+                blocks = [{"type": "resource_link", "uri": "skill://" + SKILL_NAME, "title": SKILL_NAME,
+                           "name": SKILL_NAME, "_meta": {"mentionType": "skill", "skillName": SKILL_NAME}},
+                          {"type": "text", "text": "你必须通过技能系统正式加载（load）该技能，加载成功后回答：技能已加载"}]
+                txt = daemon_chat("", blocks=blocks)
+                if not txt:
+                    log("   守护进程不可用，改用 CDP UI 技能调用...")
+                    cdp_ui_send("/" + SKILL_NAME + " 请按技能说明回答OK")
+                log("   技能加载: %s" % ("成功" if "加载" in txt else "回复%d字" % len(txt)))
+                time.sleep(8)
+        finally:
+            # 认证还原必须覆盖异常与超时路径，不能把桌面端留在脚本账号。
+            if restore_info():
+                subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"], capture_output=True)
+                time.sleep(3)
+                subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
+                time.sleep(5)
+            else:
+                log("   ❌ 桌面认证还原失败，保留当前桌面进程并停止自动重启")
     else:
+        # ===== 非 Windows：指纹上报降级 =====
         log("   🖥️ 非 Windows 环境，使用指纹上报模式...")
         _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
         return
@@ -3133,6 +5116,7 @@ def _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill):
 
 
 def t_workstation(s, uid, nick, log, tok):
+    """工作台搭建师专家（若任务出现）：优先桌面换血对话，回退遥测"""
     st, cur, tgt = prog(s, "workstation_expert")
     if st in ("completed", "claimed") or st is None:
         return
@@ -3140,35 +5124,48 @@ def t_workstation(s, uid, nick, log, tok):
         log("   工作台搭建师: 非Windows，跳过桌面流程")
         return
     log("   检测到工作台搭建师任务，尝试桌面换血对话...")
-    swap_info(tok)
-    restart_desktop()
-    time.sleep(8)
-    blocks = [{"type": "resource_link", "uri": "expert://WorkspaceBuilder", "title": "工作台搭建师",
-               "name": "工作台搭建师", "_meta": {"mentionType": "expert", "expertId": "WorkspaceBuilder"}},
-              {"type": "text", "text": "你好，请介绍你能帮我搭建什么工作台，回答OK即可"}]
-    txt = daemon_chat("", blocks=blocks)
-    log("   工作台搭建师对话: %s字" % len(txt))
-    restore_info()
-    subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"], capture_output=True)
-    time.sleep(3)
-    subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
-    time.sleep(5)
+    # 桌面换血对话（复用 desktop 流程）
+    if not swap_info(tok):
+        log("   工作台搭建师: 未找到可用的桌面端认证文件，跳过")
+        return
+    try:
+        url = restart_desktop()
+        if not url:
+            log("   工作台搭建师: 桌面端守护进程未就绪，跳过")
+            return
+        time.sleep(8)
+        blocks = [{"type": "resource_link", "uri": "expert://WorkspaceBuilder", "title": "工作台搭建师",
+                   "name": "工作台搭建师", "_meta": {"mentionType": "expert", "expertId": "WorkspaceBuilder"}},
+                  {"type": "text", "text": "你好，请介绍你能帮我搭建什么工作台，回答OK即可"}]
+        txt = daemon_chat("", blocks=blocks)
+        log("   工作台搭建师对话: %s字" % len(txt))
+    finally:
+        if restore_info():
+            subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"], capture_output=True)
+            time.sleep(3)
+            subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
+            time.sleep(5)
+        else:
+            log("   工作台搭建师: 桌面认证还原失败，保留当前桌面进程并停止自动重启")
     log("   工作台搭建师: %s %s/%s" % prog(s, "workstation_expert"))
 
 
 # ---------- 稳定指纹 & 事件构建 ----------
 def desktop_fingerprint(uid, nick):
+    """公共桌面指纹（注入每个桌面事件，覆盖同名业务键）。"""
     now = int(time.time() * 1000)
     return {
         "timezone": "Asia/Shanghai", "reportDelay": 2000,
         "userId": uid, "username": nick, "userNickname": nick,
-        "product": "SaaS", "releaseDate": 1789036585355,
-        "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
-        "ideName": "WorkBuddy", "ideType": "WorkBuddy", "ideVersion": "5.5.6",
+        "product": "SaaS", "releaseDate": DESKTOP_RELEASE_CN,
+        "commit": DESKTOP_COMMIT_CN, "qimei36": derive_id(uid, "qimei"),
+        "ideName": "WorkBuddy", "ideType": "WorkBuddy",
+        "ideVersion": DESKTOP_VERSION_CN,
         "machineId": derive_id(uid, "machine"), "sessionId": derive_id(uid, "session"),
-        "extName": "workbuddy-desktop", "extVersion": "5.5.6",
-        "os": "win32", "arch": "x64", "osVersion": "10.0.26220",
-        "cpuCores": 20, "memorySize": 24,
+        "extName": "workbuddy-desktop", "extVersion": DESKTOP_VERSION_CN,
+        "os": "win32", "arch": "x64", "osVersion": "10.0.28000",
+        "cpuModel": "11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz",
+        "cpuCores": 8, "memorySize": 16,
         "timestamp": now, "presentAt": now,
     }
 
@@ -3259,7 +5256,7 @@ def desktop_buddy5_sequence(uid, nick, buddy_id, buddy_name):
     mk("buddyapp_discover_click", {})
     mk("buddyapp_show", {"elementId": buddy_id, "elementName": buddy_name, "position": 2})
     mk("buddyapp_enter_click",
-       {"elementId": buddy_id, "elementName": buddy_name, "position": 2, "isFirstPage": "1"})
+       {"elementId": buddy_id, "elementName": buddy_name, "position": 2, "isFirstPage": True})
     mk("buddyapp_auth_confirm_click", {"elementId": buddy_id, "elementName": buddy_name})
     mk("buddyapp_bindaccount_skip_click", {"elementId": buddy_id, "elementName": buddy_name})
     return ev
@@ -3276,8 +5273,8 @@ def report_desktop_events(s, uid, nick, events):
            "Accept": "application/json, text/plain, */*",
            "Content-Type": "application/json;charset=UTF-8",
            "User-Agent": DESKTOP_UA,
-           "X-Domain": DESKTOP_BASE, "X-Product": "SaaS",
-           "X-Request-ID": derive_id(uid, "req") + str(int(time.time() * 1000) % 1000000)}
+           "X-Domain": "copilot.tencent.com", "X-Product": "SaaS",
+           "X-Request-ID": _new_message_id()}
     if uid:
         hdr["X-User-Id"] = uid
     s2 = requests.Session()
@@ -3298,33 +5295,7 @@ def report_web_event(s, uid, nick, event_code, page_url, element_id, element_nam
           "os": "Win32", "arch": "", "osVersion": "10.0",
           "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           "machineId": derive_id(uid, "webmachine"), "userId": uid, "userNickname": nick}
-    return api_retry(s, "POST", BASE + "/v2/report", body={"common": {
-        "userId": uid, "userNickname": nick, "ideName": "web",
-        "ideType": "web", "machineId": derive_id(uid, "webmachine"),
-        "mode": "CLOUD", "userAgent": "Mozilla/5.0", "os": "Win32",
-        "timezone": "Asia/Shanghai"}, "events": [ev]})
-
-
-def _accept_with_verify(s, code, log):
-    for attempt in (1, 2):
-        r = s.post(BASE + "/v2/activity/growth/tasks/accept", json={"task_codes": [code]},
-                   timeout=20, verify=False)
-        status = ""
-        try:
-            d = r.json()
-            results = (d.get("data") or {}).get("results") or []
-            status = (results[0].get("status") or "") if results else (d.get("msg") or "")
-        except Exception:
-            pass
-        t = prog(s, code)
-        ast = t[0] if t else "not_accepted"
-        ok = (r.status_code == 200 and status == "accepted" and ast != "not_accepted")
-        if ok:
-            return True
-        if attempt > 1:
-            log("      ✗ %s: accept %s 回读=%s" % (code, status or "无返回", ast))
-        time.sleep(WRITE_GAP)
-    return False
+    return api_retry(s, "POST", BASE + "/v2/report", body=[ev])
 
 
 # ============================================================================ #
@@ -3355,69 +5326,182 @@ def is_enterprise_denial(status_code, payload):
 
 
 def claim_ready_tasks(s, log):
-    """领取所有进度已达标但尚未入账的任务。
-
-    以 progress.current >= progress.target 为准，不依赖可能延迟或回滚的
-    accept_status。桌面与小程序任务分开扫描，按 task_code 去重；同一任务
-    两边都可领时优先小程序口径。
-    """
-    merged = {}
-
-    def claimable(task):
-        if task.get("locked"):
-            return False
-        status = str(task.get("accept_status") or "")
-        claimed_value = task.get("claimed")
-        if claimed_value is True or str(claimed_value).lower() == "true":
-            return False
-        if status == "claimed":
-            return False
-        progress = task.get("progress") or {}
-        current = _as_int(progress.get("current"))
-        target = _as_int(progress.get("target"))
-        if target > 0 and current >= target:
-            return True
-        return target <= 0 and status == "completed"
-
-    def collect(headers=None, mp=False):
-        try:
-            response = s.get(BASE + "/v2/activity/growth/tasks", timeout=25,
-                             verify=False, headers=headers)
-            payload = response.json() or {}
-            rows = (payload.get("data") or {}).get("tasks", [])
-        except Exception as exc:
-            log("   ⚠️领奖扫描失败(%s): %s" % ("小程序" if mp else "桌面", str(exc)[:50]))
-            return
-        for task in rows:
-            if not isinstance(task, dict):
-                continue
-            code = str(task.get("task_code") or "").strip()
-            if not code:
-                continue
-            can_claim = claimable(task)
-            old = merged.get(code)
-            if old is None:
-                merged[code] = {"task": task, "mp": mp, "claimable": can_claim}
-            elif can_claim and not old["claimable"]:
-                merged[code] = {"task": task, "mp": mp, "claimable": True}
-            elif can_claim and old["claimable"] and mp and not old["mp"]:
-                merged[code] = {"task": task, "mp": True, "claimable": True}
-
-    collect()
-    collect(MP_HEADER, mp=True)
+    """先确认任务来源，再按该来源的真实进度补领；失败不推断为任务缺席。"""
+    sources = _expert_sources(s)
+    attempts = _claim_attempts(s)
+    by_code = {}
+    for source, result in sources.items():
+        if not result["ok"]:
+            log("   ⚠️领奖扫描失败（%s），该来源未确认" % source)
+        for row in result["rows"]:
+            code = str(row.get("task_code") or row.get("code") or "").strip()
+            if code:
+                by_code.setdefault(code, {})[source] = row
     claimed = 0
-    for code, item in merged.items():
-        if not item["claimable"]:
+    for code, rows in by_code.items():
+        if any(_row_claimed(row) for row in rows.values()):
+            if attempts.get(code) is False:
+                attempts[code] = True
+                log("   🎁领奖[%s]: 已由实时任务状态确认" % code)
             continue
-        use_mp = bool(item["mp"] or code in MP_TASK_CODES)
-        ok = _mp_claim(s, code, log) if use_mp else claim(s, code, log)
+        if code in attempts:
+            continue
+        if not any(_task_claimable(r) for r in rows.values()):
+            continue
+        is_expert = code.startswith("expert_use_") or code in ("Expert_lighthouse", "WorkBuddy_Valorant")
+        if code == "Sequential_Tasks_7":
+            source = "desktop"
+        elif code in MP_TASK_CODES:
+            source = "mp"
+        elif is_expert:
+            if not sources["desktop"]["ok"]:
+                log("   ⚠️专家领奖来源未确认，暂缓 %s" % code)
+                continue
+            source = "desktop" if "desktop" in rows else "mp"
+            if len(rows) == 2 and _task_claimable(rows["desktop"]) != _task_claimable(rows["mp"]):
+                time.sleep(1.0)
+                try:
+                    _primary, _row, refreshed = _expert_context(s, code)
+                    a, b = refreshed["desktop"]["row"], refreshed["mp"]["row"]
+                except SafeError:
+                    log("   ⚠️专家任务进度回读失败，暂缓 %s" % code)
+                    continue
+                if a is None or b is None or _task_claimable(a) != _task_claimable(b):
+                    log("   ⚠️专家任务进度未确认（两侧不一致），暂缓 %s" % code)
+                    continue
+                rows = {"desktop": a, "mp": b}
+        elif code in DESKTOP_ONLY_TASK_CODES:
+            source = "desktop"
+        else:
+            source = "mp" if _task_claimable(rows.get("mp")) else "desktop"
+        if not _task_claimable(rows.get(source)):
+            continue
+        try:
+            ok = _mp_claim(s, code, log) if source == "mp" else claim(s, code, log)
+        except Exception as exc:
+            ok = False
+            log("   ⚠️领奖[%s]异常（%s）" % (code, type(exc).__name__))
         if ok:
             claimed += 1
         time.sleep(1)
-    if claimed == 0:
-        log("   无达标未领奖励")
-    else:
-        log("   🎁 达标补领完成: %d 项" % claimed)
+    log("   🎁 达标补领完成: %d 项" % claimed if claimed else "   无达标未领奖励")
+
+
+def is_account_restricted(status_code, payload):
+    if not isinstance(payload, dict) or payload.get("code") not in (11140, "11140"):
+        return False
+    message = _structured_error_message(payload)
+    return not _is_rate_limit(status_code, payload) and any(marker in message for marker in (
+        "request illegal", "account restricted", "account is restricted",
+        "account has been restricted", "restricted account", "account illegal", "unusual activity",
+        "账号受限", "账号被限制", "账号存在异常行为", "账号异常", "账号非法",
+        "账户受限", "账户被限制", "账户存在异常行为", "账户异常", "账户非法", "已被限制使用"))
+
+
+def _structured_error_message(payload):
+    return " ".join(value.lower() for key in ("msg", "message", "displayMsg", "displayTips")
+                    if isinstance((value := payload.get(key)), str))
+
+
+def _is_rate_limit(status_code, payload):
+    return status_code == 429 or any(marker in _structured_error_message(payload) for marker in (
+        "rate-limiting", "rate limiting", "rate limit", "too many requests", "usage limit",
+        "请求过于频繁", "限流"))
+
+
+def is_unapproved_channel(payload):
+    return payload.get("code") == "11-128" or "unapproved channel" in _structured_error_message(payload)
+
+
+def growth_probe(s):
+    """只读预检；保持原有 YYB 登录与续期流程，不额外刷新或重试。"""
+    try:
+        response = s.get(BASE + "/v2/activity/growth/profile", timeout=25, verify=False)
+        payload = _json_or_empty(response)
+    except requests.RequestException:
+        raise SafeError("成长状态查询失败（网络或超时）") from None
+    http_ok = 200 <= response.status_code < 300
+    business_ok = _api_code_ok(payload.get("code"))
+    if not (http_ok and business_ok) and is_unapproved_channel(payload):
+        return "channel", {}, "WorkBuddy 渠道拦截（11-128），本轮停止该账号"
+    if is_account_restricted(response.status_code, payload):
+        return "restricted", {}, "账号受限（11140），本轮停止该账号"
+    if not (http_ok and business_ok) and _is_rate_limit(response.status_code, payload):
+        raise SafeError("成长状态查询遇到限流，本轮停止该账号")
+    if is_enterprise_denial(response.status_code, payload):
+        return "enterprise", {}, "企业版账号（无个人成长体系）"
+    if response.status_code == 401:
+        raise SafeError("成长状态查询失败（HTTP 401，凭据失效）")
+    if response.status_code == 403:
+        raise SafeError("成长状态查询失败（HTTP 403，访问被拒绝）")
+    if (not http_ok or not business_ok
+            or not isinstance(payload.get("data"), dict)):
+        code = payload.get("code")
+        code = code if isinstance(code, int) else "未知"
+        raise SafeError("成长状态查询失败（HTTP %s，业务码 %s）" % (response.status_code, code))
+    return "ready", payload["data"], ""
+
+
+def growth_task_rows(s, headers=None, path="/v2/activity/growth/tasks"):
+    """区分有效空任务表和读取失败，避免把错误响应报告成全部完成。"""
+    # 同一账号的任务列表查询统一节奏，不缓存进度，避免写操作后读到旧状态。
+    for attempt in range(3):
+        last = getattr(s, "_workbuddy_task_read_at", 0.0)
+        if isinstance(last, (int, float)):
+            delay = 0.5 - (time.monotonic() - last)
+            if delay > 0:
+                time.sleep(delay)
+        s._workbuddy_task_read_at = time.monotonic()
+        response = api_retry(s, "GET", BASE + path, retries=2, gap=1.0, headers=headers)
+        if response.status_code != 429 or attempt == 2:
+            break
+        retry_after = response.headers.get("Retry-After")
+        try:
+            wait = float(retry_after) if retry_after else 2.0 * (attempt + 1)
+        except (TypeError, ValueError):
+            from email.utils import parsedate_to_datetime
+            try:
+                wait = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                break
+        if wait > 30:
+            break
+        time.sleep(max(0.5, wait))
+    payload = _json_or_empty(response)
+    rows = (payload.get("data") or {}).get("tasks") if isinstance(payload.get("data"), dict) else None
+    if (not 200 <= response.status_code < 300 or not _api_code_ok(payload.get("code"))
+            or not isinstance(rows, list) or any(not isinstance(t, dict) for t in rows)):
+        code = payload.get("code")
+        code = code if isinstance(code, int) else "未知"
+        raise SafeError("任务列表读取失败（HTTP %s，业务码 %s，或任务结构无效）" % (response.status_code, code))
+    return rows
+
+
+def query_account(client, account):
+    """查询模式不调用准备、签到、领奖、对话；仅认证及读取状态。"""
+    client.authenticate()
+    s = client.api_session()
+    kind, prof, message = growth_probe(s)
+    if kind in ("restricted", "channel"):
+        raise SafeError(message)
+    credits, _paid = queryCredits(s)
+    usage = queryUsage(s)
+    issues = ["积分查询失败"] if credits.startswith("查询失败") else []
+    try:
+        sd = client.status() if kind != "enterprise" else {}
+        checked = sd.get("today_checked_in")
+    except SafeError:
+        checked = None
+        sd = {}
+        issues.append("签到状态查询失败")
+    return {"idx": account.number, "note": account.ref, "query": True,
+            "credits": credits, "usage": usage, "level": prof.get("level", "?"),
+            "energy": "?", "streak": "?", "checkin_streak": sd.get("streak_days", "?"),
+            "done": 0, "total": 0, "rest": [], "checked": checked is True,
+            "checked_in": checked is True, "task_errors": issues,
+            "checkin": "今日已签到" if checked is True else (
+                "今日未签到" if checked is False else "签到状态未知"),
+            "enterprise": kind == "enterprise", "error": ""}
 
 
 def run_account(idx, client, account, do_desktop):
@@ -3425,22 +5509,33 @@ def run_account(idx, client, account, do_desktop):
     tag = "账号%d" % idx
 
     def log(m):
-        msgs.extend(_emit(None, m, tag))
+        ts = time.strftime("%H:%M:%S")
+        line = "[%s][%s] %s" % (ts, tag, m)
+        print(line, flush=True)
+        msgs.append(line)
+        # 既有处理器会局部捕获异常，保留独立提示，不把签到成功当作任务无异常。
+        if any(marker in m for marker in ("失败", "异常", "未确认", "仍无法登记", "未到账")):
+            issue = m.strip()
+            if issue not in summary["task_errors"]:
+                summary["task_errors"].append(issue)
 
     note = account.ref
     summary = {"idx": idx, "note": note, "credits": "", "usage": "", "growth": "",
                "done": 0, "total": 0, "rest": [], "level": "?", "energy": "?",
-               "checked": False, "checkin": "", "checkin_streak": "?", "error": ""}
+               "checked": False, "checkin": "", "checkin_streak": "?", "error": "",
+               "task_errors": [], "tasks_loaded": False}
 
     try:
         client.authenticate()
     except SafeError as e:
-        log("👤 开始处理 %s" % (note or ("账号%d" % idx)))
+        log("")
+        log("╭─ 👤 账号%d  %s" % (idx, note))
         log("  ❌ 登录/凭据失败：%s" % e)
         summary["error"] = str(e)
         return msgs, summary
     except Exception as e:
-        log("👤 开始处理 %s" % (note or ("账号%d" % idx)))
+        log("")
+        log("╭─ 👤 账号%d  %s" % (idx, note))
         log("  ❌ 登录异常（%s）" % type(e).__name__)
         summary["error"] = "登录异常（%s）" % type(e).__name__
         return msgs, summary
@@ -3450,179 +5545,247 @@ def run_account(idx, client, account, do_desktop):
     tok = client.access
     s = client.api_session()
 
-    log("🔐 登录成功 %s" % (note or ("账号%d" % idx)))
+    log("")
+    log("╭─ 👤 账号%d  %s" % (idx, note))
 
     # 先探成长域：企业版账号在这里就能识别（无个人成长体系），
     # 避免把上游 403 误报成「凭据失效」、也避免对注定被拒的端点空发请求。
-    rp = s.get(BASE + "/v2/activity/growth/profile", timeout=25, verify=False)
-    pj = _json_or_empty(rp)
-    if is_enterprise_denial(rp.status_code, pj):
+    kind, prof, probe_message = growth_probe(s)
+    if kind in ("restricted", "channel"):
+        log("  🚫 " + probe_message)
+        summary["restricted"] = kind == "restricted"
+        summary["error"] = probe_message
+        return msgs, summary
+    if kind == "enterprise":
         log("  🏢 企业版账号：无个人成长体系（上游对签到/成长端点一律拒绝，实测口径）")
         log("     已跳过签到与全部成长/互动任务；积分额度请在企业后台或企业接口查询")
         summary["enterprise"] = True
         summary["rest"] = ["企业版账号（无个人成长体系）"]
         return msgs, summary
 
-    # 签到（YYB 回读确认流程）
+    _sample_credit(s, summary, "before", log)
     try:
-        checkin_line, checkin_ok = client.run_checkin()
-        log("   %s" % checkin_line)
-        summary["checked"] = checkin_ok
-        summary["checkin"] = checkin_line
+        # 签到（YYB 回读确认流程）
         try:
-            st_data = client.status()
-            warn = _checkin_activity_warn(st_data)
-            if warn:
-                log("   %s" % warn)
+            checkin_line, checkin_ok = client.run_checkin()
+            log("   %s" % checkin_line)
+            summary["checked"] = checkin_ok
+            summary["checked_in"] = bool(checkin_ok)
+            summary["checkin"] = checkin_line
+            try:
+                st_data = client.status()
+                warn = _checkin_activity_warn(st_data)
+                if warn:
+                    log("   %s" % warn)
+            except Exception:
+                pass
+        except SafeError as e:
+            log("   ❌ 签到失败：%s" % e)
+            summary["error"] = str(e)
+
+        # 在产生新任务行为之前先补领已达标奖励；原签到/准备位置保持不变。
+        log("  🎁 ── 领奖预扫 ──")
+        try:
+            claim_ready_tasks(s, log)
+        except Exception as exc:
+            log("   ⚠️领奖预扫异常（%s）" % type(exc).__name__)
+
+        # 每日活跃上报（成长中心热力墙口径，只认 /v2/report 的 chat_request_send）
+        try:
+            t_daily_activity(s, uid, nick, log)
+        except Exception as exc:
+            log("   ⚠️每日活跃异常（%s）" % type(exc).__name__)
+
+        # 查询
+        credits = summary.get("credits", "暂无数据")
+        usage = queryUsage(s)
+        energy = (_json_or_empty(s.get(BASE + "/v2/activity/growth/energy", timeout=25,
+                                                verify=False)).get("data") or {}).get("balance")
+        streak = ((_json_or_empty(s.get(BASE + "/v2/activity/growth/streak", timeout=25,
+                                                 verify=False)).get("data") or {}).get("streak") or {})
+        summary["credits"] = credits
+        summary["usage"] = usage
+        summary["streak"] = streak.get("days", "?")
+        # 签到活动口径的连签（与活跃连签/热力墙分开显示，issue #21）
+        try:
+            _ck = client.status()
+            summary["checkin_streak"] = _ck.get("streak_days", "?")
         except Exception:
-            pass
-    except SafeError as e:
-        log("   ❌ 签到失败：%s" % e)
-        summary["error"] = str(e)
+            _ck = {}
+        log("💰 积分: %s" % credits)
+        log("📊 用量: %s" % usage)
+        try:
+            hm = s.get(BASE + "/v2/activity/growth/heatmap", timeout=20, verify=False).json()
+            cells = hm.get("data", {}).get("cells", [])
+            signed = sum(1 for c in cells if isinstance(c, dict) and c.get("score", 0) > 0)
+        except Exception:
+            signed = "?"
+        log("🌱 成长: 等级%s 签到连签%s天 活跃连签%s天 能量%s 累签%s天"
+            % (prof.get("level", "?"), summary["checkin_streak"], streak.get("days", "?"), energy, signed))
 
-    # 每日活跃上报（成长中心热力墙口径，只认 /v2/report 的 chat_request_send）
-    t_daily_activity(s, uid, nick, log)
+        # 活跃连签口径说明：=0 属正常（由成长中心「使用事件（热力墙）」驱动，与积分签到无关）
+        if str(streak.get("days", "?")).strip() in ("0", "0.0"):
+            log("      ℹ️ 活跃连签=0 属正常：它由成长中心「使用事件（热力墙）」驱动，与积分签到无关")
 
-    # 查询
-    credits, paid = queryCredits(s)
-    usage = queryUsage(s)
-    if rp.status_code in (401, 403) or not pj:
-        log("  ❌ 凭据失效（HTTP %s）：请检查 YYB 取码/登录是否正常" % rp.status_code)
-        summary["error"] = summary["error"] or "凭据失效"
+        # 桌面任务（非 Windows 自动降级为指纹上报）
+        try:
+            desktop_rows = {row.get("task_code"): row for row in growth_task_rows(s)}
+        except (SafeError, requests.RequestException):
+            rich_st = prog(s, "RichMeow_Chat")[0]
+            skill_st = prog(s, "skill_1")[0]
+        else:
+            rich_st = desktop_rows.get("RichMeow_Chat", {}).get("accept_status")
+            skill_st = desktop_rows.get("skill_1", {}).get("accept_status")
+        # 未下发（None）＝该任务当前不可做：不能当「未完成」去跑桌面对话，否则白扣积分
+        need_rich = rich_st is not None and rich_st not in ("completed", "claimed")
+        need_skill = skill_st is not None and skill_st not in ("completed", "claimed")
+        if rich_st is None or skill_st is None:
+            log("  🖥️ 桌面任务: 有任务未下发（RichMeow=%s skill_1=%s），未下发项不执行" % (rich_st, skill_st))
+        desktop_skipped = False
+        if (need_rich or need_skill) and not want("desktop", "RichMeow_Chat", "skill_1"):
+            log("  🖥️ 桌面任务: 按配置跳过（desktop）")
+            need_rich = need_skill = False
+            desktop_skipped = True
+        if do_desktop and (need_rich or need_skill):
+            log("  🖥️ ── 桌面任务（引导优先） ──")
+            try:
+                t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill)
+            except Exception as e:
+                log("  🖥️ 桌面任务异常: %s" % str(e)[:80])
+        elif need_rich or need_skill:
+            log("── 桌面任务跳过(--no-desktop): RichMeow=%s skill_1=%s ──" % (need_rich, need_skill))
+        else:
+            if not desktop_skipped:
+                log("  🖥️ 桌面任务: 已完成（RichMeow/skill_1），跳过")
+
+        # 云端任务
+        log("  ☁️ ── 云端任务 ──")
+        if TASK_ONLY or TASK_SKIP:
+            log("   ⚙️ 任务过滤生效：%s%s" % (
+                ("仅执行 " + ",".join(sorted(TASK_ONLY))) if TASK_ONLY else "",
+                (("；跳过 " + ",".join(sorted(TASK_SKIP))) if TASK_SKIP else "")))
+            # 「使用类」任务才会给成长中心记活跃（热力墙）。全被过滤掉时明确提醒：
+            # 签到只给积分、不点热力墙——别把页面上的「开始使用以点亮今日热力墙」当成签到失败
+            _usage = {"chat_5", "model_chat_glm5.2", "desktop", "richmeow_chat", "skill_share", "skill_1", "black_cat",
+                      "campaign", "campaign_starbucks_2026", "campaign_reporter_2026",
+                      "expert_5", "expert_team_use_3", "template_5", "create_canvas", "playbook_prompt",
+                      "sequential_tasks_1", "sequential_tasks_3", "sequential_tasks_5",
+                      "automation_1", "library_read", "hp_appearance", "buddy_app", "buddy_app_qq"}
+            _kept = {t for t in (TASK_ONLY or _usage) if t not in TASK_SKIP}
+            if not (_kept & _usage):
+                log("   ⚠️ 未包含任何「使用类」任务 → 成长中心的今日活跃（热力墙）不会点亮")
+                log("      （签到/积分不受影响；想同时点亮热力墙建议保留一个对话类任务：WORKBUDDY_TASKS=checkin,travel,chat_5）")
+
+        def _run(label, codes, fn, *, growth=False):
+            """子任务调度：按 TASK_ONLY / TASK_SKIP 决定是否执行，单项异常不拖垮整轮。"""
+            if not want(*codes):
+                log("   ⏭️ %s: 按配置跳过" % label)
+                return None
+            if growth:
+                reasons = [_snapshot_skip_reason(task_snapshot, code) for code in codes]
+                if all(reasons):
+                    log("   ⏭️ %s: %s" % (label, "；".join(dict.fromkeys(reasons))))
+                    return None
+            try:
+                return fn()
+            except Exception as e:
+                log("   ⚠️ %s 异常: %s" % (label, str(e)[:80]))
+                return None
+
+        # 前置：无 Buddy 实例时，其余任务 accept 会被服务端拒绝（prerequisite not met: first_buddy）
+        try:
+            t_first_buddy(s, uid, nick, log)
+        except Exception as exc:
+            log("   ⚠️领取Buddy异常（%s）" % type(exc).__name__)
+        try:
+            t_accept_all(s, uid, nick, log)
+        except Exception as exc:
+            log("   ⚠️批量接受异常（%s），后续任务继续" % type(exc).__name__)
+        task_snapshot = _build_task_snapshot(s)
+        log("   📋任务快照: %d 项%s" % (len(task_snapshot[0]),
+                                        "" if task_snapshot[1] else "（部分来源不可用，沿用实时回读）"))
+        _run("分享技能给好友", ["skill_share"], lambda: t_skill_share(s, uid, nick, log), growth=True)
+        _run("召唤3次专家团", ["Expert_team_use_3"], lambda: t_team_3(s, uid, nick, log), growth=True)
+        _run("发现应用/企鹅教师助手", ["Buddy_App", "Buddy_App_QQ"], lambda: t_buddy_apps(s, uid, nick, log), growth=True)
+        _run("和平精英主题", ["Hp_Appearance"], lambda: t_theme(s, uid, nick, log), growth=True)
+        _run("体验资料库", ["Library_read"], lambda: t_library(s, uid, nick, log), growth=True)
+        _run("设计/自动化/灵感", ["create_canvas", "automation_1", "playbook_prompt"],
+             lambda: t_canvas_automation(s, uid, nick, log), growth=True)
+        _run("召唤5次专家", ["expert_5"], lambda: t_expert_5(s, uid, nick, log), growth=True)
+        _run("使用5个模板", ["template_5"], lambda: t_template_5(s, uid, nick, log), growth=True)
+        _run("GLM-5.2/和AI聊天5次", ["Model_chat_GLM5.2", "chat_5"], lambda: t_glm52(s, uid, nick, log), growth=True)
+        _run("夜猫子", ["black_cat"], lambda: t_black_cat(s, uid, nick, log), growth=True)
+        _run("腾讯轻量云专家", ["Expert_lighthouse"], lambda: t_lighthouse(s, uid, nick, log), growth=True)
+        _run("无畏契约拼豆专家", ["WorkBuddy_Valorant"], lambda: t_valorant(s, uid, nick, log), growth=True)
+        expert_codes = set(EXPERT_TASK_SPECS)
+        expert_codes.update(_dynamic_expert_task_codes(s))
+        for expert_code in sorted(expert_codes):
+            expert_spec = _expert_spec_for_task(s, expert_code) or {}
+            expert_label = expert_spec.get("profession") or expert_spec.get("name") or expert_code
+            _run(expert_label, [expert_code],
+                 lambda code=expert_code: t_expert_use_task(s, uid, nick, log, code))
+        _run("小程序对话", ["Sequential_Tasks_1"], lambda: t_sequential_tasks(s, uid, nick, log), growth=True)
+        _run("小程序专家对话", ["Sequential_Tasks_2"], lambda: t_sequential_tasks_2(s, uid, nick, log), growth=True)
+        _run("小程序对话5次", ["Sequential_Tasks_3"], lambda: t_sequential_tasks_3(s, uid, nick, log), growth=True)
+        _run("小程序定时任务", ["Sequential_Tasks_4"], lambda: t_sequential_tasks_4(s, uid, nick, log), growth=True)
+        _run("小程序GLM5.2", ["Sequential_Tasks_5"], lambda: t_sequential_tasks_5(s, uid, nick, log), growth=True)
+        _run("小程序对话10次", ["Sequential_Tasks_6"], lambda: t_sequential_tasks_6(s, uid, nick, log), growth=True)
+        _run("PC灵感功能", ["Sequential_Tasks_7"], lambda: t_sequential_tasks_7(s, uid, nick, log), growth=True)
+        summary["campaigns"] = t_campaigns(s, uid, nick, log)
+        _settle_before_play(s, log)
+        _run("徽章", ["badges"], lambda: t_badges(s, uid, nick, log))
+        _travel_blindbox_cycle(s, uid, nick, log)
+        _run("Buddy 信息", ["buddy_info"], lambda: t_buddy_info(s, uid, nick, log))
+        # 连登闭环顺序（上游 v3.13）：补签 → 连登兑换 → 抽奖。
+        # 补签先保住活跃连签，兑换的 7/14/28d 档位判定才准；兑换发放的抽奖次数
+        # （chances_granted）当轮抽奖即可抽掉——抽奖若在兑换前跑，新发次数要等下一轮。
+        streak_days_for_redeem = streak.get("days")
+        makeup_days = _run("补签", ["makeup"], lambda: t_makeup(s, uid, nick, log))
+        if makeup_days is not None:
+            streak_days_for_redeem = makeup_days
+        _run("连登兑换", ["redeem"],
+             lambda: t_redeem(s, uid, nick, log, streak_days_for_redeem))
+        _run("抽奖", ["lottery"], lambda: t_lottery(s, uid, nick, log))
+        _run("礼包/补偿", ["gift"], lambda: t_gift_compensation(s, uid, nick, log))
+        _run("工作台搭建师", ["workstation_expert"], lambda: t_workstation(s, uid, nick, log, tok))
+        try:
+            t_unknown_tasks(s, uid, nick, log)   # 未覆盖任务检测不受过滤影响
+        except Exception as exc:
+            log("   ⚠️任务发现异常（%s）" % type(exc).__name__)
+
+        # 领奖：按进度补领，不依赖 accept_status 的瞬时状态
+        log("  🎁 ── 领奖 ──")
+        try:
+            claim_ready_tasks(s, log)
+        except Exception as exc:
+            log("   ⚠️领奖末扫异常（%s）" % type(exc).__name__)
+        for code, confirmed in _claim_attempts(s).items():
+            if not confirmed:
+                log("   ⚠️领奖[%s]: 本轮未确认到账" % code)
+
+        # 终态：读取失败不能折算成 0/0 全部完成。
+        try:
+            st_all = growth_task_rows(s)
+        except (SafeError, requests.RequestException):
+            log("   ⚠️任务终态读取失败，完成数量未确认")
+            return msgs, summary
+        summary["tasks_loaded"] = True
+        done = sum(1 for t in st_all if isinstance(t, dict) and t.get("accept_status") in ("claimed", "completed"))
+        rest = [task_cn(t.get("task_code", "")) for t in st_all if isinstance(t, dict) and t.get("accept_status") not in ("claimed", "completed")]
+        prof2 = (_json_or_empty(s.get(BASE + "/v2/activity/growth/profile", timeout=25,
+                                           verify=False)).get("data") or {})
+        summary.update({"done": done, "total": len(st_all), "rest": rest,
+                        "level": prof2.get("level", "?"), "energy": energy})
+        log("🏁 %s: 完成%s/%s 等级%s 剩余: %s" % (note, done, len(st_all), prof2.get("level", "?"),
+                                                 ", ".join(rest) if rest else "无"))
         return msgs, summary
-    prof = pj.get("data", {}) or {}
-    energy = (_json_or_empty(s.get(BASE + "/v2/activity/growth/energy", timeout=25,
-                                            verify=False)).get("data") or {}).get("balance")
-    streak = ((_json_or_empty(s.get(BASE + "/v2/activity/growth/streak", timeout=25,
-                                             verify=False)).get("data") or {}).get("streak") or {})
-    summary["credits"] = credits
-    summary["usage"] = usage
-    summary["streak"] = streak.get("days", "?")
-    # 签到活动口径的连签（与活跃连签/热力墙分开显示，issue #21）
-    try:
-        _ck = client.status()
-        summary["checkin_streak"] = _ck.get("streak_days", "?")
-    except Exception:
-        _ck = {}
-    log("💰 积分: %s" % credits)
-    log("📊 用量: %s" % usage)
-    try:
-        hm = s.get(BASE + "/v2/activity/growth/heatmap", timeout=20, verify=False).json()
-        cells = hm.get("data", {}).get("cells", [])
-        signed = sum(1 for c in cells if isinstance(c, dict) and c.get("score", 0) > 0)
-    except Exception:
-        signed = "?"
-    log("🌱 成长: 等级%s 签到连签%s天 活跃连签%s天 能量%s 累签%s天"
-        % (prof.get("level", "?"), summary["checkin_streak"], streak.get("days", "?"), energy, signed))
+    except Exception as exc:
+        summary["error"] = str(exc) if isinstance(exc, SafeError) else "账号流程异常（%s）" % type(exc).__name__
+        log("   ❌ " + summary["error"])
+        return msgs, summary
+    finally:
+        _finish_credit_sample(s, summary, log)
 
-    # 活跃连签口径说明：=0 属正常（由成长中心「使用事件（热力墙）」驱动，与积分签到无关）
-    if str(streak.get("days", "?")).strip() in ("0", "0.0"):
-        log("      ℹ️ 活跃连签=0 属正常：它由成长中心「使用事件（热力墙）」驱动，与积分签到无关")
-
-    # 桌面任务（非 Windows 自动降级为指纹上报）
-    need_rich = prog(s, "RichMeow_Chat")[0] not in ("completed", "claimed")
-    need_skill = prog(s, "skill_1")[0] not in ("completed", "claimed")
-    desktop_skipped = False
-    if (need_rich or need_skill) and not want("desktop", "RichMeow_Chat", "skill_1"):
-        log("  🖥️ 桌面任务: 按配置跳过（desktop）")
-        need_rich = need_skill = False
-        desktop_skipped = True
-    if do_desktop and (need_rich or need_skill):
-        log("  🖥️ ── 桌面任务（引导优先） ──")
-        try:
-            t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill)
-        except Exception as e:
-            log("  🖥️ 桌面任务异常: %s" % str(e)[:80])
-    elif need_rich or need_skill:
-        log("── 桌面任务跳过(--no-desktop): RichMeow=%s skill_1=%s ──" % (need_rich, need_skill))
-    else:
-        if not desktop_skipped:
-            log("  🖥️ 桌面任务: 已完成（RichMeow/skill_1），跳过")
-
-    # 云端任务
-    log("  ☁️ ── 云端任务 ──")
-    if TASK_ONLY or TASK_SKIP:
-        log("   ⚙️ 任务过滤生效：%s%s" % (
-            ("仅执行 " + ",".join(sorted(TASK_ONLY))) if TASK_ONLY else "",
-            (("；跳过 " + ",".join(sorted(TASK_SKIP))) if TASK_SKIP else "")))
-        # 「使用类」任务才会给成长中心记活跃（热力墙）。全被过滤掉时明确提醒：
-        # 签到只给积分、不点热力墙——别把页面上的「开始使用以点亮今日热力墙」当成签到失败
-        _usage = {"chat_5", "model_chat_glm5.2", "desktop", "richmeow_chat", "skill_1", "black_cat",
-                  "expert_5", "expert_team_use_3", "template_5", "create_canvas", "playbook_prompt",
-                  "sequential_tasks_1", "sequential_tasks_3", "sequential_tasks_5",
-                  "automation_1", "library_read", "hp_appearance", "buddy_app", "buddy_app_qq"}
-        _kept = {t for t in (TASK_ONLY or _usage) if t not in TASK_SKIP}
-        if not (_kept & _usage):
-            log("   ⚠️ 未包含任何「使用类」任务 → 成长中心的今日活跃（热力墙）不会点亮")
-            log("      （签到/积分不受影响；想同时点亮热力墙建议保留一个对话类任务：WORKBUDDY_TASKS=checkin,travel,chat_5）")
-
-    def _run(label, codes, fn):
-        """子任务调度：按 TASK_ONLY / TASK_SKIP 决定是否执行，单项异常不拖垮整轮。"""
-        if not want(*codes):
-            log("   ⏭️ %s: 按配置跳过" % label)
-            return None
-        try:
-            return fn()
-        except Exception as e:
-            log("   ⚠️ %s 异常: %s" % (label, str(e)[:80]))
-            return None
-
-    # 前置：无 Buddy 实例时，其余任务 accept 会被服务端拒绝（prerequisite not met: first_buddy）
-    t_first_buddy(s, uid, nick, log)
-    t_accept_all(s, uid, nick, log)
-    _run("召唤3次专家团", ["Expert_team_use_3"], lambda: t_team_3(s, uid, nick, log))
-    _run("发现应用/企鹅教师助手", ["Buddy_App", "Buddy_App_QQ"], lambda: t_buddy_apps(s, uid, nick, log))
-    _run("和平精英主题", ["Hp_Appearance"], lambda: t_theme(s, uid, nick, log))
-    _run("体验资料库", ["Library_read"], lambda: t_library(s, uid, nick, log))
-    _run("设计/自动化/灵感", ["create_canvas", "automation_1", "playbook_prompt"],
-         lambda: t_canvas_automation(s, uid, nick, log))
-    _run("召唤5次专家", ["expert_5"], lambda: t_expert_5(s, uid, nick, log))
-    _run("使用5个模板", ["template_5"], lambda: t_template_5(s, uid, nick, log))
-    _run("GLM-5.2/和AI聊天5次", ["Model_chat_GLM5.2", "chat_5"], lambda: t_glm52(s, uid, nick, log))
-    _run("夜猫子", ["black_cat"], lambda: t_black_cat(s, uid, nick, log))
-    _run("腾讯轻量云专家", ["Expert_lighthouse"], lambda: t_lighthouse(s, uid, nick, log))
-    _run("无畏契约拼豆专家", ["WorkBuddy_Valorant"], lambda: t_valorant(s, uid, nick, log))
-    _run("小程序对话", ["Sequential_Tasks_1"], lambda: t_sequential_tasks(s, uid, nick, log))
-    _run("小程序专家对话", ["Sequential_Tasks_2"], lambda: t_sequential_tasks_2(s, uid, nick, log))
-    _run("小程序对话5次", ["Sequential_Tasks_3"], lambda: t_sequential_tasks_3(s, uid, nick, log))
-    _run("小程序定时任务", ["Sequential_Tasks_4"], lambda: t_sequential_tasks_4(s, uid, nick, log))
-    _run("小程序GLM5.2", ["Sequential_Tasks_5"], lambda: t_sequential_tasks_5(s, uid, nick, log))
-    _run("小程序对话10次", ["Sequential_Tasks_6"], lambda: t_sequential_tasks_6(s, uid, nick, log))
-    _run("小程序灵感功能", ["Sequential_Tasks_7"], lambda: t_sequential_tasks_7(s, uid, nick, log))
-    _run("徽章", ["badges"], lambda: t_badges(s, uid, nick, log))
-    _run("盲盒", ["blindbox"], lambda: t_blindbox(s, uid, nick, log))
-    _run("Buddy 信息", ["buddy_info"], lambda: t_buddy_info(s, uid, nick, log))
-    _run("派猫猫旅行", ["travel"], lambda: t_travel(s, uid, nick, log))
-    # 连登闭环顺序（上游 v3.13）：补签 → 连登兑换 → 抽奖。
-    # 补签先保住活跃连签，兑换的 7/14/28d 档位判定才准；兑换发放的抽奖次数
-    # （chances_granted）当轮抽奖即可抽掉——抽奖若在兑换前跑，新发次数要等下一轮。
-    streak_days_for_redeem = streak.get("days")
-    makeup_days = _run("补签", ["makeup"], lambda: t_makeup(s, uid, nick, log))
-    if makeup_days is not None:
-        streak_days_for_redeem = makeup_days
-    _run("连登兑换", ["redeem"],
-         lambda: t_redeem(s, uid, nick, log, streak_days_for_redeem))
-    _run("抽奖", ["lottery"], lambda: t_lottery(s, uid, nick, log))
-    _run("礼包/补偿", ["gift"], lambda: t_gift_compensation(s, uid, nick, log))
-    _run("工作台搭建师", ["workstation_expert"], lambda: t_workstation(s, uid, nick, log, tok))
-    t_unknown_tasks(s, uid, nick, log)   # 未覆盖任务检测不受过滤影响
-
-    # 领奖：按进度补领，不依赖 accept_status 的瞬时状态
-    log("  🎁 ── 领奖 ──")
-    claim_ready_tasks(s, log)
-
-    # 终态
-    st_all = (_json_or_empty(s.get(BASE + "/v2/activity/growth/tasks", timeout=25,
-                                      verify=False)).get("data") or {}).get("tasks", [])
-    done = sum(1 for t in st_all if isinstance(t, dict) and t.get("accept_status") in ("claimed", "completed"))
-    rest = [task_cn(t.get("task_code", "")) for t in st_all if isinstance(t, dict) and t.get("accept_status") not in ("claimed", "completed")]
-    prof2 = (_json_or_empty(s.get(BASE + "/v2/activity/growth/profile", timeout=25,
-                                       verify=False)).get("data") or {})
-    summary.update({"done": done, "total": len(st_all), "rest": rest,
-                    "level": prof2.get("level", "?"), "energy": energy})
-    log("🏁 %s: 完成%s/%s 等级%s 剩余: %s" % (note, done, len(st_all), prof2.get("level", "?"),
-                                             ", ".join(rest) if rest else "无"))
-    return msgs, summary
 
 
 # ============================================================================ #
@@ -3630,20 +5793,16 @@ def run_account(idx, client, account, do_desktop):
 # ============================================================================ #
 def build_summary(summaries):
     summaries.sort(key=lambda x: x.get("idx", 0))
-    total_done = sum(sm.get("done", 0) for sm in summaries)
-    total_tasks = sum(sm.get("total", 0) for sm in summaries)
-    # 统一格式：账号维度（成功/失败/跳过），任务完成数补在尾部
-    # 有 error 记为失败；无 error 且已完成全部任务记为成功；否则记为跳过（部分完成）
-    ok_cnt = sum(1 for sm in summaries if not sm.get("error"))
-    fail_cnt = sum(1 for sm in summaries if sm.get("error"))
-    skip_cnt = len(summaries) - ok_cnt - fail_cnt
+    total_done = total_tasks = 0
     lines = []
-    lines.append("➖" * 35)
-    lines.append("📊 [执行汇总] WorkBuddy · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d ｜ 任务完成 %d/%d"
-                 % (len(summaries), ok_cnt, fail_cnt, skip_cnt, total_done, total_tasks))
+    lines.append("📊 各账号运行报告")
     lines.append("")
     for sm in summaries:
         idx = sm.get("idx", 0)
+        done = sm.get("done", 0)
+        total = sm.get("total", 0)
+        total_done += done
+        total_tasks += total
         credits = sm.get("credits", "")
         usage = sm.get("usage", "")
         energy = sm.get("energy", "?")
@@ -3657,34 +5816,157 @@ def build_summary(summaries):
         lines.append("👤 账号%d  %s" % (idx, note))
         if error:
             lines.append("   ❌ %s" % error)
+            if "credits_before" in sm or "credits_after" in sm:
+                lines.extend(_credit_lines(sm))
             lines.append("")
             continue
         if checkin:
-            lines.append("   ✅ %s" % checkin)
-        lines.append("   💰 %s" % (credits if credits else "暂无数据"))
+            icon = "✅" if sm.get("checked_in") else ("ℹ️" if sm.get("query") else "⚠️")
+            lines.append("   %s %s" % (icon, checkin))
+        lines.extend(_credit_lines(sm))
+        for campaign in sm.get("campaigns") or []:
+            if not campaign["loaded"]:
+                lines.append("   ⚠️ %s：活动读取失败" % campaign["label"])
+                continue
+            reward = ("奖励金额待确认" if campaign["new_credit"] is None
+                      else "+%s 积分" % campaign["new_credit"])
+            lines.append("   🎪 %s：本轮确认领取 %d 项，%s" % (
+                campaign["label"], len(campaign["confirmed"]), reward))
+            if campaign["manual"]:
+                lines.append("      📱需手机端完成：%s" % "、".join(campaign["manual"]))
+            if campaign["pending"]:
+                lines.append("      ⏳待回读：%s" % "、".join(campaign["pending"]))
         lines.append("   📊 %s" % (usage if usage else "暂无数据"))
         lines.append("   🌱 等级%s | 签到连签%s天 | 活跃连签%s天 | 能量%s"
                      % (level, sm.get("checkin_streak", "?"), streak, energy))
         if str(streak).strip() in ("0", "0.0"):
             lines.append("      ℹ️ 活跃连签=0 属正常：它由成长中心「使用事件（热力墙）」驱动，与积分签到无关")
-        if rest_cn:
+        if sm.get("query"):
+            lines.append("   ℹ️ 仅查询状态，未执行任务")
+        elif sm.get("enterprise"):
+            lines.append("   ℹ️ 企业版账号，无个人成长任务")
+        elif not sm.get("tasks_loaded"):
+            lines.append("   ⚠️ 任务结果未确认")
+        elif total == 0:
+            lines.append("   ℹ️ 当前任务列表为空")
+        elif rest_cn:
             lines.append("   ⏳ 未完成: %s" % "、".join(rest_cn))
         else:
-            lines.append("   ✅ 全部完成！")
+            lines.append("   ✅ 当前任务列表全部完成（%s/%s）" % (done, total))
+        issues = sm.get("task_errors") or []
+        if issues:
+            lines.append("   ⚠️ 本轮任务/查询异常 %d 项（见运行日志）" % len(issues))
+            lines.extend("      · " + issue for issue in issues[:3])
         lines.append("")
+    lines.append("📊 ══ 总计 ══")
+    lines.append("👥 共%d个账号，任务完成 %d/%d 项" % (len(summaries), total_done, total_tasks))
     all_rest = {}
     for sm in summaries:
         for r in (sm.get("rest") or []):
             cn = task_cn(r)
             all_rest[cn] = all_rest.get(cn, 0) + 1
     if all_rest:
-        lines.append("未完成任务分布:")
+        lines.append("")
         for cn, cnt in sorted(all_rest.items(), key=lambda x: -x[1]):
             lines.append("   · %s（%d个账号待完成）" % (cn, cnt))
-        lines.append("")
+    lines.append("")
     lines.append("🕐 %s" % time.strftime("%Y-%m-%d %H:%M"))
-    lines.append("➖" * 35)
     return "\n".join(lines)
+
+
+# ============================================================================ #
+# 通知（青龙 notify.py 优先，回落到内置通道）
+# ============================================================================ #
+HERE = Path(__file__).resolve().parent
+
+QL_PUSH_ENVS = (
+    "BARK_PUSH", "DD_BOT_TOKEN", "FSKEY", "GOBOT_URL", "IGOT_PUSH_KEY", "PUSH_KEY",
+    "DEER_KEY", "CHAT_URL", "PUSH_PLUS_TOKEN", "WE_PLUS_BOT_TOKEN", "QMSG_KEY",
+    "QYWX_KEY", "QYWX_AM", "TG_BOT_TOKEN", "SMTP_SERVER", "PUSHME_KEY",
+    "WEBHOOK_URL", "NTFY_TOPIC", "WXPUSHER_APP_TOKEN", "OPENILINK_APP_TOKEN",
+)
+
+
+def load_notify():
+    candidates = [HERE / "notify.py",
+                  Path("/ql/data/scripts/notify.py"),
+                  Path("/ql/scripts/notify.py"),
+                  Path("/ql/data/notify.py")]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                spec = importlib.util.spec_from_file_location("_wb_ql_notify", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                for name in ("send", "sendNotify"):
+                    func = getattr(module, name, None)
+                    if callable(func):
+                        return func
+        except Exception:
+            continue
+    return None
+
+
+def send_notify(title, content):
+    panel_channel = next((k for k in QL_PUSH_ENVS if (os.getenv(k) or "").strip()), "")
+    sender = load_notify()
+    if sender is not None:
+        if panel_channel:
+            try:
+                sender(title, content)
+                print("✅ [通知] 已通过青龙通知模块发送（通道 %s）" % panel_channel, flush=True)
+                return True
+            except Exception as exc:
+                print("⚠️ [通知] 青龙通知发送失败（不影响结果）：%s" % str(exc)[:120], flush=True)
+        else:
+            print("ℹ️ [通知] 青龙面板未配置推送变量，改用脚本自带通道", flush=True)
+    else:
+        print("⚠️ [通知] 未找到青龙 notify.py，使用脚本自带通道", flush=True)
+
+    sent = False
+    plusplus = (os.getenv("PUSH_PLUS_TOKEN", "") or os.getenv("PLUSPLUS_TOKEN", "") or "").strip()
+    if plusplus:
+        try:
+            r = requests.post("https://www.pushplus.plus/send",
+                              json={"token": plusplus, "title": title, "content": content,
+                                    "template": "txt"}, timeout=20)
+            ok = r.status_code == 200 and (r.json().get("code") == 200)
+            sent = sent or ok
+            print("%s [通知] PushPlus 发送%s" % ("✅" if ok else "❌", "成功" if ok else "失败"), flush=True)
+        except Exception as exc:
+            print("❌ [通知] PushPlus 发送失败：%s" % str(exc)[:120], flush=True)
+    server_push = (os.getenv("PUSH_KEY", "") or os.getenv("SERVERPUSHKEY", "") or "").strip()
+    if server_push and not sent:
+        try:
+            requests.post("https://sctapi.ftqq.com/%s.send" % server_push,
+                          data={"title": title, "desp": content}, timeout=15)
+            sent = True
+            print("✅ [通知] Server 酱发送成功", flush=True)
+        except Exception as exc:
+            print("❌ [通知] Server 酱发送失败：%s" % str(exc)[:120], flush=True)
+    qywx = (os.getenv("QYWX_KEY", "") or os.getenv("QYWX_TOKEN", "") or "").strip()
+    if qywx and not sent:
+        try:
+            requests.post("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=%s" % qywx,
+                          json={"msgtype": "text", "text": {"content": "%s\n\n%s" % (title, content)}},
+                          timeout=15)
+            sent = True
+            print("✅ [通知] 企业微信机器人发送成功", flush=True)
+        except Exception as exc:
+            print("❌ [通知] 企业微信机器人发送失败：%s" % str(exc)[:120], flush=True)
+    bark = (os.getenv("BARK_PUSH", "") or "").strip()
+    if bark and not sent:
+        try:
+            requests.post(bark.rstrip("/"), json={"title": title, "body": content}, timeout=15)
+            sent = True
+            print("✅ [通知] Bark 发送成功", flush=True)
+        except Exception as exc:
+            print("❌ [通知] Bark 发送失败：%s" % str(exc)[:120], flush=True)
+    if not sent:
+        print("ℹ️ [通知] 未配置任何可用推送通道，结果仅输出到日志", flush=True)
+    return sent
 
 
 def default_cache_dir():
@@ -3695,14 +5977,54 @@ def default_cache_dir():
 
 
 def print_banner(query=False):
-    log("🌱 WorkBuddy 全能脚本 v%s（YYB无感取码）｜%s" % (VERSION, "签到状态查询" if query else "全流程"))
+    print("╔════════════════════════════════════════╗")
+    print("║ 🌱 WorkBuddy 全能脚本（YYB无感取码）   ║")
+    print("║ 🔐取码 💰积分 📊用量 🌱成长            ║")
+    print("║ ✅任务 🎮玩法 🎁领奖 📢通知            ║")
+    print("╚════════════════════════════════════════╝")
+    print("📦 v%s · %s" % (VERSION, "签到状态查询" if query else "全流程"), flush=True)
+
+
+def _notify_ok(summaries):
+    """查询按读取结果判断；业务轮次分别检查签到、任务读取与局部异常。"""
+    if not summaries:
+        return False
+    for sm in summaries:
+        if sm.get("error") or sm.get("restricted") or sm.get("task_errors"):
+            return False
+        if sm.get("query") or sm.get("enterprise"):
+            continue
+        if not sm.get("checked_in") or not sm.get("tasks_loaded"):
+            return False
+    return True
+
+
+def _notify_or_skip(summaries, summary_text, blocked=False):
+    """按 WORKBUDDY_NOTIFY 策略决定是否推送。
+
+    always（默认，保持原行为）  每次运行都推
+    fail                        仅本轮不「一切正常」时推
+    0 / off / none              完全不推
+    """
+    if blocked:          # --no-notify / WB_NO_NOTIFY=1
+        return
+    mode = (os.environ.get("WORKBUDDY_NOTIFY") or "always").strip().lower()
+    if mode in ("0", "off", "no", "false", "none"):
+        return
+    if mode == "fail" and _notify_ok(summaries):
+        print("ℹ️ 本轮无异常，按 WORKBUDDY_NOTIFY=fail 跳过推送", flush=True)
+        return
+    try:
+        send_notify("🌱 WorkBuddy 签到报告", summary_text)
+    except Exception as exc:
+        print("⚠️ 通知发送异常（不影响结果）：%s" % str(exc)[:160], flush=True)
 
 
 def main(argv=None):
-    log_startup()
     parser = argparse.ArgumentParser(description="WorkBuddy YYB 全能签到")
     parser.add_argument("--only", default=os.getenv("WB_ACCOUNT_FILTER", ""), metavar="3,4,5")
     parser.add_argument("--query", action="store_true", help="仅查询积分/用量/签到状态，不执行任务")
+    parser.add_argument("--sign-retry-only", action="store_true", help="仅处理已到点的签到重试队列")
     parser.add_argument("--no-desktop", action="store_true", help="跳过桌面任务")
     parser.add_argument("--no-notify", action="store_true", help="不发送青龙通知")
     parser.add_argument("--gap", type=float, default=1.5, help="写动作间隔秒数")
@@ -3710,11 +6032,11 @@ def main(argv=None):
     parser.add_argument("--tasks", default="", metavar="checkin,travel", help="白名单：只跑列出的子任务")
     parser.add_argument("--skip-tasks", default="", metavar="lottery,redeem", help="黑名单：跳过列出的子任务")
     args = parser.parse_args(argv)
+    if args.query and args.sign_retry_only:
+        parser.error("--query 与 --sign-retry-only 不能同时使用")
 
     global WRITE_GAP, MP_CHAT_GAP, TASK_ONLY, TASK_SKIP
     WRITE_GAP = max(1.0, args.gap)
-    if args.no_notify:
-        os.environ["WB_NO_NOTIFY"] = "1"
     if args.mp_gap is not None:
         MP_CHAT_GAP = max(0.0, args.mp_gap)
     elif os.environ.get("WORKBUDDY_MP_GAP"):
@@ -3730,55 +6052,35 @@ def main(argv=None):
     started = time.monotonic()
     reports = []
     errors = []
-    print_banner(args.query)
-
-    # 内部账号白名单 YYB_ONLY_REFS 优先于 --only / WB_ACCOUNT_FILTER
-    only_expr = args.only
-    if YYB_ONLY_REFS:
-        only_expr = ",".join(
-            str(int(x)) for x in YYB_ONLY_REFS
-            if str(x).strip().lstrip("-").isdigit() and int(x) > 0
-        )
+    if not args.sign_retry_only:
+        print_banner(args.query)
 
     try:
-        accounts = select_accounts(accounts_from_env(os.getenv("YYB_SERVER", "")), only_expr)
+        accounts = select_accounts(accounts_from_env(os.getenv("YYB_SERVER", "")), args.only)
     except SafeError as exc:
-        err(str(exc))
+        print("❌ " + str(exc), flush=True)
         return 1
     total = len(accounts)
-    log("👥 账号数: %d" % total)
+    if args.sign_retry_only:
+        try:
+            return run_sign_retry_only(accounts)
+        except SafeError as exc:
+            print(str(exc), flush=True)
+            return 1
+    print("👥 账号数: %d" % total, flush=True)
 
     do_desktop = not args.no_desktop
     if do_desktop and sys.platform != "win32":
-        log("🖥️ 非Windows环境：桌面任务自动降级为指纹上报模式")
+        print("🖥️ 非Windows环境：桌面任务自动降级为指纹上报模式", flush=True)
 
     try:
         with State(os.getenv("WB_CACHE_DIR") or default_cache_dir()) as state:
-            for pos, account in enumerate(accounts, 1):
-                acc_banner(pos, total, "备注：" + str(account.ref))
+            for account in accounts:
                 client = None
                 try:
                     client = Client(account, state)
                     if args.query:
-                        # 仅查询：登录 + 签到状态 + 积分/用量/成长
-                        client.authenticate()
-                        s = client.api_session()
-                        credits, paid = queryCredits(s)
-                        usage = queryUsage(s)
-                        prof = (_json_or_empty(s.get(BASE + "/v2/activity/growth/profile",
-                                                    timeout=25, verify=False)).get("data") or {})
-                        try:
-                            sd = client.status()
-                            checked = sd.get("today_checked_in")
-                        except Exception:
-                            checked = False
-                        summary = {"idx": account.number, "note": account.ref,
-                                   "credits": credits, "usage": usage,
-                                   "level": prof.get("level", "?"), "energy": "?",
-                                   "streak": "?", "done": 0, "total": 0, "rest": [],
-                                   "checked": bool(checked),
-                                   "checkin": "今日已签到" if checked else "今日未签到",
-                                   "error": ""}
+                        summary = query_account(client, account)
                         reports.append(summary)
                     else:
                         msgs_part, summary = run_account(account.number, client, account,
@@ -3796,28 +6098,27 @@ def main(argv=None):
                 finally:
                     if client:
                         client.session.close()
-                acc_footer(pos, total)
     except SafeError as exc:
         errors.append(str(exc))
-        err(str(exc))
+        print("❌ " + str(exc), flush=True)
     except Exception as exc:
         errors.append("任务失败（%s）" % type(exc).__name__)
-        err(errors[-1])
+        print("❌ " + errors[-1], flush=True)
 
     elapsed = time.monotonic() - started
-    log(build_summary(reports))
+    summary_text = build_summary(reports)
     if errors:
-        log("❌ " + "\n❌ ".join(errors))
-    log("⏱️ 运行耗时 %.1f 秒" % elapsed)
+        summary_text += "\n\n❌ " + "\n❌ ".join(errors)
+    print("", flush=True)
+    print(summary_text, flush=True)
+    print("⏱️ 运行耗时 %.1f 秒" % elapsed, flush=True)
 
-    ok = sum(1 for r in reports if not r.get("error"))
-    
-    # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-    flush_notify(
-        "WorkBuddy",
-        "账号 %d ｜ 成功 %d ｜ 失败 %d" % (total, ok, total - ok),
-        logger=log,
-    )
+    if not args.no_notify and os.getenv("WB_NO_NOTIFY") != "1":
+        _notify_or_skip(reports, summary_text)
+    else:
+        _notify_or_skip(reports, summary_text, blocked=True)
+
+    ok = sum(1 for r in reports if not r.get("error") and not r.get("task_errors"))
     return 0 if total > 0 and ok == total and not errors else 1
 
 
@@ -3825,5 +6126,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        log("⏹️ 已手动中断")
+        print("\n⏹️ 已手动中断")
         sys.exit(130)

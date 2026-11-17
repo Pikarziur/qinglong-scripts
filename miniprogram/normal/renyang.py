@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  认养一头牛官方商城
-# version: 2026-11-10a
+# version: 2026-11-17a
 # cron: 0 6,16 * * *
-# 积分有效期：
+# 积分有效期：180天有效期【0.5】
+# 检测过期积分：每年6/23~6/30和12/25~12/31，连续检测提醒（即将过期积分=现有总积分）
 # =========================================================
 
 # ========== 企业微信推送配置（可选） ==========
@@ -63,30 +64,105 @@ from urllib.parse import quote
 
 import requests
 
-# ========== 答题知识表（可选依赖，缺失时自动降级为随机） ==========
-# ryytn_quiz_knowledge.py 与本脚本同目录，存放「成分 → 公认生理功能」的静态字典。
-# 加载失败不影响主流程：社区答题会自动退化为随机作答（= 无知识表时的行为）。
-try:
-    import importlib.util as _imp_util
+# ========== 答题知识表（内联，社区答题启发式打分用） ==========
+# 社区每日答题的领域知识表（纯静态字典，无 AI / 无网络 / 无模型推理）。
+# run_quiz() 在「本地缓存未命中」时用本表给两个选项打分，选分数高的提交；
+# 本表未覆盖的题目自动退化为随机选择（= 无知识表时的行为，绝不会更差）。
+#
+# 判断链路（全部是字符串操作）：
+#   1. 从题干抽成分词：正则「添加(.+?)的」「为什么.*添加(.+?)[？?]」
+#   2. 查 QUIZ_KNOWLEDGE 拿到该成分的公认生理功能词
+#   3. 选项里命中功能词 → 每个 +6 分；两个选项都没命中 → -3 分
+#   4. 再叠加题型规则（时长 / 比例 / 是否题 / 合规表述 / 危险建议 / 反常识）
+#   5. 取高分项；同分则随机
+#
+# ⚠️ 维护原则：只写「客观公认」的生理功能，不要从某一道题的答案反推，
+#    否则会过拟合到那一题，对新题没有泛化能力。发现新成分就往表里加一行，格式：
+#    "成分名": ["功能词1", "功能词2", ...]
+# 数据来源：2026-11-10 实测 /mall/xhr/quizActivity/activities 滚动 10 天窗口
+#    （id 309~318）全部奶粉营养领域、每题 2 选项，全站答对率 84~90%。
 
-    _KB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryytn_quiz_knowledge.py")
-    _KB = {}
-    if os.path.exists(_KB_PATH):
-        _spec = _imp_util.spec_from_file_location("ryytn_quiz_knowledge", _KB_PATH)
-        if _spec and _spec.loader:
-            _mod = _imp_util.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-            _KB = {
-                "knowledge": getattr(_mod, "QUIZ_KNOWLEDGE", {}) or {},
-                "qtype_rules": getattr(_mod, "QUIZ_QTYPE_RULES", ()) or (),
-                "ratio_range": getattr(_mod, "QUIZ_RATIO_RANGE", (1.0, 3.0)) or (1.0, 3.0),
-                "safe_words": getattr(_mod, "QUIZ_SAFE_WORDS", ()) or (),
-                "danger_words": getattr(_mod, "QUIZ_DANGER_WORDS", ()) or (),
-                "absurd_words": getattr(_mod, "QUIZ_ABSURD_WORDS", ()) or (),
-            }
-except Exception as _kb_exc:  # noqa: BLE001
-    _KB = {}
-    print("⚠️ [答题知识表] 加载失败，答题将退化为随机: %s" % _kb_exc)
+QUIZ_KNOWLEDGE = {
+    # ── 营养成分 → 公认生理功能 ──────────────────────────────────
+    "益生菌": ["肠道", "菌群", "消化", "免疫", "腹泻", "便秘"],
+    "乳铁蛋白": ["免疫", "抗菌", "病毒", "抵抗力"],
+    "核苷酸": ["肠道", "免疫", "发育", "生长", "智力"],
+    "叶黄素": ["视网膜", "视力", "眼睛", "黄斑"],
+    "胆碱": ["大脑", "神经", "智力", "发育", "记忆"],
+    "dha": ["大脑", "视力", "智力", "神经"],
+    "牛磺酸": ["视力", "大脑", "神经"],
+    "益生元": ["肠道", "菌群", "排便", "消化"],
+    "钙": ["骨骼", "牙齿", "发育"],
+    "维生素d": ["钙", "骨骼", "吸收"],
+    "铁": ["血液", "血红蛋白", "贫血"],
+    "锌": ["免疫", "生长", "发育"],
+    "硒": ["抗氧化", "免疫"],
+    "维生素c": ["抗氧化", "免疫", "铁"],
+    "维生素a": ["视力", "免疫", "皮肤"],
+    "维生素e": ["抗氧化"],
+    "epa": ["大脑", "视力", "神经"],
+    "mfgm": ["大脑", "免疫", "神经"],
+    "opo": ["骨骼", "大脑", "吸收"],
+    "乳糖": ["钙", "吸收", "肠道"],
+    "低聚糖": ["肠道", "菌群", "排便"],
+    "酪蛋白": ["蛋白质", "结构", "消化"],
+    "乳清蛋白": ["蛋白质", "肌肉", "免疫"],
+    "乳脂": ["能量", "生长", "发育"],
+    "dhaepa": ["大脑", "视力", "神经"],
+    "肌醇": ["大脑", "神经", "生长"],
+    "牛磺酸dha": ["大脑", "视力", "神经"],
+    "胆碱dha": ["大脑", "神经", "智力"],
+
+    # ── 奶粉形态 / 品类 → 关键差异点 ────────────────────────────
+    "羊奶": ["蛋白质", "致敏", "结构", "分子"],
+    "牛奶": ["蛋白质", "乳糖", "钙"],
+    "脱脂": ["脂肪", "控制"],
+    "全脂": ["脂肪", "能量"],
+    "脱乳": ["脂肪", "控制"],
+    "适龄": ["月龄", "阶段", "发育"],
+    "配比": ["营养", "比例", "阶段"],
+    "早产": ["早产", "体重", "发育"],
+    "无乳糖": ["乳糖", "腹泻", "消化"],
+    "深度水解": ["过敏", "水解", "蛋白"],
+    "部分水解": ["过敏", "水解", "蛋白"],
+    "氨基酸": ["过敏", "消化", "吸收"],
+    "特殊医学用途": ["医生", "营养师", "指导下"],
+    "特医": ["医生", "营养师", "指导下"],
+    "早产儿": ["早产", "体重", "发育"],
+}
+
+# 题型规则：题干关键词 → 题型
+QUIZ_QTYPE_RULES = (
+    (("多久", "时间内", "时间", "多长时间"), "time"),
+    (("比例", "含量", "约为", "占"), "ratio"),
+    (("越好吗", "对吗", "是吗", "吗？", "吗?"), "yesno"),
+    (("需要", "能否", "是否", "可以", "能不能"), "safe"),
+    (("作用", "为什么", "功效", "主要区别", "区别", "帮助"), "func"),
+)
+
+# 客观合理区间（用于比例题）：比值在此区间内视为合理
+QUIZ_RATIO_RANGE = (1.0, 3.0)
+
+# 合规 / 危险表述（安全题用）
+QUIZ_SAFE_WORDS = ("医生", "营养师", "指导下", "遵医嘱", "专业人员", "咨询")
+QUIZ_DANGER_WORDS = ("随便", "自行", "无需", "不用", "可以不用")
+
+# 反常识表述（是否题用）
+QUIZ_ABSURD_WORDS = ("不是", "越陈越好", "越老越好", "越多越好", "永久", "无限")
+
+# 领域外题目回退时使用的日志标记
+QUIZ_FALLBACK_REASON = "知识表未覆盖"
+
+# 下游 quiz_* 函数仍统一从 _KB 读取；这里直接由上面的内联常量构造，
+# 不再依赖同目录的 ryytn_quiz_knowledge.py 文件（缺失/加载失败的风险已消除）。
+_KB = {
+    "knowledge": QUIZ_KNOWLEDGE,
+    "qtype_rules": QUIZ_QTYPE_RULES,
+    "ratio_range": QUIZ_RATIO_RANGE,
+    "safe_words": QUIZ_SAFE_WORDS,
+    "danger_words": QUIZ_DANGER_WORDS,
+    "absurd_words": QUIZ_ABSURD_WORDS,
+}
 
 # ========== 账号分隔标识 ==========
 # 多账号同跑时, 用醒目横线把各账号日志隔开, 便于阅读与定位。
@@ -97,7 +173,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-10a"
+SCRIPT_VER = "2026-11-16a"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [RY] message ==========
@@ -199,8 +275,14 @@ QUIZ_CACHE_MAX = 500
 # 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryytn_daily_done.json")
 
+# ===================== 积分过期提醒 =====================
+# 每年 6/28~6/30 与 12/29~12/31（各月底前三天，含当天）检测并连续提醒；
+# 即将过期积分 = 现有总积分。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_WINDOWS = ((6, 23, 30), (12, 25, 31))
+
 # 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
-YYB_ONLY_REFS = []
+YYB_ONLY_REFS = [3,1,2]
 
 USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 "
@@ -702,7 +784,34 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, point: str = "") -> None:
+def expire_points_from_done(server: str) -> str:
+    """读取打标缓存里的即将过期积分（当天第二轮被跳过时用于继续提醒）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return ""
+    v = entry.get("expirePoints")
+    return str(v or "")
+
+
+def in_expire_window() -> bool:
+    """是否处于积分过期提醒窗口（6/28~30、12/29~31，含两端）。"""
+    if not ENABLE_EXPIRE_REMIND:
+        return False
+    now = datetime.now()
+    for m, start, end in EXPIRE_REMIND_WINDOWS:
+        if now.month == m and start <= now.day <= end:
+            return True
+    return False
+
+
+def expire_deadline() -> str:
+    """本次窗口对应的过期截止日（当月末日）。"""
+    now = datetime.now()
+    last = 30 if now.month in (4, 6, 9, 11) else 31
+    return f"{now.year}-{now.month:02d}-{last}"
+
+
+def mark_done_today(server: str, point: str = "", expirePoints: str = "") -> None:
     """记录该账号今天已完成。"""
     cache = load_daily_done()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -713,6 +822,7 @@ def mark_done_today(server: str, point: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "point": str(point or ""),
+        "expirePoints": str(expirePoints or ""),
     }
     save_daily_done(cache)
     log(f"✅ [标记] 今日任务已完成，已记录（{today}）")
@@ -1183,6 +1293,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "quizMsg": "-",
         "postMsg": "-",
         "error": "",
+        "expirePoints": "",
     }
 
     log_account_header(index, total, server)
@@ -1205,24 +1316,67 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     result["token"] = mask(token)
 
     try:
-        # 1. 签到（签到并返回等级/手机号/积分）
-        checkin_resp = check_checkin(server, token, proxies)
-        if checkin_resp.get("code") != 200:
-            result["signMsg"] = checkin_resp.get("msg") or "签到失败"
-            err(f"❌ [签到] {result['signMsg']}")
-            result["error"] = f"签到失败: {result['signMsg']}"
-            return result
+        # ① 签到前状态预检：读 /task/checkin/getRule.data.complete
+        #    complete==1 表示今日已完成签到，跳过后续签到写请求（避免无效 POST）
+        checkin_done = False
+        try:
+            rule_resp = api_get(server, CHECKIN_RULE_URL, token, proxies)
+            if rule_resp.get("code") == 200:
+                complete = (safe_data(rule_resp) or {}).get("complete")
+                if complete == 1:
+                    checkin_done = True
+                    warn("⚠️ [签到] 状态预检：今日已完成签到，跳过提交")
+        except Exception as _e:
+            warn(f"⚠️ [签到] 状态预检异常: {_e}（继续尝试签到）")
 
-        checkin_data = safe_data(checkin_resp)
-        grade = checkin_data.get("grade")
-        phone = mask_phone(str(checkin_data.get("phone") or ""))
-        point = checkin_data.get("point", 0)
-        result["point"] = str(point)
-        result["signMsg"] = "签到成功"
-        log(f"✅ [签到] {result['signMsg']}（手机 {phone}，等级 {grade}，当前积分 {point}）")
+        if checkin_done:
+            # 已签直接走下面的信息获取与过期检查，不再 POST 签到
+            result["signMsg"] = "今日已签到"
+            try:
+                info_resp = api_post(server, CHECKIN_SAVE_URL, token, proxies, {})
+                if info_resp.get("code") == 200:
+                    info_data = safe_data(info_resp)
+                    grade = info_data.get("grade")
+                    phone = mask_phone(str(info_data.get("phone") or ""))
+                    point = info_data.get("point", 0)
+                    result["point"] = str(point)
+                    log(f"🟡 [签到] {result['signMsg']}（手机 {phone}，等级 {grade}，当前积分 {point}）")
+                else:
+                    warn(f"⚠️ [签到] 已签但取信息失败: {info_resp.get('msg')}")
+            except Exception as _e:
+                warn(f"⚠️ [签到] 已签但取信息异常: {_e}")
+        else:
+            # 1. 签到（签到并返回等级/手机号/积分）
+            checkin_resp = check_checkin(server, token, proxies)
+            if checkin_resp.get("code") != 200:
+                result["signMsg"] = checkin_resp.get("msg") or "签到失败"
+                err(f"❌ [签到] {result['signMsg']}")
+                result["error"] = f"签到失败: {result['signMsg']}"
+                return result
 
-        # 辅助拉一次签到规则（不影响结果）
-        api_get(server, CHECKIN_RULE_URL, token, proxies)
+            checkin_data = safe_data(checkin_resp)
+            grade = checkin_data.get("grade")
+            phone = mask_phone(str(checkin_data.get("phone") or ""))
+            point = checkin_data.get("point", 0)
+            result["point"] = str(point)
+            result["signMsg"] = "签到成功"
+            log(f"✅ [签到] {result['signMsg']}（手机 {phone}，等级 {grade}，当前积分 {point}）")
+
+            # 辅助拉一次签到规则（不影响结果）
+            api_get(server, CHECKIN_RULE_URL, token, proxies)
+
+        # ③ 积分过期提醒：窗口内把现有总积分作为即将过期积分
+        if in_expire_window():
+            try:
+                pt = result.get("point") or ""
+                if pt not in ("", "-"):
+                    val = float(pt)
+                    if val > 0:
+                        result["expirePoints"] = str(val)
+                        deadline = expire_deadline()
+                        log(f"⏳ [积分] 即将过期积分: {val:g}（{deadline} 过期）")
+            except Exception as _e:
+                warn(f"⚠️ [积分] 过期提醒异常: {_e}")
 
         # 2. 试用商品申请
         trial_msg_parts: List[str] = []
@@ -1365,20 +1519,23 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    expire_rows: List[Dict[str, Any]] = []
 
     for index, server in enumerate(SERVERS, 1):
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(server):
             log(f"⏭️ [标记] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
             skipped.append({"server": server})
+            expire_rows.append({"label": f"账号{index}", "expirePoints": expire_points_from_done(server)})
             continue
 
         try:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
+            expire_rows.append({"label": f"账号{index}", "expirePoints": result.get("expirePoints", "")})
             # 只有整个流程走完（success=True）才算今日完成
             if result.get("success"):
-                mark_done_today(server, result.get("point", ""))
+                mark_done_today(server, result.get("point", ""), result.get("expirePoints", ""))
         except Exception as exc:
             err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
@@ -1404,6 +1561,21 @@ def main() -> None:
     fail_count = len(results) - success_count
     log("📊 [执行汇总] 认养一头牛 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
         % (len(SERVERS), success_count, fail_count, len(skipped)))
+    # 汇总类别里打印每个账号的总积分
+    for i, r in enumerate(results, 1):
+        pt = r.get("point") or "-"
+        if pt not in ("-", ""):
+            log(f"💰 [总积分] 账号{i}：{pt}")
+    for i, _ in enumerate(skipped, len(results) + 1):
+        pt = expire_points_from_done(_.get("server") or "")
+        if pt:
+            log(f"💰 [总积分] 账号{i}：{pt}")
+
+    # ③ 积分过期提醒：窗口内汇总打印 + 独立强推（与任务完成通知分开）
+    try:
+        check_expire_remind(expire_rows)
+    except Exception as _e:
+        warn(f"⚠️ [积分过期提醒] 检查异常: {_e}")
 
     print()
     log(ACC_RULE)
@@ -1810,6 +1982,34 @@ if "get_userinfo_blob" in globals():
             return None
         return {"userInfo": info, "rawData": _yyb_json.dumps(info, ensure_ascii=False), "errMsg": "getUserInfo:ok"}
 # --- end YYB compatibility layer ---
+
+def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
+    """汇总区打印积分过期提醒；窗口内独立强推，连续多天提醒。"""
+    if not in_expire_window():
+        return
+    hits = []
+    for r in (rows or []):
+        v = str(r.get("expirePoints") or "")
+        if not v:
+            continue
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if fv > 0:
+            hits.append((r.get("label", "账号"), fv))
+    if not hits:
+        return
+    deadline = expire_deadline()
+    log("⏳ [积分过期提醒]")
+    for label, fv in hits:
+        log(f"   · {label}：{fv:g} 积分（{deadline} 过期）")
+    body = "\n".join(f"- {label}：{fv:g} 积分（{deadline} 过期）" for label, fv in hits)
+    try:
+        send_pushplus("🥛 人本（认养一头牛）积分即将过期提醒", body)
+    except Exception as _e:
+        warn(f"⚠️ [积分过期提醒] 推送失败: {_e}")
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小米社区
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 36 5,15 * * *
 # 积分有效期：无
 # =========================================================
@@ -188,7 +188,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -328,8 +328,8 @@ def is_done_today(ref: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(ref: str, note: str = "") -> None:
-    """记录该账号今天已完成。"""
+def mark_done_today(ref: str, note: str = "", level: str = "") -> None:
+    """记录该账号今天已完成（同时缓存等级，供跳过时汇总展示）。"""
     cache = load_daily_done()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
     today = _today()
@@ -339,6 +339,7 @@ def mark_done_today(ref: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "level": str(level or ""),
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -530,6 +531,26 @@ def get_code(server, ref):
     return code, user_result
 
 
+def fetch_show_level(session, headers, params) -> str:
+    """查询用户等级展示文案（userGrowLevelInfo.showLevel，如「1段」）；失败返回空串。"""
+    try:
+        resp = session.get(f"{BASE}/mtop/planet/wechat/userinfo", headers=headers, params=params, timeout=20)
+        resp.raise_for_status()
+        info = (resp.json().get("entity") or {}).get("userGrowLevelInfo") or {}
+        return str(info.get("showLevel") or "")
+    except Exception as exc:
+        warn(f"⚠️ 查询等级失败：{exc}")
+        return ""
+
+
+def level_from_done(ref: str) -> str:
+    """从当天打标记录读回等级（供本次跳过账号的汇总展示）。"""
+    entry = load_daily_done().get(str(ref))
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("level") or "")
+
+
 def login_and_sign(code, wx_user_info, ref):
     session = requests.Session()
     session.mount(
@@ -638,6 +659,8 @@ def login_and_sign(code, wx_user_info, ref):
     headers = {"Origin": "https://servicewechat.com", "Content-Type": "application/x-www-form-urlencoded"}
     params = {"wx_vip_ph": ph}
     flow_start(7, "查询今日签到状态")
+    level = fetch_show_level(session, headers, params)
+    log(f"🏅 当前等级：{level or '未知'}")
     status = session.get(f"{BASE}/mtop/planet/wechat/checkin/mypagedata", headers=headers, params=params, timeout=20)
     status.raise_for_status()
     status_body = status.json()
@@ -649,7 +672,7 @@ def login_and_sign(code, wx_user_info, ref):
         flow_ok("查询成功：今日已经签到，无需重复执行")
         flow_start(8, "检查是否需要提交签到任务")
         flow_ok("今日已签到，已跳过重复提交")
-        return "今日已签到"
+        return "今日已签到", level
 
     flow_ok("查询成功：今日尚未签到")
     flow_start(8, "提交 WECHAT_CHECKIN_TASK 签到任务")
@@ -667,7 +690,7 @@ def login_and_sign(code, wx_user_info, ref):
     entity = sign_body.get("entity", {})
     result = f"签到成功，{entity.get('title', '获得成长值')}"
     flow_ok(result)
-    return result
+    return result, level
 
 
 def main():
@@ -689,33 +712,42 @@ def main():
 
     failed = 0
     skipped = 0
+    summary_rows = []  # (账号标识, 等级)：汇总区逐账号打印等级
     log(f"🚀 {SCRIPT_NAME} 开始 · 共读取到 {len(accounts)} 个 YYB 账号")
     for index, (server, ref) in enumerate(accounts, 1):
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(ref):
             log(f"⏭️ [打标] 账号 {index}/{len(accounts)} 今日任务已完成，跳过（标识：{ref}）")
             skipped += 1
+            # 跳过账号从打标缓存读回等级，保证汇总仍有数据
+            summary_rows.append((str(ref), level_from_done(ref)))
             continue
 
         acc_banner(index, len(accounts), "标识：" + str(ref))
         done_note = ""
         try:
             code, wx_user_info = get_code(server, ref)
-            result = login_and_sign(code, wx_user_info, ref)
+            result, level = login_and_sign(code, wx_user_info, ref)
             log(f"🏁 账号 {ref} 流程完成：{result}")
             done_note = str(result or "")
+            summary_rows.append((str(ref), level))
         except Exception as exc:  # 单账号失败不影响其他账号
             failed += 1
             err(f"🛑 账号 {ref} 流程终止：{exc}")
+            summary_rows.append((str(ref), ""))
         else:
             # 只有整个流程走完（未抛异常）才算今日完成
-            mark_done_today(ref, done_note)
+            mark_done_today(ref, done_note, level)
         acc_footer(index, len(accounts))
 
     executed = len(accounts) - skipped
     success = executed - failed
     log(_ACC_RULE)
     log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failed} ｜ 跳过 {skipped}")
+    if summary_rows:
+        log("🏅 [等级汇总]")
+        for ref, lv in summary_rows:
+            log(f"   · 账号 {ref}：等级 {lv or '未知'}")
     log(_ACC_RULE)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(

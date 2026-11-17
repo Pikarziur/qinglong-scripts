@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  迪卡侬
-# version: 2026-10-29a
+# version: 2026-11-17d
 # cron: 24 4,14 * * *
-# 积分有效期：
+# 燃值有效期：当年获取的燃值将在次年年底过期【1+1】
+# 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取燃值-上年的消耗燃值
 # =========================================================
 
 # ========== 企业微信推送配置（可选） ==========
@@ -52,7 +53,7 @@ import random
 import time
 import traceback
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -65,7 +66,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-17d"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [DIKA] message ==========
@@ -93,7 +94,7 @@ APPID = "wxdbc3f1ac061903dd"
 # ========== 内部配置：直接改这里，省去去面板设环境变量 ==========
 # 账号序号白名单（1 起，按 YYB_SERVER 里的书写顺序编号）；留空 [] = 全部运行
 # 例：[1] 只跑第 1 个账号；[1, 3] 跑第 1 和第 3 个
-YYB_ONLY_REFS = [1,2]
+YYB_ONLY_REFS = []
 
 SERVERS = [
     "127.0.0.1:8088",
@@ -146,6 +147,33 @@ BFF_BASE_URL = "https://mpm-store.decathlon.com.cn"
 LOGIN_URL = f"{BFF_BASE_URL}/wcc_bff/api/v1/auth/simplify/login"
 VALIDATE_URL = f"{BFF_BASE_URL}/wcc_bff/api/v1/member/member_info/query"
 CHECK_IN_URL = f"{BASE_URL}/membership/membership-portal/mp/api/v1/business-center/reward/CHECK_IN_DAILY"
+
+# 燃值账单（真机 HAR 核实 2026-11-16）：
+#   GET .../point_transactions?type=increase|decrease&pageNo=1&pageSize=20
+#   响应 {"code":"0","data":{"pages":1,"total":1,"items":[{createTime, updateTime, pointChange, eventType}]}}
+#   createTime 形如 "2026-11-16T20:25:02+08:00"，pointChange 为变动值（扣减用绝对值兼容正负记法）
+POINT_TX_URL = f"{BASE_URL}/membership/membership-portal/mp/api/v1/memberships/point_transactions"
+POINT_TX_MAX_PAGES = 20
+EXPIRE_CHECK_START_DAY = 24
+EXPIRE_CHECK_END_DAY = 31
+
+# 燃值余额只读接口（真机 HAR 核实 2026-11-17，quantumult-x-2026-11-17-161616.har）：
+#   GET {BFF}/wcc_bff/api/v1/wechat/member/member_point/query
+#     鉴权同 BFF（x-api-key=BFF_API_KEY、shop-id、Etag、Authorization: Bearer）
+#     响应 {"code":0,"msg":"Success","data":{"card_number":"2093682775982","point_balance":20.0}}
+#     → point_balance 即账户当前可用燃值总额（权威值，与签到响应里的 point_balance 同源）
+#   GET {BASE}/membership/membership-portal/mp/api/v1/memberships
+#     响应 {"code":"0","data":{...,"dktPointBalance":20,"dktExpirePoints":0,...}}
+#     → dktPointBalance 同为余额；dktExpirePoints 是服务端口径的「即将过期燃值」
+MEMBER_POINT_URL = f"{BFF_BASE_URL}/wcc_bff/api/v1/wechat/member/member_point/query"
+MEMBERSHIPS_URL = f"{BASE_URL}/membership/membership-portal/mp/api/v1/memberships"
+
+# 签到状态预检（HAR quantumult-x-2026-11-17-123543.har 核实 2026-11-17）：
+#   increase 账单里签到入账的 eventType 是明文「签到奖励」，createTime 形如
+#   "2026-11-17T11:55:16+08:00"。签到前先查账单：当天已有该 eventType 入账则
+#   跳过 CHECK_IN_DAILY 写请求，避免二次执行数据；查询失败则照常签到，不漏签。
+SIGNIN_EVENT_TYPE = "签到奖励"
+ENABLE_SIGNIN_STATE_CHECK = True
 
 # Values used by the current production mini-program (package 551, 2026-09-17).
 # The BFF login and membership portal use different x-api-key values.
@@ -563,6 +591,187 @@ def api_post(server: str, url: str, token: str, proxies: Dict[str, str] | None, 
         }
 
 
+# ====================== 燃值过期提醒（2026-11-17a）======================
+# 规则：当年获取的燃值次年 12-31 过期；每年 12-24 ~ 12-31（北京时间）检查，
+#       净额 = 上年获取 − 上年消耗（先扣旧的），下限 0；到期日写当年 12-31。
+# 账单接口查询失败只打 WARN，不影响签到结果。
+
+def is_expire_window() -> bool:
+    """北京时间每年 12-24 ~ 12-31 才检查燃值过期，窗口外零额外请求。"""
+    now = datetime.now()
+    return now.month == 12 and EXPIRE_CHECK_START_DAY <= now.day <= EXPIRE_CHECK_END_DAY
+
+
+def point_transactions(server: str, token: str, proxies, tx_type: str) -> List[Dict[str, Any]]:
+    """按 increase / decrease 拉取燃值账单全部页，返回 items 列表。"""
+    items: List[Dict[str, Any]] = []
+    for page in range(1, POINT_TX_MAX_PAGES + 1):
+        url = f"{POINT_TX_URL}?type={tx_type}&pageNo={page}&pageSize=20"
+        resp = api_get(server, url, token, proxies)
+        if str(resp.get("code")) != "0":
+            if items:
+                break
+            raise RuntimeError(f"账单接口业务码异常(code={resp.get('code')})")
+        data = safe_data(resp)
+        batch = data.get("items") or []
+        items.extend(batch)
+        try:
+            pages = int(data.get("pages") or 0)
+        except (TypeError, ValueError):
+            pages = 0
+        if not batch or page >= pages:
+            break
+    return items
+
+
+def signed_today_by_ledger(server: str, token: str, proxies) -> Tuple[bool | None, str]:
+    """签到前只读状态预检：查 increase 账单当天是否已有「签到奖励」入账。
+
+    返回 (signed, note)：
+      signed=True  确认今天已签（跳过写请求）
+      signed=False 确认今天未签（照常签到）
+      signed=None  查询失败/无法判断（照常签到，防漏签）
+    note 用于日志说明。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        # 只查第 1 页：签到是最新入账，必在首页；减少不必要的翻页请求。
+        url = f"{POINT_TX_URL}?type=increase&pageNo=1&pageSize=20"
+        resp = api_get(server, url, token, proxies)
+        if str(resp.get("code")) != "0":
+            return None, f"账单业务码异常(code={resp.get('code')})"
+        items = (safe_data(resp).get("items") or [])
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            create_time = str(row.get("createTime") or "")
+            if not create_time.startswith(today):
+                continue
+            if str(row.get("eventType") or "") == SIGNIN_EVENT_TYPE:
+                return True, f"账单确认今日已签（{create_time}）"
+        return False, "账单今日无签到入账"
+    except Exception as exc:
+        return None, f"账单查询异常（{exc}）"
+
+
+def ledger_total_points(server: str, token: str, proxies) -> Optional[float]:
+    """只读推算当前燃值余额：账单全部「增加」之和 − 全部「减少」之和。
+
+    仅在签到写请求没走（状态预检判定今日已签 / 服务端回 1006）、
+    拿不到签到响应里的 point_balance 时作为兜底；推算值与官方余额可能有偏差，
+    打印时带「≈」标记。
+    """
+    try:
+        gained = 0.0
+        consumed = 0.0
+        for row in point_transactions(server, token, proxies, "increase"):
+            gained += abs(to_float(row.get("pointChange")))
+        for row in point_transactions(server, token, proxies, "decrease"):
+            consumed += abs(to_float(row.get("pointChange")))
+        return max(0.0, gained - consumed)
+    except Exception as exc:
+        warn(f"⚠️ [燃值] 账单推算总燃值失败（不影响签到）: {exc}")
+        return None
+
+
+def query_member_point(server: str, token: str, proxies,
+                       with_expire: bool = False) -> Dict[str, Any]:
+    """只读查询燃值余额（服务端权威值），全程不抛异常。
+
+    返回 {"balance": float|None, "expire": float|None, "source": str}：
+      balance  当前可用燃值总额（member_point/query 的 point_balance）
+      expire   服务端口径的「即将过期燃值」（memberships 的 dktExpirePoints），
+               None 表示未取到（未开启 with_expire 或接口失败）
+      source   数据来源标识，仅用于日志排查
+    """
+    info: Dict[str, Any] = {"balance": None, "expire": None, "source": ""}
+
+    # 1) BFF 会员燃值接口：响应小、直接给 point_balance（HAR 核实 2026-11-17）
+    try:
+        resp = api_get(server, MEMBER_POINT_URL, token, proxies)
+        if str(resp.get("code")) == "0":
+            balance = safe_data(resp).get("point_balance")
+            if balance is not None:
+                info["balance"] = to_float(balance)
+                info["source"] = "member_point/query"
+        else:
+            warn(f"⚠️ [燃值] 余额接口业务码异常(code={resp.get('code')})")
+    except Exception as exc:
+        warn(f"⚠️ [燃值] 余额接口异常（不影响签到）: {exc}")
+
+    # 2) memberships 接口：余额兜底 + 取服务端即将过期燃值
+    if with_expire or info["balance"] is None:
+        try:
+            resp = api_get(server, MEMBERSHIPS_URL, token, proxies)
+            if str(resp.get("code")) == "0":
+                data = safe_data(resp)
+                if info["balance"] is None and data.get("dktPointBalance") is not None:
+                    info["balance"] = to_float(data.get("dktPointBalance"))
+                    info["source"] = "memberships"
+                if with_expire and data.get("dktExpirePoints") is not None:
+                    info["expire"] = to_float(data.get("dktExpirePoints"))
+            else:
+                warn(f"⚠️ [燃值] 会员信息接口业务码异常(code={resp.get('code')})")
+        except Exception as exc:
+            warn(f"⚠️ [燃值] 会员信息接口异常（不影响签到）: {exc}")
+
+    return info
+
+
+def fetch_total_points(server: str, token: str, proxies) -> Tuple[Optional[float], bool]:
+    """取当前燃值总额：服务端只读接口优先，两个接口都失败才退回账单推算。
+
+    返回 (总额, 是否为推算值)；总额取不到时返回 (None, False)。
+    """
+    info = query_member_point(server, token, proxies)
+    balance = info.get("balance")
+    if balance is not None:
+        return balance, False
+    # 服务端接口都取不到 → 账单推算兜底（打印时带 ≈ 标记）
+    est = ledger_total_points(server, token, proxies)
+    if est is None:
+        return None, False
+    return est, True
+
+
+def _server_expire_of(item: Dict[str, Any]) -> Optional[float]:
+    """取结果条目里的「服务端口径即将过期燃值」（dktExpirePoints），没有则 None。"""
+    val = item.get("expireServerAmount")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def expiring_points(server: str, token: str, proxies) -> Dict[str, Any]:
+    """即将过期的燃值：max(0, 上年获取 − 上年消耗)，到期日当年 12-31。
+
+    口径来自脚本头注释【检测过期积分】：过期积分 = 上年的获取燃值 − 上年的消耗燃值。
+    """
+    now = datetime.now()
+    from_year = now.year - 1
+    expire_date = "%04d-12-31" % now.year
+    gained = 0.0
+    consumed = 0.0
+
+    for row in point_transactions(server, token, proxies, "increase"):
+        if not str(row.get("createTime") or "").startswith(str(from_year)):
+            continue
+        value = to_float(row.get("pointChange"))
+        if value > 0:
+            gained += value
+    # 净额口径（预设先扣旧的）：上年消耗同样从「上年获取」这批里扣
+    for row in point_transactions(server, token, proxies, "decrease"):
+        if not str(row.get("createTime") or "").startswith(str(from_year)):
+            continue
+        consumed += abs(to_float(row.get("pointChange")))
+
+    return {"expire_date": expire_date, "amount": max(0.0, gained - consumed),
+            "gained": gained, "consumed": consumed, "from_year": from_year}
+
+
 # ====================== Token缓存管理 ======================
 def load_token_cache() -> Dict[str, Any]:
     try:
@@ -621,8 +830,10 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
-    """记录该账号今天已完成。"""
+def mark_done_today(server: str, note: str = "", expire_info: Dict[str, Any] = None,
+                    total_points: Any = None, total_estimated: bool = False,
+                    expire_server_amount: Any = None) -> None:
+    """记录该账号今天已完成；顺带缓存燃值过期提醒与总燃值，供当天第二轮跳过的账号读回。"""
     cache = load_daily_done()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
     today = _today()
@@ -632,6 +843,10 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expireInfo": expire_info if isinstance(expire_info, dict) else None,
+        "expireServerAmount": expire_server_amount,
+        "totalPoints": total_points,
+        "totalEstimated": bool(total_estimated),
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -715,7 +930,11 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "token": "-",
         "signMsg": "-",
         "pointsMsg": "-",
+        "totalPoints": None,
+        "totalEstimated": False,
         "error": "",
+        "expireInfo": None,
+        "expireServerAmount": None,
     }
 
     log_account_header(index, total, server)
@@ -737,7 +956,56 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
 
     result["token"] = mask(token)
 
+    # 燃值过期提醒独立于签到流程：窗口内查询，异常只 WARN，不影响签到结果
+    # server_balance：服务端权威余额（窗口内顺带查，后面兜底可直接复用，省一次请求）
+    # server_expire：服务端口径的「即将过期燃值」（dktExpirePoints），仅作对照打印
+    server_balance: Optional[float] = None
+    server_expire: Optional[float] = None
+    if is_expire_window():
+        try:
+            result["expireInfo"] = expiring_points(server, token, proxies)
+            _exp = result["expireInfo"]
+            if isinstance(_exp, dict):
+                log(f"ℹ️ [燃值过期] 上年获取 {to_float(_exp.get('gained')):.2f}"
+                    f" − 上年消耗 {to_float(_exp.get('consumed')):.2f}"
+                    f" = 净额 {to_float(_exp.get('amount')):.2f}"
+                    f"（{_exp.get('expire_date')} 到期）")
+        except Exception as exc:
+            warn(f"⚠️ [燃值过期] 查询失败（不影响签到）: {exc}")
+        try:
+            _info = query_member_point(server, token, proxies, with_expire=True)
+            server_balance = _info.get("balance")
+            server_expire = _info.get("expire")
+            if server_expire is not None:
+                result["expireServerAmount"] = server_expire
+                log(f"ℹ️ [燃值过期] 服务端口径即将过期燃值： {server_expire}")
+        except Exception as exc:
+            warn(f"⚠️ [燃值过期] 服务端对照值查询失败（不影响签到）: {exc}")
+
     try:
+        # 签到前状态预检（只读）：确认今日已签则跳过写请求，避免二次执行数据。
+        # 查询失败/查不到一律照常签到，保证不漏签。
+        if ENABLE_SIGNIN_STATE_CHECK:
+            signed, note = signed_today_by_ledger(server, token, proxies)
+            if signed is True:
+                log(f"⏭️ [签到] 状态预检：{note}，跳过签到写请求")
+                result["signMsg"] = "今日已签到（状态预检）"
+                result["pointsMsg"] = note
+                result["success"] = True
+                # 没走签到写请求 → 拿不到响应里的 point_balance，用只读接口查余额
+                if server_balance is not None:
+                    result["totalPoints"] = server_balance
+                else:
+                    total, estimated = fetch_total_points(server, token, proxies)
+                    if total is not None:
+                        result["totalPoints"] = total
+                        result["totalEstimated"] = estimated
+                return result
+            elif signed is False:
+                log(f"🔍 [签到] 状态预检：{note}，继续签到")
+            else:
+                warn(f"⚠️ [签到] 状态预检失败（{note}），照常签到")
+
         wait_time = random.randint(2, 5)
         log(f"⏳ [签到] 提交前等待 {wait_time}s")
         sleep(wait_time)
@@ -752,12 +1020,21 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
             point_balance = data.get("point_balance", 0)
             result["signMsg"] = "签到成功"
             result["pointsMsg"] = f"获取积分 {point_change}，当前可用积分 {point_balance}"
+            result["totalPoints"] = to_float(point_balance)
             log(f"✅ [签到] 签到成功，获取积分： {point_change}。当前可用积分：{point_balance}")
         elif "1006" in str(code_val):
             msg = sign_resp.get("msg") or json_preview(sign_resp, 300)
             result["signMsg"] = "今日已签到"
             result["pointsMsg"] = str(msg)
             warn(f"⚠️ [签到] 今日已签到 {msg}")
+            # 服务端判定今日已签 → 没有 point_balance，用只读接口查余额
+            if server_balance is not None:
+                result["totalPoints"] = server_balance
+            else:
+                total, estimated = fetch_total_points(server, token, proxies)
+                if total is not None:
+                    result["totalPoints"] = total
+                    result["totalEstimated"] = estimated
         elif str(code_val) == "Portal_2":
             result["skipped"] = True
             result["signMsg"] = "非迪卡侬会员，跳过签到"
@@ -794,6 +1071,30 @@ def build_notify(results: List[Dict[str, Any]]) -> str:
 """
 
     for idx, res in enumerate(results, 1):
+        info = res.get("expireInfo")
+        if isinstance(info, dict) and to_float(info.get("amount")) > 0:
+            content += "💰 燃值(%.2f)即将过期： %s（账号%d）\n" % (
+                to_float(info.get("amount")), str(info.get("expire_date") or ""), idx)
+        # 服务端口径对照（与账本口径不一致时才追加）
+        srv = _server_expire_of(res)
+        if srv is not None:
+            ledger_val = to_float(info.get("amount")) if isinstance(info, dict) else 0.0
+            if abs(srv - ledger_val) > 0.001:
+                content += "ℹ️ 服务端口径即将过期燃值： %.2f（账本口径 %.2f）（账号%d）\n" % (
+                    srv, ledger_val, idx)
+
+    for idx, res in enumerate(results, 1):
+        total = res.get("totalPoints")
+        if total is not None:
+            try:
+                val = float(total)
+            except (TypeError, ValueError):
+                val = None
+            if val is not None:
+                mark = "≈" if res.get("totalEstimated") else ""
+                content += "💎 总积分%s%.2f（账号%d）\n" % (mark, val, idx)
+
+    for idx, res in enumerate(results, 1):
         icon = "✅" if res["success"] else ("⚠️" if res.get("skipped") else "❌")
         status_text = "成功" if res["success"] else ("跳过" if res.get("skipped") else "失败")
 
@@ -823,6 +1124,12 @@ def main() -> None:
         # 跳过项按「skipped」并入 results，与已有的 skipped_count 合并统计，不重复计数
         if is_done_today(server):
             log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
+            # 当天第二轮被跳过时，从打标缓存读回上午查到的提醒，不重新登录
+            cached = load_daily_done().get(server)
+            cached_info = cached.get("expireInfo") if isinstance(cached, dict) else None
+            cached_srv = cached.get("expireServerAmount") if isinstance(cached, dict) else None
+            cached_total = cached.get("totalPoints") if isinstance(cached, dict) else None
+            cached_est = bool(cached.get("totalEstimated")) if isinstance(cached, dict) else False
             results.append({
                 "server": server,
                 "success": False,
@@ -832,7 +1139,11 @@ def main() -> None:
                 "token": "-",
                 "signMsg": "今日已完成，跳过",
                 "pointsMsg": "-",
+                "totalPoints": cached_total,
+                "totalEstimated": cached_est,
                 "error": "",
+                "expireInfo": cached_info,
+                "expireServerAmount": cached_srv,
             })
             continue
 
@@ -853,12 +1164,19 @@ def main() -> None:
                 "token": "-",
                 "signMsg": "-",
                 "pointsMsg": "-",
+                "totalPoints": None,
+                "totalEstimated": False,
                 "error": traceback.format_exc().strip(),
+                "expireInfo": None,
+                "expireServerAmount": None,
             })
         else:
             # 放在 else 里：打标失败不会把已成功的账号误记为失败
             if should_mark:
-                mark_done_today(server, note)
+                mark_done_today(server, note, result.get("expireInfo"),
+                                result.get("totalPoints"),
+                                bool(result.get("totalEstimated")),
+                                result.get("expireServerAmount"))
 
         if index < len(SERVERS):
             log("⏳ [间隔] 等待 2s 后处理下一个账号")
@@ -869,6 +1187,32 @@ def main() -> None:
     fail_count = len(results) - success_count - skipped_count
     log("📊 [执行汇总] 迪卡侬 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
         % (len(SERVERS), success_count, fail_count, skipped_count))
+    # 总燃值汇总（无论是否跳过、任务是否已完成，都在这里显示）
+    for idx, item in enumerate(results, 1):
+        total = item.get("totalPoints")
+        if total is None:
+            continue
+        try:
+            val = float(total)
+        except (TypeError, ValueError):
+            continue
+        if item.get("totalEstimated"):
+            log("💎 总积分≈%.2f（账单推算）（账号%d）" % (val, idx))
+        else:
+            log("💎 总积分(%.2f)（账号%d）" % (val, idx))
+    # 燃值过期提醒：12-24 ~ 12-31 命中即放在汇总日志，每轮随汇总一起推送
+    for idx, item in enumerate(results, 1):
+        info = item.get("expireInfo")
+        if isinstance(info, dict) and to_float(info.get("amount")) > 0:
+            log("💰 燃值(%.2f)即将过期： %s（账号%d）"
+                % (to_float(info.get("amount")), str(info.get("expire_date") or ""), idx))
+        # 服务端口径（dktExpirePoints）与账本口径不一致时追加一行对照
+        srv = _server_expire_of(item)
+        if srv is not None:
+            ledger_val = to_float(info.get("amount")) if isinstance(info, dict) else 0.0
+            if abs(srv - ledger_val) > 0.001:
+                log("ℹ️ 服务端口径即将过期燃值： %.2f（账本口径 %.2f）（账号%d）"
+                    % (srv, ledger_val, idx))
 
     print()
     log(ACC_RULE)

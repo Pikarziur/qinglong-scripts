@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =========================================================
-# name:  影视飓风
-# version: 2026-10-29a
-# cron: 6 6,16 * * *
-# 积分有效期：
+# name:  无影云电脑
+# version: 2026-11-17a
+# cron: 24 6,16 * * *
+# 积分有效期：3个月
+# 检测过期积分：每年3月、6月、9月、12月的月底前七天检测并提醒（即将过期积分=现有总积分）
 # =========================================================
 
 # ========== 企业微信推送配置（可选） ==========
@@ -19,19 +20,23 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
 
 
 """
-影视飓风小程序动态 code 版
+无影云电脑小程序动态 code 版
 
 功能：
   1. 本地 code 服务获取微信 code
-  2. /wscshop/weapp/authorize.json 使用 code 换 accessToken（有赞 wsc 店铺契约）
-  3. /wscump/checkin/show_checkin_page_v2.json 获取签到活动 checkinId（兼作 token 校验）
-  4. /wscump/checkin/checkinV2.json 每日签到（自动识别已签到/达上限）
-  5. /wscump/integral/user_points.json 查询当前积分
+  2. 复刻小程序的阿里云账号 OAuth 静默登录
+     （/weixin/authLogin.html → GetLoginTokenByAuthCode 拿 LoginToken/SessionId）
+  3. RefreshLoginToken 自动续期缓存会话
+  4. 签到活动配置与签到日历（DescribeCheckInActivity / DescribeUserCheckInInfo，Activity=check-in）
+  5. 每日签到（CreateUserCheckIn，按日历状态幂等：已签则不再提交）
   6. PushPlus 推送
   7. 品赞代理，业务请求优先代理，失败直连兜底
 
-说明：登录接口取自源脚本（有赞 weapp authorize，clientId/clientSecret 方式失败自动回退 clientBiz），
-      access_token 走查询串（app_id/kdt_id/access_token），Extra-Data 与 Cookie 细节照源脚本保留。
+说明：该小程序登录依赖「已绑定手机号的阿里云账号」。若 authLogin 返回
+      state=register，需先在小程序内完成手机号/阿里云账号授权注册；
+      返回 state=identityVerify 表示阿里云对本次静默登录下发了安全验证挑战，
+      脚本不会代过风控验证。可用环境变量 wuying_token（格式 LoginToken#SessionId，
+      从小程序已登录会话抓取）作为逃生口，脚本会用 RefreshLoginToken 自动续期。
 
 环境变量：
   PLUSPLUS_TOKEN    PushPlus token，可选
@@ -39,6 +44,9 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
   PROXY_API         品赞代理提取 API，可选
   PROXY_TYPE        http / socks5，默认 http
   CODE_SERVER       本地 code 服务地址，默认 127.0.0.1:8088
+  YYB_SERVER        YYB 账号基座，格式「地址@账号ID」，每行一个
+  YYB_ONLY_REFS     账号序号白名单（1 起，按 YYB_SERVER 行序），见脚本顶部硬编码常量，留空跑全部
+  wuying_token      手动会话逃生口，多账号按账号顺序用换行或 & 分割
 
 依赖：
   pip install requests
@@ -52,9 +60,10 @@ import os
 import random
 import time
 import traceback
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 import requests
 # ========== 账号分隔标识 ==========
@@ -69,9 +78,9 @@ def log_startup(total: int = 0) -> None:
 SCRIPT_VER = "2026-10-29a"
 ACC_RULE = "=" * 70
 
-# ========== 统一日志：[LEVEL] [STORM] message ==========
+# ========== 统一日志：[LEVEL] [WY] message ==========
 def _emit(level, msg):
-    line = "[%s] [STORM] %s" % (level, msg)
+    line = "[%s] [WY] %s" % (level, msg)
     print(line, flush=True)
 
 
@@ -88,8 +97,8 @@ def err(msg):
 
 
 
-APP_NAME = "影视飓风"
-APPID = "wx92782ef90ebc836d"
+APP_NAME = "无影云电脑小程序"
+APPID = "wx66f97ce0a56f08c7"
 
 SERVERS = [
     "127.0.0.1:8088",
@@ -101,6 +110,9 @@ if os.getenv("CODE_SERVER"):
 PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
 PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+YYB_ONLY_REFS = []
 
 PROXY_RETRY_TIMES = 3
 PROXY_VALIDATE_URL = "http://httpbin.org/ip"
@@ -133,38 +145,55 @@ YYB_TIMEOUT = (10, 90)
 #   - 404 / 409（账号不存在/失效）：不可恢复 → 不重试
 #   - 502 且带上游错误码（-14 等授权拒绝）：重试无用 → 不重试
 # 间隔需大于 YYB 的取码最小间隔（YYB_CODE_MIN_GAP=3s），否则会被限速。
-YYB_RETRY_TIMES = int(os.getenv("STORMCREW_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
-YYB_RETRY_DELAY = int(os.getenv("STORMCREW_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
+YYB_RETRY_TIMES = int(os.getenv("WUYINGCOM_YYB_RETRY", "5") or 5)      # 额外重试次数（不含首次）
+YYB_RETRY_DELAY = int(os.getenv("WUYINGCOM_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
 
 
-BASE_URL = "https://h5.youzan.com"
-AUTH_URL = f"{BASE_URL}/wscshop/weapp/authorize.json"
-CHECKIN_PAGE_URL = f"{BASE_URL}/wscump/checkin/show_checkin_page_v2.json"
-CHECKIN_URL = f"{BASE_URL}/wscump/checkin/checkinV2.json"
-POINTS_URL = f"{BASE_URL}/wscump/integral/user_points.json"
+# 阿里云账号 OAuth (SDK env=prod -> account.aliyun.com), 静默登录接口
+OAUTH_BASE = "https://account.aliyun.com"
+AUTHLOGIN_URL = f"{OAUTH_BASE}/weixin/authLogin.html"
+# 账号服务 (换取 LoginToken/SessionId)
+ACCOUNT_EP = "https://appstream-center.cn-shanghai.aliyuncs.com"
+ACCOUNT_VER = "2022-11-22"
+# 桌面服务 (用户/活动/签到)
+DESKTOP_EP = "https://wuying-personal-pc.cn-hangzhou.aliyuncs.com"
+DESKTOP_VER = "2022-10-01"
+APP_VERSION_INFO = "20260112"          # genOpenApiUrl 内置 AppVersionInfo
+FROM_CLIENT = "miniapp_weixin"
+# 阿里云 OpenAPI 业务成功标识 (desktop/account 业务接口: Code==="success")
+BIZ_OK = "success"
+# 会话失效 -> 需重新登录
+SESSION_INVALID = ("User.LoginInvalid", "InvalidLoginToken.Missing", "NOT_LOGIN")
+# 签到活动标识 (HAR 实测: DescribeCheckInActivity / DescribeUserCheckInInfo / CreateUserCheckIn 均用 Activity=check-in)
+CHECKIN_ACTIVITY = "check-in"
 
-CLIENT_ID = "4d65249d377b2c3ed8"
-CLIENT_SECRET = "1cdc05151d64f3a4a6ebd0e9de64422a"
-GRANT_TYPE = "yz_union"
-CLIENT_BIZ = "weapp_wsc"
-KDT_ID = "149536603"
-USER_VERSION = "2.226.7.101"
-PAGE_VERSION = "17"
+# 手动会话逃生口: wuying_token = "LoginToken#SessionId", 按账号顺序换行/& 分割
+_manual_session_lines = [
+    x.strip()
+    for x in (os.getenv("wuying_token") or os.getenv("WUYING_TOKEN") or "").replace("&", "\n").splitlines()
+    if x.strip()
+]
+MANUAL_SESSIONS: Dict[str, str] = {server: value for server, value in zip(SERVERS, _manual_session_lines)}
 
-COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ysjfcookie.json")
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wuyingcookie.json")
 
 # 每日任务完成标记：记录「今天这个账号已经完整跑完」，避免同一天重复调用。
 # 结构：{ "<server>": {"date": "2026-11-07", "doneTime": "...", "note": "签到成功"} }
 # 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
-DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stormcrew_daily_done.json")
+DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wuying_daily_done.json")
+
+# ===================== 积分过期提醒 =====================
+# 每年 3/6/9/12 月的月底前七天检查并连续提醒；即将过期积分 = 现有总积分。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_MONTHS = (3, 6, 9, 12)
+EXPIRE_REMIND_DAYS = 7
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) MicroMessenger/3.9.12 MiniProgramEnv/Windows WindowsWechat/WMPF"
+    "Mozilla/5.0 (Linux; Android 13; SM-G9910 Build/TP1A.220624.014) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36 "
+    "MicroMessenger/8.0.49.2600(0x28003137) NetType/WIFI Language/zh_CN "
+    "miniProgram/" + APPID
 )
-
-SESSION_ID = ""
-COOKIE_HEADER = ""
 
 
 def now_text() -> str:
@@ -172,6 +201,29 @@ def now_text() -> str:
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
 
+
+
+def _dt_now() -> datetime:
+    """北京时间（与服务端签到日历口径一致）。"""
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+def in_expire_window() -> bool:
+    """是否处于积分过期提醒窗口（3/6/9/12 月的月底前三天，含月底当天）。"""
+    if not ENABLE_EXPIRE_REMIND:
+        return False
+    now = _dt_now()
+    if now.month not in EXPIRE_REMIND_MONTHS:
+        return False
+    last_day = 31 if now.month == 12 else 30
+    return now.day > last_day - EXPIRE_REMIND_DAYS
+
+
+def expire_deadline() -> str:
+    """本次窗口对应的积分过期日（当月末日）。"""
+    now = _dt_now()
+    last_day = 31 if now.month == 12 else 30
+    return "%d-%02d-%02d" % (now.year, now.month, last_day)
 
 
 def sleep(seconds: float) -> None:
@@ -204,17 +256,10 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
     return resp.get("data") or {}
 
 
-def mask_phone(phone: Any) -> str:
-    phone = str(phone or "")
-    if len(phone) == 11 and phone.isdigit():
-        return f"{phone[:3]}****{phone[7:]}"
-    return phone
-
-
 def log_title() -> None:
     print()
     log(ACC_RULE)
-    log("🎬 影视飓风小程序动态 code 版")
+    log("☁️ 无影云电脑动态 code 版")
     log(f"🕒 启动时间: {now_text()}")
     log(f"🔢 账号数量: {len(SERVERS)}")
     log(ACC_RULE)
@@ -447,212 +492,228 @@ def get_code(server: str) -> str | None:
         return None
 
 
-def common_headers(session_id: str = "") -> Dict[str, str]:
+def common_headers() -> Dict[str, str]:
     headers = {
         "User-Agent": USER_AGENT,
-        "Content-Type": "application/json",
         "Accept": "*/*",
         "xweb_xhr": "1",
-        "Referer": f"https://servicewechat.com/{APPID}/{PAGE_VERSION}/page-frame.html",
+        "Referer": f"https://servicewechat.com/{APPID}/0/page-frame.html",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Extra-Data": json.dumps(
-            {
-                "sid": session_id or "",
-                "version": USER_VERSION,
-                "clientType": "weapp-miniprogram",
-                "client": "weapp",
-                "bizEnv": "wsc",
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
     }
-    if COOKIE_HEADER:
-        headers["Cookie"] = COOKIE_HEADER
     return headers
 
 
-def base_params(token: str, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """有赞 wsc 契约：access_token 走查询串（照源脚本 getBaseParams）"""
-    params: Dict[str, Any] = {
-        "app_id": APPID,
-        "kdt_id": KDT_ID,
-        "access_token": token or "",
+# ====================== 阿里云 OpenAPI（复刻 genOpenApiUrl，客户端签名已禁用故无需签名） ======================
+def open_api(
+    server: str,
+    endpoint: str,
+    action: str,
+    version: str,
+    params: Dict[str, Any],
+    proxies: Dict[str, str] | None,
+    method: str = "GET",
+) -> Dict[str, Any]:
+    q = {
+        "Action": action,
+        "Format": "JSON",
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": uuid.uuid4().hex,
+        "SignatureVersion": "1.0",
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "Version": version,
+        "From": FROM_CLIENT,
+        "AppVersionInfo": APP_VERSION_INFO,
     }
-    if extra:
-        params.update(extra)
-    return params
-
-
-def capture_cookies(response: requests.Response) -> None:
-    """照源脚本：把响应 Set-Cookie 的首段串起来，后续请求带回"""
-    global COOKIE_HEADER
-    try:
-        cookies = response.raw.headers.getlist("Set-Cookie")  # type: ignore[attr-defined]
-    except Exception:
-        cookies = []
-    if not cookies:
-        single = response.headers.get("Set-Cookie") or response.headers.get("set-cookie")
-        cookies = [single] if single else []
-    parts = []
-    for item in cookies:
-        seg = str(item).split(";")[0].strip()
-        if seg:
-            parts.append(seg)
-    if parts:
-        COOKIE_HEADER = "; ".join(parts)
-
-
-def extract_token(data: Any) -> str | None:
-    if not isinstance(data, dict):
-        return None
-
-    candidates = [
-        data.get("token"),
-        data.get("accessToken"),
-        data.get("access_token"),
-        data.get("jwt"),
-    ]
-
-    inner = data.get("data")
-    if isinstance(inner, dict):
-        candidates.extend([
-            inner.get("token"),
-            inner.get("accessToken"),
-            inner.get("access_token"),
-            inner.get("jwt"),
-        ])
-
-        user = inner.get("user")
-        if isinstance(user, dict):
-            candidates.extend([
-                user.get("token"),
-                user.get("accessToken"),
-                user.get("access_token"),
-                user.get("jwt"),
-            ])
-
-    for item in candidates:
-        if item and item != "null":
-            return str(item)
-
-    return None
-
-
-def extract_session_id(data: Any) -> str:
-    if not isinstance(data, dict):
-        return ""
-    for key in ("sessionId", "session_id"):
-        if data.get(key):
-            return str(data[key])
-    inner = data.get("data")
-    if isinstance(inner, dict):
-        for key in ("sessionId", "session_id"):
-            if inner.get(key):
-                return str(inner[key])
-    return ""
-
-
-def extract_user_desc(data: Any) -> str:
-    """从授权响应提取昵称+脱敏手机号（照源脚本登录成功日志）"""
-    if not isinstance(data, dict):
-        return "未知"
-    src = data.get("data") if isinstance(data.get("data"), dict) else data
-    nick = src.get("nick_name") or src.get("nickName") or ""
-    mobile = mask_phone(src.get("mobile") or "")
-    desc = f"{nick} {mobile}".strip()
-    return desc or "未知"
-
-
-def is_token_error(message: str) -> bool:
-    text = str(message or "").lower()
-    return any(word in text for word in ("access_token", "token", "登录", "授权", "invalid session", "session"))
-
-
-def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
-    try:
-        global SESSION_ID
-        log("🔐 [登录] 使用 code 换 token")
-
-        def _authorize(payload: Dict[str, Any]) -> Dict[str, Any]:
-            response = request_with_proxy(
-                "POST",
-                AUTH_URL,
-                headers=common_headers(),
-                json={**payload, "code": code},
-                proxies=proxies,
-                server=server,
-            )
-            capture_cookies(response)
-            try:
-                return response.json()
-            except Exception:
-                return {"raw": response.text[:800]}
-
-        # 源脚本：先试 clientId/clientSecret/grantType，失败回退 clientBiz
-        data = _authorize({
-            "appId": APPID,
-            "clientId": CLIENT_ID,
-            "clientSecret": CLIENT_SECRET,
-            "grantType": GRANT_TYPE,
-        })
-        if not extract_token(data):
-            warn("🔁 [登录] 主授权方式未取得 token，改用 clientBiz 重试")
-            data = _authorize({
-                "appId": APPID,
-                "clientBiz": CLIENT_BIZ,
-            })
-
-        token = extract_token(data)
-        if not token:
-            err(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
-            return None, data
-
-        SESSION_ID = extract_session_id(data)
-        log(f"✅ [登录] token 获取成功: {mask(token)}")
-        return token, data
-    except Exception as exc:
-        err(f"❌ [登录] 请求异常: {exc}")
-        return None, None
-
-
-def api_get(server: str, url: str, token: str, proxies: Dict[str, str] | None, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    response = request_with_proxy(
-        "GET",
-        url,
-        headers=common_headers(SESSION_ID),
-        params=base_params(token, params),
-        proxies=proxies,
-        server=server,
-    )
-    capture_cookies(response)
+    q.update({k: v for k, v in params.items() if v is not None})
+    url = f"{endpoint}?{urlencode(sorted(q.items()))}"
+    headers = common_headers()
+    if method.upper() == "POST":
+        # 小程序真实 POST 会把同一组参数再放进 JSON body (HAR 实测), 这里 query + body 双写
+        post_headers = dict(headers)
+        post_headers["Content-Type"] = "application/json"
+        response = request_with_proxy("POST", url, headers=post_headers, json=q, proxies=proxies, server=server)
+    else:
+        response = request_with_proxy("GET", url, headers=headers, proxies=proxies, server=server)
     try:
         return response.json()
     except Exception:
-        return {
-            "code": -1,
-            "msg": f"JSON解析失败: {response.text[:300]}",
-        }
+        return {"Code": "JSON_PARSE_FAIL", "Message": f"JSON解析失败: {response.text[:300]}"}
 
 
-def api_post(server: str, url: str, token: str, proxies: Dict[str, str] | None, payload: Dict[str, Any], params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def biz_ok(resp: Dict[str, Any]) -> bool:
+    """业务接口 Code==="success" 视为成功"""
+    node = resp if isinstance(resp, dict) else {}
+    return str(node.get("Code")) == BIZ_OK
+
+
+def biz_code(resp: Dict[str, Any]) -> Any:
+    return (resp or {}).get("Code")
+
+
+def is_session_invalid(resp: Dict[str, Any]) -> bool:
+    return str((resp or {}).get("Code")) in SESSION_INVALID
+
+
+def inner_node(resp: Dict[str, Any]) -> Dict[str, Any]:
+    node = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    return node if isinstance(node, dict) else {}
+
+
+def aliyun_authlogin(server: str, code: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+    """POST {OAUTH_BASE}/weixin/authLogin.html?code=..&appId=.. -> 响应 data 节点。
+
+    state: loginSuccess=已绑定(有 st) / register=未绑定阿里云账号(需注册)
+           identityVerify=安全验证挑战 / 其它=异常。
+    """
+    qs = urlencode({"code": code, "appId": APPID})
+    headers = {**common_headers(), "Content-Type": "application/x-www-form-urlencoded"}
     response = request_with_proxy(
         "POST",
-        url,
-        headers=common_headers(SESSION_ID),
-        json=payload,
-        params=base_params(token, params),
+        f"{AUTHLOGIN_URL}?{qs}",
+        headers=headers,
+        data=b"",
         proxies=proxies,
         server=server,
     )
-    capture_cookies(response)
     try:
-        return response.json()
+        body = response.json()
     except Exception:
-        return {
-            "code": -1,
-            "msg": f"JSON解析失败: {response.text[:300]}",
-        }
+        return {"state": None, "message": f"响应解析失败: {response.text[:300]}"}
+    node = body.get("data") if isinstance(body.get("data"), dict) else body
+    return node or {}
+
+
+def get_login_token(server: str, st: str, proxies: Dict[str, str] | None) -> Tuple[str, str]:
+    """st -> GetLoginTokenByAuthCode -> {LoginToken, SessionId}。成功时 Code 为空。"""
+    resp = open_api(server, ACCOUNT_EP, "GetLoginTokenByAuthCode", ACCOUNT_VER, {
+        "AuthCode": st,
+        "AccountType": "aliyun",
+        "Scene": "WEIXIN_MINI_APP_AUTO_LOGIN",
+        "ClientType": FROM_CLIENT,
+    }, proxies)
+    node = inner_node(resp)
+    if node.get("Code"):  # 登录类接口: 有 Code 即失败
+        raise RuntimeError(f"换取登录凭证失败: {node.get('Code')} {node.get('Message', '')}")
+    lt, sid = node.get("LoginToken"), node.get("SessionId")
+    if not (lt and sid):
+        raise RuntimeError("换取登录凭证响应缺少 LoginToken/SessionId")
+    return lt, sid
+
+
+def refresh_login_token(server: str, login_token: str, session_id: str, proxies: Dict[str, str] | None) -> Tuple[str, str] | None:
+    """RefreshLoginToken: 复用缓存会话。失败返回 None。"""
+    try:
+        resp = open_api(server, ACCOUNT_EP, "RefreshLoginToken", ACCOUNT_VER, {
+            "LoginToken": login_token,
+            "SessionId": session_id,
+            "ClientId": f"{session_id}0000",
+            "ClientType": FROM_CLIENT,
+        }, proxies)
+        node = inner_node(resp)
+        if node.get("Code"):
+            return None
+        lt = node.get("LoginToken") or login_token
+        sid = node.get("SessionId") or session_id
+        return lt, sid
+    except Exception:
+        return None
+
+
+# ====================== 签到（HAR 实测接口） ======================
+# 签到页是独立的 check-in 活动，不出现在 DescribeUserBenefitActivities /
+# DescribeOperationActivities 的活动列表里 —— 旧版「从活动列表找 ActivityId」的思路
+# 永远定位不到，这就是日志里「未能定位每日签到活动」的根因。
+# 正确链路：DescribeCheckInActivity(活动配置) → DescribeUserCheckInInfo(签到日历) → CreateUserCheckIn(执行)
+
+
+def describe_checkin_activity(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+    """GET DescribeCheckInActivity: 签到活动配置（每日/额外奖励规则）。"""
+    return open_api(server, DESKTOP_EP, "DescribeCheckInActivity", DESKTOP_VER, {
+        "LoginToken": lt,
+        "SessionId": sid,
+        "Activity": CHECKIN_ACTIVITY,
+    }, proxies)
+
+
+def describe_user_checkin_info(server: str, lt: str, sid: str, proxies: Dict[str, str] | None,
+                              days_before: int = 3, days_after: int = 3) -> Dict[str, Any]:
+    """GET DescribeUserCheckInInfo: 签到日历（每天 Available / Finished / Missed / Pending）。"""
+    return open_api(server, DESKTOP_EP, "DescribeUserCheckInInfo", DESKTOP_VER, {
+        "LoginToken": lt,
+        "SessionId": sid,
+        "Activity": CHECKIN_ACTIVITY,
+        "DaysBefore": days_before,
+        "DaysAfter": days_after,
+    }, proxies)
+
+
+def create_user_checkin(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Dict[str, Any]:
+    """POST CreateUserCheckIn: 执行一次签到。"""
+    return open_api(server, DESKTOP_EP, "CreateUserCheckIn", DESKTOP_VER, {
+        "LoginToken": lt,
+        "SessionId": sid,
+        "Activity": CHECKIN_ACTIVITY,
+    }, proxies, method="POST")
+
+
+def total_points(server: str, lt: str, sid: str, proxies: Dict[str, str] | None) -> Optional[float]:
+    """当前总积分 = DescribeCorePackageList 的 CorePackageInfo.SummaryRemainingCoreHours；失败返回 None。"""
+    try:
+        resp = open_api(server, DESKTOP_EP, "DescribeCorePackageList", DESKTOP_VER, {
+            "LoginToken": lt,
+            "SessionId": sid,
+        }, proxies)
+        node = resp.get("CorePackageInfo") if isinstance(resp, dict) else None
+        if not isinstance(node, dict):
+            return None
+        val = node.get("SummaryRemainingCoreHours")
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def checkin_data(resp: Dict[str, Any]) -> Dict[str, Any]:
+    """阿里云 OpenAPI 的业务数据块在 Data 字段。"""
+    data = resp.get("Data") if isinstance(resp, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def beijing_today() -> str:
+    """服务端签到日历按北京时间。"""
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
+def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, str | None]:
+    """authLogin → GetLoginTokenByAuthCode。返回 (login_token, session_id, state)。"""
+    log("🔐 [登录] 使用 code 静默登录阿里云账号")
+    node = aliyun_authlogin(server, code, proxies)
+    state = node.get("state")
+    st = node.get("st")
+    if state == "loginSuccess" and st:
+        lt, sid = get_login_token(server, st, proxies)
+        log(f"✅ [登录] LoginToken 获取成功: {mask(lt)}")
+        return lt, sid, "ok"
+
+    if state in ("register", "NeedOAuth", None):
+        err("❌ [登录] 该微信身份尚未绑定阿里云账号")
+        return None, None, ("该微信身份尚未绑定阿里云账号, 需先在小程序「无影云电脑→我的→"
+                            "签到/登录」完成手机号授权并绑定阿里云账号后才能签到")
+    if state in ("identityVerify", "IV"):
+        # 这不是「实名认证」——已实名的账号同样会收到。阿里云对本次静默登录下发了
+        # 一次性「安全验证/身份核验」挑战, 脚本不代为完成、也不绕过。
+        # 实测: 换 scene/loginType/redirectURL 等参数均无效, 该挑战按【微信账号】记录,
+        # 与设备无关 —— 只能在那个微信号上完成一次验证。
+        err("❌ [登录] 阿里云对本次静默登录下发了安全验证挑战(identityVerify)")
+        log("   → 挑战按【微信账号】记录, 与设备无关: 在手机用【同一个微信号】完成一次安全验证,")
+        log("     之后本脚本用该号的 code 静默登录即可通过。")
+        log("   → 若小程序里点登录没弹验证, 说明本地还留着旧会话: 先「我的→退出登录」或删掉")
+        log("     小程序清缓存, 再重新登录就会走授权流程并弹出验证。")
+        return None, None, ("阿里云下发『安全验证』挑战(state=identityVerify, 与实名认证无关)。"
+                            "解法: 用同一个微信号在手机小程序退出登录后重新登录并完成安全验证"
+                            "(挑战按微信账号记录, 完成后脚本可自动登录); "
+                            "或临时填 wuying_token(LoginToken#SessionId, 实测约半天即过期)")
+    err(f"❌ [登录] 登录状态异常(state={state})")
+    return None, None, f"登录状态异常(state={state}), 请在小程序内手动登录一次后重试"
 
 
 # ====================== Token缓存管理 ======================
@@ -713,7 +774,16 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, note: str = "") -> None:
+def expire_points_from_done(server: str) -> Optional[float]:
+    """读取打标缓存里的即将过期积分（当天第二轮被跳过时用于继续提醒）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return None
+    val = entry.get("expirePoints")
+    return float(val) if val is not None else None
+
+
+def mark_done_today(server: str, note: str = "", expirePoints: Optional[float] = None) -> None:
     """记录该账号今天已完成。"""
     cache = load_daily_done()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -724,6 +794,7 @@ def mark_done_today(server: str, note: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "note": str(note or ""),
+        "expirePoints": expirePoints,
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
@@ -753,143 +824,70 @@ def get_cached_token(server: str) -> str | None:
     return None
 
 
-def get_cached_extra(server: str) -> Dict[str, str]:
+def get_cached_session_id(server: str) -> str:
     cache = load_token_cache()
     data = cache.get(server)
     if isinstance(data, dict):
-        return {
-            "sessionId": str(data.get("sessionId") or ""),
-            "cookie": str(data.get("cookie") or ""),
-        }
-    return {"sessionId": "", "cookie": ""}
+        return str(data.get("sessionId") or "")
+    return ""
 
 
-def set_cached_token(server: str, token: str, expire_time: str, extra: Dict[str, Any] | None = None) -> None:
+def set_cached_token(server: str, token: str, expire_time: str, session_id: str = "") -> None:
     cache = load_token_cache()
-    entry: Dict[str, Any] = {"token": token, "expireTime": expire_time, "updateTime": datetime.now().isoformat()}
-    if extra:
-        entry.update(extra)
-    cache[server] = entry
+    cache[server] = {
+        "token": token,
+        "sessionId": session_id,
+        "expireTime": expire_time,
+        "updateTime": datetime.now().isoformat(),
+    }
     save_token_cache(cache)
 
 
-def clear_cached_token(server: str) -> None:
-    try:
-        cache = load_token_cache()
-        if server in cache:
-            del cache[server]
-            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            log(f"🗑️ [缓存] 已清除 {server} 失效 token")
-    except Exception as exc:
-        warn(f"⚠️ [缓存] 清除失败: {exc}")
+def remove_cached_token(server: str) -> None:
+    cache = load_token_cache()
+    if cache.pop(server, None) is not None:
+        save_token_cache(cache)
 
 
-def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str | None, Dict[str, Any] | None]:
-    """优先使用缓存 token（签到页接口验证），失效自动 code 刷新"""
-    global SESSION_ID, COOKIE_HEADER
-    cache_token = get_cached_token(server)
-    if cache_token:
-        extra = get_cached_extra(server)
-        SESSION_ID = extra.get("sessionId", "")
-        COOKIE_HEADER = extra.get("cookie", "")
-        log("🔍 [缓存] 验证 token")
-        try:
-            page_resp = api_get(server, CHECKIN_PAGE_URL, cache_token, proxies)
-            if page_resp.get("code") == 0:
-                log("✅ [缓存] token 有效")
-                return cache_token, None
-        except Exception as exc:
-            warn(f"⚠️ [缓存] 验证异常: {exc}")
-        SESSION_ID = ""
-        COOKIE_HEADER = ""
-        warn("⚠️ [缓存] token 已失效，重新登录")
+def login_with_cache(server: str, proxies: Dict[str, str] | None, force: bool = False) -> Tuple[str | None, str | None, str | None]:
+    """会话获取: 手动会话 -> 缓存(RefreshLoginToken 续期兼验证) -> code 静默登录。
+    返回 (login_token, session_id, state)。state 为 'ok' 表示已登录, 其余为说明文案。"""
+    # 0) 手动会话(逃生口): 静默登录被阿里云风控拦下时, 从小程序抓 LoginToken/SessionId
+    manual = MANUAL_SESSIONS.get(server, "")
+    if manual and not force:
+        parts = [p.strip() for p in manual.replace("&", "#").split("#") if p.strip()]
+        if len(parts) >= 2:
+            refreshed = refresh_login_token(server, parts[0], parts[1], proxies)
+            if refreshed:
+                lt, sid = refreshed
+                log(f"✅ [缓存] 使用手动会话(已刷新): {mask(lt)}")
+                set_cached_token(server, lt, datetime.fromtimestamp(time.time() + 24 * 3600).isoformat(), sid)
+                return lt, sid, "ok"
+            warn("⚠️ [缓存] wuying_token 已失效, 回退到静默登录")
+        else:
+            warn("⚠️ [缓存] wuying_token 格式应为 LoginToken#SessionId, 已忽略")
 
+    # 1) 复用缓存并尝试刷新（RefreshLoginToken 成功即验证会话仍有效）
+    if force:
+        remove_cached_token(server)
+    else:
+        cached_token = get_cached_token(server)
+        cached_sid = get_cached_session_id(server)
+        if cached_token and cached_sid:
+            refreshed = refresh_login_token(server, cached_token, cached_sid, proxies)
+            if refreshed:
+                lt, sid = refreshed
+                log(f"✅ [缓存] 会话续期成功: {mask(lt)}")
+                set_cached_token(server, lt, datetime.fromtimestamp(time.time() + 24 * 3600).isoformat(), sid)
+                return lt, sid, "ok"
+            warn("⚠️ [缓存] 会话已失效，重新登录")
+            remove_cached_token(server)
+
+    # 2) 静默登录 (wx.login code -> authLogin)
     code = get_code(server)
     if not code:
-        return None, None
-
-    token, raw_login = login_by_code(server, code, proxies)
-    if not token:
-        return None, raw_login
-
-    expire_time = None
-    if raw_login and isinstance(raw_login, dict):
-        inner = raw_login.get("data")
-        if isinstance(inner, dict):
-            expire_time = inner.get("expireTime") or inner.get("expire_time")
-            expires_in = inner.get("expiresIn")
-            if not expire_time and isinstance(expires_in, (int, float)) and expires_in > 0:
-                expire_time = datetime.fromtimestamp(time.time() + expires_in).isoformat()
-    if not expire_time:
-        expire_time = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
-    elif not isinstance(expire_time, str):
-        expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
-    set_cached_token(server, token, expire_time, {"sessionId": SESSION_ID, "cookie": COOKIE_HEADER})
-    return token, raw_login
-
-
-# ====================== 签到业务（移植自源脚本 Task 类） ======================
-def show_checkin_page(server: str, token: str, proxies: Dict[str, str] | None) -> str:
-    resp = api_get(server, CHECKIN_PAGE_URL, token, proxies)
-    if resp.get("code") != 0:
-        msg = resp.get("msg") or json_preview(resp, 300)
-        if is_token_error(msg):
-            clear_cached_token(server)
-        warn(f"⚠️ [签到] 获取签到活动失败: {msg}")
-        return ""
-    data = safe_data(resp)
-    checkin_id = str(data.get("checkinId") or "")
-    is_show = bool(data.get("isShow"))
-    log(f"📋 [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
-    return checkin_id
-
-
-def do_checkin(server: str, token: str, proxies: Dict[str, str] | None, checkin_id: str) -> str:
-    if not checkin_id:
-        warn("⚠️ [签到] 未获取到 checkinId，跳过签到")
-        return "未获取到 checkinId，跳过签到"
-
-    resp = api_get(server, CHECKIN_URL, token, proxies, params={"checkinId": checkin_id})
-    if resp.get("code") == 0:
-        data = safe_data(resp)
-        awards_list: List[str] = []
-        for item in data.get("list") or []:
-            if not isinstance(item, dict):
-                continue
-            infos = item.get("infos")
-            if isinstance(infos, dict) and infos.get("title"):
-                awards_list.append(str(infos["title"]))
-        awards = "、".join(awards_list)
-        desc = data.get("desc") or ""
-        msg = f"签到成功: {desc}" + (f" {awards}" if awards else "")
-        log(f"✅ [签到] {msg}")
-        return msg
-
-    msg = resp.get("msg") or json_preview(resp, 300)
-    if any(word in msg for word in ("已达最大参与次数", "已签到", "重复签到")):
-        log("✅ [签到] 今日已签到")
-        return "今日已签到"
-    if is_token_error(msg):
-        clear_cached_token(server)
-    err(f"❌ [签到] 签到失败: {msg}")
-    return f"签到失败: {msg}"
-
-
-def get_points(server: str, token: str, proxies: Dict[str, str] | None) -> str:
-    resp = api_get(server, POINTS_URL, token, proxies)
-    if resp.get("code") != 0:
-        msg = resp.get("msg") or json_preview(resp, 300)
-        warn(f"⚠️ [积分] 查询积分失败: {msg}")
-        return f"查询失败: {msg}"
-    data = safe_data(resp)
-    points = data.get("current_points")
-    if points is None:
-        points = data.get("real_points")
-    if points is None:
-        points = "未知"
-    log(f"💰 [积分] 当前积分: {points}")
-    return str(points)
+        return None, None, "code 获取失败"
+    return login_by_code(server, code, proxies)
 
 
 def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
@@ -899,10 +897,9 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "proxyStatus": "未使用代理",
         "proxyIp": "-",
         "token": "-",
-        "userMsg": "-",
         "signMsg": "-",
-        "pointsMsg": "-",
         "error": "",
+        "expirePoints": None,
     }
 
     log_account_header(index, total, server)
@@ -917,21 +914,90 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     log(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
-    token, raw_login = login_with_cache(server, proxies)
-    if not token:
-        result["error"] = f"登录失败: {json_preview(raw_login)}"
+    lt, sid, state = login_with_cache(server, proxies)
+    if not lt:
+        result["error"] = state or "登录失败"
+        warn(f"⚠️ [账号] {result['error']}")
         return result
 
-    result["token"] = mask(token)
-    if raw_login:
-        result["userMsg"] = extract_user_desc(raw_login)
+    result["token"] = mask(lt)
+
+    # 总积分每次都查（DescribeCorePackageList 轻量）
+    pts = total_points(server, lt, sid, proxies)
+    if pts is not None:
+        result["expirePoints"] = pts
+        log(f"💰 [积分] 当前总积分: {pts:g}")
+        # 仅窗口内额外标记"即将过期"日志
+        if in_expire_window():
+            log(f"⏳ [积分] 即将过期积分: {pts:g}")
 
     try:
-        checkin_id = show_checkin_page(server, token, proxies)
-        result["signMsg"] = do_checkin(server, token, proxies, checkin_id)
-        result["pointsMsg"] = get_points(server, token, proxies)
+        # 签到: DescribeCheckInActivity(规则) → DescribeUserCheckInInfo(日历) → CreateUserCheckIn(执行)
+        today = beijing_today()
+        info = describe_user_checkin_info(server, lt, sid, proxies)
+        if is_session_invalid(info):  # 会话失效 -> 强制重登重试一次
+            warn("⚠️ [签到] 会话失效, 重新登录...")
+            lt, sid, state = login_with_cache(server, proxies, force=True)
+            if not lt:
+                result["error"] = state or "重新登录失败"
+                warn(f"⚠️ [账号] {result['error']}")
+                return result
+            result["token"] = mask(lt)
+            info = describe_user_checkin_info(server, lt, sid, proxies)
 
-        result["success"] = True
+        if not biz_ok(info):
+            msg = f"签到状态查询失败: {biz_code(info)}"
+            result["signMsg"] = msg
+            warn(f"⚠️ [签到] {msg}")
+            return result
+
+        act = checkin_data(describe_checkin_activity(server, lt, sid, proxies))
+        if act.get("Title"):
+            log(f"ℹ️ [签到] 活动: {act.get('Title')} · {act.get('SubTitle')}")
+
+        node = checkin_data(info)
+        records = node.get("CheckinRecord") or []
+        today_rec = next((r for r in records if str(r.get("Date")) == today), None)
+        status = str((today_rec or {}).get("Status") or "")
+        summary = node.get("CheckinSummary") or {}
+
+        # 幂等: 今天已签过就不再提交
+        if status == "Finished":
+            msg = (f"今日已签到 (累计 {summary.get('Duration', 0)} 天, "
+                   f"共得 {summary.get('TotalRewardCoreHour', 0)} 核时)")
+            result["signMsg"] = msg
+            log(f"✅ [签到] {msg}")
+            result["success"] = True
+            return result
+
+        if status != "Available":
+            msg = f"今日签到状态为 {status or '未知'}, 未执行签到"
+            result["signMsg"] = msg
+            warn(f"⚠️ [签到] {msg}")
+            return result
+
+        wait_time = random.randint(2, 5)
+        log(f"⏳ [签到] 提交前等待 {wait_time}s")
+        sleep(wait_time)
+
+        resp = create_user_checkin(server, lt, sid, proxies)
+        data = checkin_data(resp)
+        code = str(resp.get("Code"))
+        err_msg = resp.get("Message") or ""
+        if code == BIZ_OK:
+            hours = data.get("RewardCoreHour")
+            title = data.get("Title") or "签到成功"
+            result["signMsg"] = f"{title}" + (f"，获得 {hours} 核时" if hours is not None else "")
+            log(f"🎉 [签到] {result['signMsg']}")
+            result["success"] = True
+        elif any(k in (code + err_msg).lower() for k in ("already", "repeat", "duplicate", "已签", "已参与", "重复")):
+            result["signMsg"] = "今日已签到"
+            log(f"✅ [签到] {result['signMsg']}")
+            result["success"] = True
+        else:
+            result["signMsg"] = f"签到失败: {code} {err_msg}".strip()
+            err(f"❌ [签到] {result['signMsg']}")
+
         return result
 
     except Exception as exc:
@@ -945,7 +1011,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
     fail_count = len(results) - success_count
     skip_count = len(skipped or [])
 
-    content = f"""🎬 影视飓风动态 code 任务结果
+    content = f"""☁️ 无影云电脑签到任务结果
 
 ━━━━━━━━━━━━━━━━━━━━
 🏁 总结：{success_count} 成功 / {fail_count} 失败{' / %d 跳过（今日已完成）' % skip_count if skip_count else ''}
@@ -958,9 +1024,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
 
         content += f"""
 👤 账号 {idx}
-👤 用户：{res["userMsg"]}
 📝 签到：{res["signMsg"]}
-💰 积分：{res["pointsMsg"]}
 {icon} 结果：{"成功" if res["success"] else "失败"}
 """
 
@@ -972,28 +1036,54 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
     return content
 
 
+def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
+    """汇总区打印积分过期提醒；窗口内独立强推，连续多天提醒。"""
+    if not in_expire_window():
+        return
+    hits = [r for r in rows
+            if r and r.get("expirePoints") is not None and float(r.get("expirePoints")) > 0]
+    if not hits:
+        return
+    deadline = expire_deadline()
+    log("⏳ [积分过期提醒]")
+    for r in hits:
+        log(f"   · {r.get('label', '账号')}：{float(r['expirePoints']):g} 积分（{deadline} 过期）")
+    try:
+        body = "\n".join(
+            f"- {r.get('label', '账号')}：{float(r['expirePoints']):g} 积分（{deadline} 过期）" for r in hits
+        )
+        send_pushplus("☁️ 无影云电脑积分即将过期提醒", body)
+    except Exception as exc:
+        warn(f"⚠️ [积分过期提醒] 推送失败: {exc}")
+
+
 def main() -> None:
     log_startup()
     log_title()
 
+    if not SERVERS:
+        log("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
+        return 1
+
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    expire_rows: List[Dict[str, Any]] = []
 
     for index, server in enumerate(SERVERS, 1):
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(server):
             log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
             skipped.append({"server": server})
+            expire_rows.append({"label": f"账号{index}", "expirePoints": expire_points_from_done(server)})
             continue
 
         try:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
-            # 本脚本 result["success"] 恒为 True，签到是否真的成功只体现在 signMsg 里，
-            # 所以只有「签到成功 / 今日已签到」才打标（异常路径已在上面 except 处理，不会走到这）。
-            sign_msg = str(result.get("signMsg", ""))
-            should_mark = bool(result.get("success")) and (
-                sign_msg.startswith("签到成功") or sign_msg == "今日已签到")
+            expire_rows.append({"label": f"账号{index}", "expirePoints": result.get("expirePoints")})
+            # 只有整个流程走完（success=True）才算今日完成
+            should_mark = bool(result.get("success"))
+            note = str(result.get("signMsg", ""))
         except Exception as exc:
             err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
@@ -1002,15 +1092,13 @@ def main() -> None:
                 "proxyStatus": "-",
                 "proxyIp": "-",
                 "token": "-",
-                "userMsg": "-",
                 "signMsg": "-",
-                "pointsMsg": "-",
                 "error": traceback.format_exc().strip(),
             })
         else:
             # 放在 else 里：打标失败不会把已成功的账号误记为失败
             if should_mark:
-                mark_done_today(server, sign_msg)
+                mark_done_today(server, note, result.get("expirePoints"))
 
         if index < len(SERVERS):
             log("⏳ [间隔] 等待 2s 后处理下一个账号")
@@ -1018,12 +1106,25 @@ def main() -> None:
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
-    log("📊 [执行汇总] StormCrew · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
+    log("📊 [执行汇总] 无影云电脑 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
         % (len(SERVERS), success_count, fail_count, len(skipped)))
+    # 汇总类别里打印每个账号的总积分
+    for i, r in enumerate(results, 1):
+        pt = r.get("expirePoints")
+        if pt is not None:
+            log(f"💰 [总积分] 账号{i}：{pt:g}")
+    for i, s in enumerate(skipped, len(results) + 1):
+        pt = expire_points_from_done(s.get("server") or "")
+        if pt is not None:
+            log(f"💰 [总积分] 账号{i}：{pt:g}")
+    try:
+        check_expire_remind(expire_rows)
+    except Exception as exc:
+        warn(f"⚠️ [积分过期提醒] 检查异常: {exc}")
 
     print()
     log(ACC_RULE)
-    log("🏁 影视飓风任务执行完成")
+    log("🏁 无影云电脑任务执行完成")
     log(f"✅ 成功: {success_count}")
     if fail_count:
         err(f"❌ 失败: {fail_count}")
@@ -1034,7 +1135,7 @@ def main() -> None:
     log(f"🕒 结束时间: {now_text()}")
     log(ACC_RULE)
 
-    send_pushplus("🎬 影视飓风任务完成", build_notify(results, skipped))
+    send_pushplus("☁️ 无影云电脑任务完成", build_notify(results, skipped))
     return fail_count
 
 
@@ -1209,6 +1310,21 @@ def _yyb_phone(server, *args, **kwargs):
 
 if _yyb_accounts():
     SERVERS = _yyb_accounts()
+    # 手动会话是按账号顺序绑定的, 必须等 SERVERS 换成 YYB 账号之后再重建映射,
+    # 否则 MANUAL_SESSIONS 的 key 仍是默认的本地 code 地址, 逃生口永远匹配不上。
+    MANUAL_SESSIONS = {server: value for server, value in zip(SERVERS, _manual_session_lines)}
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示全部
+if YYB_ONLY_REFS:
+    _before = len(SERVERS)
+    _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
+    if _wanted:
+        SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
+        log(f"ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(_wanted)}，命中 {len(SERVERS)}/{_before} 个账号")
+    else:
+        warn(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 无效（需为正整数序号），将运行全部账号")
+    if not SERVERS:
+        log(f"🚫 [账号] YYB_ONLY_REFS 指定的序号均超出账号范围（可选账号共 {_before} 个），无任务可执行")
 
 
 _yyb_original_get_code = get_code

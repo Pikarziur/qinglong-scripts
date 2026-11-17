@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  全棉时代
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 54 5,15 * * *
-# 积分有效期：
+# 积分有效期：今年获取的积分明年年底过期；
+# 检测过期积分：每年12/15~12/18检测提醒（过期数=上年获取-上年消耗）
 # =========================================================
 
 # ========== 企业微信推送配置（可选） ==========
@@ -163,6 +164,7 @@ NMP_COMPLETE_TASK_URL = f"{NMP_BASE_URL}/api/purcotton/completetask"
 NMP_CATEGORY_URL = f"{NMP_BASE_URL}/api/new/navigation/category/query"
 NMP_SIGN_INDEX_URL = f"{NMP_BASE_URL}/api/new/member/sign/index"
 NMP_SIGN_IN_URL = f"{NMP_BASE_URL}/api/new/member/sign/signIn"
+NMP_POINT_LIST_URL = f"{NMP_BASE_URL}/api/member/get/point/list"
 
 SG01_LOGIN_URL = f"{SG01_BASE_URL}/api/login"
 SG01_INDEX_URL = f"{SG01_BASE_URL}/api/index"
@@ -215,6 +217,13 @@ COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qmsdcook
 # 跨天自动失效；文件在脚本同目录、非隐藏，面板文件管理里可见/可删。
 DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qmsd_daily_done.json")
 
+# ===================== 积分过期提醒 =====================
+# 今年获取的积分明年年底过期；每月 18 号可双倍抵现，故每年 12/15~12/18 检查并连续提醒。
+# 即将过期积分 = 上年获取合计 - 上年消耗合计（消耗取绝对值，避免负值）。
+ENABLE_EXPIRE_REMIND = True
+EXPIRE_REMIND_START_DAY = 15
+EXPIRE_REMIND_END_DAY = 18
+
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 11; ONEPLUS A6000 Build/RKQ1.201217.002; wv) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile "
@@ -228,6 +237,14 @@ def now_text() -> str:
     # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def in_expire_window() -> bool:
+    """是否处于积分过期提醒窗口（每年 12-15 ~ 12-18，含首尾）。"""
+    if not ENABLE_EXPIRE_REMIND:
+        return False
+    _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
+    return _dt.month == 12 and EXPIRE_REMIND_START_DAY <= _dt.day <= EXPIRE_REMIND_END_DAY
 
 
 
@@ -772,8 +789,8 @@ def is_done_today(server: str) -> bool:
     return str(entry.get("date") or "") == _today()
 
 
-def mark_done_today(server: str, sign_msg: str = "") -> None:
-    """给该账号打上「今日已完成」标记。"""
+def mark_done_today(server: str, sign_msg: str = "", expire_points: Optional[float] = None) -> None:
+    """给该账号打上「今日已完成」标记（同时缓存即将过期积分，供跳过时提醒）。"""
     cache = load_daily_done()
     today = _today()
     # 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -783,9 +800,19 @@ def mark_done_today(server: str, sign_msg: str = "") -> None:
         "date": today,
         "doneTime": now_text(),
         "signMsg": str(sign_msg or ""),
+        "expirePoints": None if expire_points is None else float(expire_points),
     }
     save_daily_done(cache)
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+
+
+def expire_points_from_done(server: str) -> Optional[float]:
+    """从当天打标记录读回即将过期积分（供本次跳过账号的提醒）。"""
+    entry = load_daily_done().get(server)
+    if not isinstance(entry, dict):
+        return None
+    val = entry.get("expirePoints")
+    return None if val is None else float(val)
 
 
 def clear_daily_done(server: str = "") -> None:
@@ -1181,6 +1208,59 @@ def task_list(server: str, token: str, proxies: Dict[str, str] | None) -> List[D
     return today_tasks
 
 
+def point_year_summary(server: str, token: str, proxies: Dict[str, str] | None, year: int) -> Optional[Tuple[float, float]]:
+    """翻页拉取指定自然年的积分流水，返回 (收入合计, 消耗合计绝对值)。"""
+    income = 0.0
+    consumed = 0.0
+    for page in range(1, 41):
+        resp = api_get(server, f"{NMP_POINT_LIST_URL}?pageNum={page}&pageSize=50", token, proxies)
+        rows = resp.get("list") if isinstance(resp, dict) else None
+        if not rows:
+            break
+        for row in rows:
+            created = str(row.get("createdTime") or "")
+            if not created.startswith(f"{year}-"):
+                continue
+            try:
+                val = float(row.get("point") or 0)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                income += val
+            elif val < 0:
+                consumed += abs(val)
+        # 记录按时间倒序，翻到上年之前即可停止
+        oldest = str(rows[-1].get("createdTime") or "")
+        if oldest and oldest < f"{year}-01-01":
+            break
+        try:
+            total_pages = int(resp.get("pages") or 0)
+        except (TypeError, ValueError):
+            total_pages = 0
+        if total_pages and page >= total_pages:
+            break
+    return income, consumed
+
+
+def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
+    """窗口内：即将过期积分 > 0 则汇总打印 + 独立强推（连续 4 天）。"""
+    if not in_expire_window():
+        return
+    hits = [(str(r.get("server") or "账号"), float(r["expirePoints"]))
+            for r in rows
+            if isinstance(r.get("expirePoints"), (int, float)) and r["expirePoints"] > 0]
+    if not hits:
+        return
+    year = datetime.now().year
+    log("⏳ [积分过期提醒]")
+    for server, points in hits:
+        log(f"   · {server}：{points:.2f} 积分（{year}-12-31 过期）")
+    content = "### 全棉时代积分即将过期提醒\n\n"
+    for server, points in hits:
+        content += f"- {server}：{points:.2f} 积分（{year}-12-31 过期）\n"
+    send_pushplus("🌱 全棉时代积分即将过期提醒", content)
+
+
 def pdrw(server: str, token: str, phone: str | None, proxies: Dict[str, str] | None) -> str:
     """根据任务完成情况执行任务（照源脚本 pdrw 分支逻辑）。"""
     today_tasks = task_list(server, token, proxies)
@@ -1237,6 +1317,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
         "signMsg": "-",
         "waterMsg": "-",
         "taskMsg": "-",
+        "expirePoints": None,
         "error": "",
     }
 
@@ -1301,6 +1382,13 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
             warn(f"⚠️ [种棉花] 流程异常(忽略, 不影响签到): {exc}")
             result["waterMsg"] = f"异常已忽略: {exc}"
 
+        # 3. 积分过期提醒：仅 12/15~12/18 查询上年流水，平时不产生额外请求
+        if in_expire_window():
+            summary = point_year_summary(server, token, proxies, datetime.now().year - 1)
+            if summary is not None:
+                result["expirePoints"] = summary[0] - summary[1]
+                log(f"⏳ [积分] 即将过期积分: {result['expirePoints']:.2f}")
+
         result["success"] = True
         return result
 
@@ -1348,20 +1436,23 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    expire_rows: List[Dict[str, Any]] = []
 
     for index, server in enumerate(SERVERS, 1):
         # 今天已打标的账号直接跳过，不再消耗取码/取号配额
         if is_done_today(server):
             log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
             skipped.append({"server": server})
+            expire_rows.append({"server": server, "expirePoints": expire_points_from_done(server)})
             continue
 
         try:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
+            expire_rows.append({"server": server, "expirePoints": result.get("expirePoints")})
             # 只有整个流程走完（success=True）才打标
             if result.get("success"):
-                mark_done_today(server, result.get("signMsg", ""))
+                mark_done_today(server, result.get("signMsg", ""), result.get("expirePoints"))
         except Exception as exc:
             err(f"❌ [主程序] {server} 执行异常: {exc}")
             results.append({
@@ -1384,6 +1475,15 @@ def main() -> None:
     fail_count = len(results) - success_count
     log("📊 [执行汇总] 全面时代 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
         % (len(SERVERS), success_count, fail_count, len(skipped)))
+    # 汇总类别里打印每个账号的总积分（本脚本无独立总积分接口，窗口内用过期积分代替）
+    for i, r in enumerate(results, 1):
+        pt = r.get("expirePoints")
+        if pt is not None:
+            log(f"💰 [总积分] 账号{i}：{pt:.2f}")
+    try:
+        check_expire_remind(expire_rows)
+    except Exception as exc:
+        warn(f"⚠️ [积分过期提醒] 检查异常: {exc}")
 
     print()
     log(ACC_RULE)

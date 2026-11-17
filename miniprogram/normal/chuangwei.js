@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  创维会员中心
-# version: 2026-10-29a
+# version: 2026-11-17a
 # cron: 18 4,14 * * *
-# 积分有效期：未知
+# 积分有效期：自账号注册日起每 365 天清算一次（按各账号实际注册时间）
 =========================================================*/
 
 // ────────────────────────────────────────────
@@ -21,6 +21,11 @@
 //   CHUANGW_APPID / APP_VERSION / SDK_VERSION / APP_PATH / APP_SYSTEM / APP_MODEL
 //                  可选。小程序设备指纹参数，不填用内置默认（iPhone 15 Pro Max / iOS 26.1）
 //   CHUANGW_RUN_TASKS  任务总开关，默认 1（开）；填 0 跳过所有任务只登录
+// 积分过期提醒（2026-11-16a 新增，无需配置）：
+//   规则：自账号注册日起每 365 天清算一次；快过期分 = 本周期（清算日前 365 天）收入 − 支出；
+//         清算日前 7 天（含当天）起提醒，命中即每轮强推一次汇总通知。
+//   注册日从流水里 changeDesc 含「注册」的最早一笔 createdAt 识别（每账号各自算，不硬编码），
+//   结果缓存到 chuangwei_expire_cache.json；窗口外不发任何额外请求。
 // ────────────────────────────────────────────
 
 'use strict';
@@ -73,10 +78,10 @@ function collectError(line) {
     return true;
 }
 
-async function flushNotify(_site, summary, _logger) {
-    // 收尾调用：本次有 ERROR 才推送；未配置或找不到青龙 sendNotify 时只提示一行。
-    // 前两个参数为兼容既有调用点而保留，站点名以 _QN_SITE 为准。
-    if (_qnFlushed || !_qnErrors.length) return false;
+async function flushNotify(_site, summary, _logger, force = false) {
+    // 收尾调用：本次有 ERROR，或 force=true（积分即将过期）才推送，一次运行最多一条。
+    // 未配置或找不到青龙 sendNotify 时只提示一行；站点名以 _QN_SITE 为准。
+    if (_qnFlushed || (!_qnErrors.length && !force)) return false;
     _qnFlushed = true;
     if (!_qnNotify) {
         console.log(_QN_NOMOD);
@@ -87,7 +92,9 @@ async function flushNotify(_site, summary, _logger) {
         return false;
     }
     try {
-        await _qnNotify('【' + _QN_SITE + '】执行出错', (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
+        // 有错仍沿用「执行出错」；仅过期提醒触发时用「执行汇总」，不误报出错
+        const _title = _qnErrors.length ? '执行出错' : '执行汇总';
+        await _qnNotify('【' + _QN_SITE + '】' + _title, (summary ? summary + '\n\n' : '') + _qnErrors.join('\n'));
         return true;
     } catch (e) {
         console.log('[QL] 错误日志推送失败：' + (e && e.message ? e.message : e));
@@ -179,6 +186,18 @@ const YYB_RETRY = 5;        // 取 code 最多尝试次数（含首次）
 const ENV_NAME = 'chuangw';
 const UC_API = 'https://uc-api.skyallhere.com/miniprogram/api';
 const UC_ADMIN = 'https://uc-admin.skyallhere.com/api';
+
+// ── 积分过期提醒（2026-11-16a）──
+// 真机 HAR 核实：GET {UC_API}/v1/score-log/all?type=all&page=N&pageSize=20
+//   响应 code=0, data={ list:[{serialNo, changeDesc, createdAt(+08:00), changeValue}], score, total }
+//   注册日：list 里 changeDesc 含「注册」的最早一笔（真机为「会员注册」+300 分）
+//   收入/支出：changeValue 正为收、负为支
+const EXPIRE_SCORE_URL = `${UC_API}/v1/score-log/all`;
+const SCORE_LOG_PAGE_SIZE = 20;
+const SCORE_LOG_MAX_PAGES = 20;   // 防接口异常时无限翻页（最多约 400 笔）
+const EXPIRE_CYCLE_DAYS = 365;    // 一个清算周期
+const EXPIRE_WARN_DAYS = 7;       // 清算日前 N 天（含当天）开始提醒
+const EXPIRE_CACHE_FILE = path.join(__dirname, 'chuangwei_expire_cache.json');
 
 const APPID = process.env.CHUANGW_APPID || 'wxff438d3c60c63fb6';
 const APP_VERSION = process.env.CHUANGW_APP_VERSION || '8.0.70';
@@ -298,7 +317,7 @@ function is_done_today(key) {
   return String(entry.date || '') === _today();
 }
 
-function mark_done_today(key, note = '') {
+function mark_done_today(key, note = '', expireInfo = null, totalPoints = null) {
   const cache = load_daily_done();
   const today = _today();
   // 只保留当天的记录，跨天自动清理，避免文件无限增长
@@ -312,6 +331,10 @@ function mark_done_today(key, note = '') {
     date: today,
     doneTime: `${today} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`,
     note: String(note || ''),
+    // 缓存本轮查到的过期提醒：当天第二轮被跳过的账号也能输出，不重新登录取码
+    expireInfo: expireInfo && typeof expireInfo === 'object' ? expireInfo : null,
+    // 缓存账户总积分（当前积分）：被跳过时也能在汇总里显示，不重新登录取码
+    totalPoints: (totalPoints === null || totalPoints === undefined) ? null : Number(totalPoints),
   };
   save_daily_done(kept);
   logInfo(`✅ [打标] 今日任务已完成，已记录（${today}）`);
@@ -334,7 +357,7 @@ function logStartup(total) {
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-10-29a';
+const SCRIPT_VER = '2026-11-17a';
 const ACC_RULE = '='.repeat(70);
 function accBanner(idx, total, ident = '') {
   logInfo(ACC_RULE);
@@ -666,6 +689,173 @@ async function getUserByToken(token) {
     method: 'GET',
     headers: commonHeaders({ Authorization: `Bearer ${token}` }),
   });
+}
+
+// ========== 积分过期提醒（2026-11-16a）==========
+// 规则（用户给定）：从账号注册当天起，每 365 天清理一次积分；按各账号自己的注册时间算清算日。
+//   快过期分 = 本周期（清算日前 365 天）的收入 − 支出
+//   清算日前 7 天（含当天）起提醒，命中即每轮强推一次汇总通知。
+// 注册日从 score-log/all 里 changeDesc 含「注册」的最早一笔 createdAt 识别，结果落盘缓存；
+// 窗口外不发任何额外请求。查询异常只打 WARN，不影响签到结果与通知判定。
+
+function parseBjTime(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function bjDateText(d) {
+  // 中国无夏令时：UTC 时间戳 +8h 后取 ISO 前 10 位即北京时间日期
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+function addDays(d, n) {
+  return new Date(d.getTime() + n * 24 * 3600 * 1000);
+}
+
+function dayNumber(dateText) {
+  const [y, m, d] = String(dateText || '').split('-').map(Number);
+  if (!y || !m || !d) return NaN;
+  return Math.floor(Date.UTC(y, m - 1, d) / (24 * 3600 * 1000));
+}
+
+function loadExpireCache() {
+  try {
+    if (_qfs.existsSync(EXPIRE_CACHE_FILE)) {
+      const data = JSON.parse(_qfs.readFileSync(EXPIRE_CACHE_FILE, 'utf8'));
+      if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+    }
+  } catch (e) {
+    logWarn(`⚠️ [积分过期] 读取注册日缓存失败: ${e.message || e}`);
+  }
+  return {};
+}
+
+function saveExpireCache(cache) {
+  try {
+    const tmp = `${EXPIRE_CACHE_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, EXPIRE_CACHE_FILE);
+  } catch (e) {
+    logWarn(`⚠️ [积分过期] 保存注册日缓存失败: ${e.message || e}`);
+  }
+}
+
+function nextClearDate(registerAt, now) {
+  // 注册日 + N×365 天，取「下一次」清算；已过清算时刻则顺延到下个周期
+  const elapsed = Math.floor((now.getTime() - registerAt.getTime()) / (24 * 3600 * 1000));
+  if (elapsed < 0) return null;
+  const n = Math.floor(elapsed / EXPIRE_CYCLE_DAYS) + 1;
+  return addDays(registerAt, n * EXPIRE_CYCLE_DAYS);
+}
+
+async function fetchScoreLogs(token, page) {
+  const url = `${EXPIRE_SCORE_URL}?${new URLSearchParams({
+    type: 'all', page: String(page), pageSize: String(SCORE_LOG_PAGE_SIZE),
+  }).toString()}`;
+  const ret = await httpJson(url, {
+    method: 'GET',
+    headers: commonHeaders({
+      Authorization: `Bearer ${token}`,
+      'App-Path': '/pages-user/user-score/user-score',
+    }),
+    timeout: 20000,
+  });
+  if (!(Number(ret?.code) === 0 || String(ret?.code) === '0')) {
+    throw new Error(`score-log业务码异常(code=${ret?.code ?? '-'})`);
+  }
+  const data = ret?.data || {};
+  return { rows: Array.isArray(data.list) ? data.list : [], total: Number(data.total) || 0 };
+}
+
+async function checkExpiringPoints(token, accountKey) {
+  // 返回 null（不提醒）或 { expire_date, amount, gained, consumed, register_at }
+  const now = new Date();
+  const cache = loadExpireCache();
+  let registerAt = parseBjTime(cache?.[accountKey]?.register_at);
+  let rows = null;
+
+  if (!registerAt) {
+    // 首次：翻全部流水识别注册日，顺带拿到本周期明细
+    rows = [];
+    let total = 0;
+    let page = 1;
+    do {
+      const part = await fetchScoreLogs(token, page);
+      rows.push(...part.rows);
+      total = part.total;
+      if (!part.rows.length) break;
+      page++;
+    } while (page <= Math.min(SCORE_LOG_MAX_PAGES, Math.ceil(total / SCORE_LOG_PAGE_SIZE)));
+
+    let regRow = null;
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      if (!String(r.changeDesc || '').includes('注册')) continue;
+      const t = parseBjTime(r.createdAt);
+      if (t && (!regRow || t < parseBjTime(regRow.createdAt))) regRow = r;
+    }
+    registerAt = regRow ? parseBjTime(regRow.createdAt) : null;
+    if (!registerAt) {
+      // 兜底：取全量最早一笔流水时间
+      for (const r of rows) {
+        const t = parseBjTime(r?.createdAt);
+        if (t && (!registerAt || t < registerAt)) registerAt = t;
+      }
+    }
+    if (!registerAt) {
+      logWarn('⚠️ [积分过期] 未找到注册时间，跳过本次提醒（流水需含「注册」记录）');
+      return null;
+    }
+    cache[accountKey] = { register_at: registerAt.toISOString() };
+    saveExpireCache(cache);
+  }
+
+  const clearDate = nextClearDate(registerAt, now);
+  if (!clearDate) return null;
+  const expireDate = bjDateText(clearDate);
+  // 按「日期」而非精确时刻比较，避免清算时刻未知导致 D-7 / D 当天漏报
+  const daysLeft = dayNumber(expireDate) - dayNumber(bjDateText(now));
+  if (daysLeft < 0 || daysLeft > EXPIRE_WARN_DAYS) return null;
+
+  const cycleStart = addDays(clearDate, -EXPIRE_CYCLE_DAYS);
+  if (!rows) {
+    // 已有注册日缓存：只翻到本周期起点之前的那一页即停，避免每次翻 8 页
+    rows = [];
+    let total = 0;
+    let page = 1;
+    let reachedStart = false;
+    do {
+      const part = await fetchScoreLogs(token, page);
+      total = part.total;
+      if (!part.rows.length) break;
+      for (const r of part.rows) {
+        const t = parseBjTime(r?.createdAt);
+        if (t && t < cycleStart) reachedStart = true;
+        rows.push(r);
+      }
+      if (reachedStart) break;
+      page++;
+    } while (page <= Math.min(SCORE_LOG_MAX_PAGES, Math.ceil(total / SCORE_LOG_PAGE_SIZE)));
+  }
+
+  let gained = 0, consumed = 0;
+  for (const r of rows) {
+    if (!r || typeof r !== 'object') continue;
+    const t = parseBjTime(r.createdAt);
+    if (!t || t < cycleStart || t >= clearDate) continue;
+    const v = Number(r.changeValue);
+    if (!Number.isFinite(v)) continue;
+    if (v > 0) gained += v;
+    else consumed += Math.abs(v);
+  }
+  const amount = Math.max(0, gained - consumed);
+  if (amount <= 0) return null;
+  return { expire_date: expireDate, amount, gained, consumed, register_at: registerAt.toISOString() };
+}
+
+function expireAlertLine(info, idx) {
+  return `💰 积分(${Number(info?.amount || 0).toFixed(2)})即将过期： ${info?.expire_date || ''}（账号${idx}）`;
 }
 
 async function getWdStatus(token) {
@@ -1073,7 +1263,7 @@ async function runDuibaExtraSign(token) {
   }
 }
 
-async function runOne(account, idx) {
+async function runOne(account, idx, state = {}) {
   const { server, ref, note = '' } = account;
   section(`账号${idx}${note ? ` (${note})` : ''}`);
   const code = await getWxCode(server, ref, APPID);
@@ -1086,6 +1276,13 @@ async function runOne(account, idx) {
   logOk('signin成功');
   printTokenInfo(token);
 
+  // 过期提醒独立于任务流程：即使后续任务失败也要能提醒；查询异常只 WARN，不外抛
+  try {
+    state.expireInfo = await checkExpiringPoints(token, `${server}@${ref}`);
+  } catch (e) {
+    logWarn(`⚠️ [积分过期] 查询失败（不影响签到任务）: ${e.message || e}`);
+  }
+
   const profile = await getUserByToken(token);
   if (!(Number(profile?.code) === 0 || String(profile?.code) === '0')) {
     throw new Error(`用户状态验证失败(code=${profile?.code ?? '-'})`);
@@ -1093,6 +1290,7 @@ async function runOne(account, idx) {
   const beforeScore = scoreSnapshot(profile);
   logOk('/v1/get-user 成功');
   logInfo(`执行前积分：${beforeScore.current ?? '接口未返回'}，今日累计：${beforeScore.today ?? '接口未返回'}`);
+  state.totalPoints = beforeScore.current;
 
   if (RUN_TASKS) {
     const taskSummary = await runTasks(token);
@@ -1102,6 +1300,8 @@ async function runOne(account, idx) {
     const afterScore = scoreSnapshot(afterProfile);
     const points = scoreSummary(beforeScore, afterScore);
     logOk(points.replace('💰 ', ''));
+    // 总积分以签到后余额为准
+    state.totalPoints = afterScore.current !== null ? afterScore.current : beforeScore.current;
     return [points, `✅ ${taskSummary}`, `📅 ${signSummary}`].filter(Boolean).join('\n');
   } else {
     logWarn('CHUANGW_RUN_TASKS=0，已跳过全部任务（含兑吧签到）');
@@ -1130,6 +1330,8 @@ async function runOne(account, idx) {
 
   let failed = 0;
   let skipped = 0;
+  const expire_alerts = [];   // [[账号序号, 过期提醒信息], ...]
+  const points_rows = [];     // [[账号序号, 总积分], ...]
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i] || {};
     // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额（并入 skipped 统计）
@@ -1137,14 +1339,24 @@ async function runOne(account, idx) {
     if (is_done_today(doneKey)) {
       logInfo(`⏭️ [打标] 账号 ${i + 1}/${accounts.length} 今日任务已完成，跳过`);
       skipped++;
+      // 当天第二轮被跳过时，从打标缓存读回上午查到的提醒，不重新登录取码
+      const cached = load_daily_done()[doneKey];
+      const info = cached?.expireInfo;
+      if (info && Number(info.amount) > 0) expire_alerts.push([i + 1, info]);
+      // 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
+      const cachedTotal = cached?.totalPoints;
+      if (cachedTotal !== null && cachedTotal !== undefined && Number.isFinite(Number(cachedTotal))) {
+        points_rows.push([i + 1, Number(cachedTotal)]);
+      }
       continue;
     }
     accBanner(i + 1, accounts.length,
       acc.note ? `备注：${acc.note}` : (acc.ref ? `标识：${acc.ref}` : ''));
+    const state = {};
     try {
-      await runOne(accounts[i], i + 1);
+      await runOne(accounts[i], i + 1, state);
       // 整个流程走完（未抛异常）且确实执行了任务，才算今日完成
-      if (RUN_TASKS) mark_done_today(doneKey, '任务完成');
+      if (RUN_TASKS) mark_done_today(doneKey, '任务完成', state.expireInfo, state.totalPoints);
     } catch (e) {
       if (e?.accountSkipped) {
         logWarn(`⚠️ 账号${i + 1}未注册创维小程序，已跳过`);
@@ -1154,16 +1366,30 @@ async function runOne(account, idx) {
         failed++;
       }
     }
+    if (state.expireInfo && Number(state.expireInfo.amount) > 0) {
+      expire_alerts.push([i + 1, state.expireInfo]);
+    }
+    if (state.totalPoints !== null && state.totalPoints !== undefined
+        && Number.isFinite(Number(state.totalPoints))) {
+      points_rows.push([i + 1, Number(state.totalPoints)]);
+    }
     accFooter(i + 1, accounts.length);
   }
   logInfo('='.repeat(70));
   logInfo(`📊 [执行汇总] 创维 · 账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`);
+  // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+  for (const [idx, total] of points_rows) logInfo(`💎 总积分(${total})（账号${idx}）`);
+  // 积分过期提醒：清算日前 7 天内命中即输出，每轮强推一次汇总通知
+  for (const [idx, info] of expire_alerts) logInfo(expireAlertLine(info, idx));
   logInfo('='.repeat(70));
-  // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-  await flushNotify(
-      '创维',
-      `账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`,
-      logInfo,
-  );
+  let notifySummary = `账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`;
+  if (points_rows.length) {
+    notifySummary += '\n' + points_rows.map(([idx, total]) => `账号${idx} 总积分 ${total}`).join(' ｜ ');
+  }
+  if (expire_alerts.length) {
+    notifySummary += '\n' + expire_alerts.map(([idx, info]) => expireAlertLine(info, idx)).join('\n');
+  }
+  // 有 ERROR 或有过期提醒都推送；未配置通知渠道则只提示一行
+  await flushNotify('创维', notifySummary, logInfo, Boolean(expire_alerts.length));
   if (failed > 0) process.exitCode = 1;
 })();
