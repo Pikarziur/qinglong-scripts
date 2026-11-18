@@ -1,7 +1,7 @@
 ﻿# -*- coding: utf-8 -*-
 # =========================================================
 # name:  习酒果园
-# version: 2026-10-29a
+# version: 2026-11-18a
 # cron: 0 */5 * * *
 # =========================================================
 
@@ -279,8 +279,19 @@ def log_startup(total: int = 0) -> None:
     if total:
         log.info("🔢 账号数量: %d" % total)
     log.info(_ACC_RULE)
-SCRIPT_VER = "2026-11-10a"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+
+# ———————————— 接口网络参数 ————————————
+# 业务接口偶发读超时（服务端抖动 / 网络拥塞）曾把整个账号流程打断，
+# 这里统一加网络重试：
+#   - GET 等幂等请求：连接异常 / 读超时 / 5xx 均可重试；
+#   - POST：只重试「请求尚未送达服务端」的连接异常（ConnectTimeout），
+#           读超时不重试 —— 服务端可能已处理成功，重复提交会造成重复副作用（如制酒扣酒曲）。
+API_TIMEOUT = 25       # 单次请求超时（秒）
+API_RETRY = 3          # 幂等请求（GET）最大尝试次数
+API_RETRY_POST = 2     # 非幂等请求（POST）最大尝试次数
+API_RETRY_WAIT = 3     # 重试间隔基数（秒），按尝试次数递增
 
 def acc_banner(idx, total, ident=""):
     """打印账号分隔标识（开始）。"""
@@ -1058,28 +1069,57 @@ class GardenClient:
         x = result.get("target", [0])[0] if "target" in result else result.get("x", 0)
         self._post_raw("/garden/slide_validate/toValidate", {"x": x, "y": 0})
 
+    # ---- 网络层重试 ----
+    @staticmethod
+    def _retryable(method, err):
+        """判断该网络异常是否值得重试。"""
+        m = method.upper()
+        idempotent = m in ("GET", "HEAD", "OPTIONS")
+        if isinstance(err, requests.exceptions.HTTPError):
+            code = err.response.status_code if err.response is not None else 0
+            return code >= 500
+        if isinstance(err, requests.exceptions.ConnectTimeout):
+            return True  # 连接都没建起来，请求肯定没送达，重试绝对安全
+        if idempotent:
+            return True  # 幂等请求：读超时 / 连接中断 / 响应截断都可重试
+        return False     # 非幂等请求：读超时可能服务端已处理，不重试
+
+    def _request(self, method, url, session=None, **kwargs):
+        """带网络重试的请求。业务错误码不在此层处理（由 _handle_response 负责）。"""
+        sess = session or self.session
+        m = method.upper()
+        max_try = API_RETRY if m in ("GET", "HEAD", "OPTIONS") else API_RETRY_POST
+        last_err = None
+        for attempt in range(1, max_try + 1):
+            try:
+                resp = sess.request(m, url, timeout=API_TIMEOUT, **kwargs)
+                resp.raise_for_status()
+                return resp
+            except requests.exceptions.RequestException as e:
+                if not self._retryable(m, e):
+                    raise
+                last_err = e
+            if attempt < max_try:
+                wait = API_RETRY_WAIT * attempt
+                log.warning("   ⚠️  接口网络异常（第 %d/%d 次）：%s，%ds 后重试..." % (
+                    attempt, max_try, last_err, wait))
+                time.sleep(wait)
+        raise last_err
+
     def _get_raw(self, path, params=None):
-        resp = self.session.get(BASE_URL + path, params=params, timeout=15)
-        resp.raise_for_status()
+        resp = self._request("GET", BASE_URL + path, params=params)
         return resp.json().get("data") or resp.json()
 
     def _post_raw(self, path, data=None):
-        resp = self.session.post(BASE_URL + path, json=data or {}, timeout=15)
-        resp.raise_for_status()
+        resp = self._request("POST", BASE_URL + path, json=data or {})
         return resp.json()
 
     def _get(self, path, params=None):
-        url = BASE_URL + path
-        resp = self.session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._request("GET", BASE_URL + path, params=params).json()
         return self._handle_response(body, lambda: self._get(path, params))
 
     def _post(self, path, data=None):
-        url = BASE_URL + path
-        resp = self.session.post(url, json=data or {}, timeout=15)
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._request("POST", BASE_URL + path, json=data or {}).json()
         return self._handle_response(body, lambda: self._post(path, data))
 
     # ---- 认证 ----
@@ -1120,8 +1160,7 @@ class GardenClient:
     def _wine_request(self, method, path, params=None):
         """酿酒 H5 使用 getJwt 的 JWT，与君品荟主 token 独立。"""
         if self._wine_session is None:
-            response = self.session.get(MAIN_BASE_URL + '/Member/getJwt', timeout=15)
-            response.raise_for_status()
+            response = self._request("GET", MAIN_BASE_URL + '/Member/getJwt')
             data = self._handle_response(response.json(), None)
             jwt = data.get('jwt') if isinstance(data, dict) else None
             if not jwt:
@@ -1130,21 +1169,21 @@ class GardenClient:
             self._wine_session.headers.update({'Authorization': jwt,
                                                 'User-Agent': self.session.headers['User-Agent']})
         if method == 'GET':
-            response = self._wine_session.get(BASE_URL + path, params=params or {}, timeout=15)
+            response = self._request("GET", BASE_URL + path, session=self._wine_session,
+                                     params=params or {})
         else:
-            response = self._wine_session.post(BASE_URL + path, data=params or {}, timeout=15)
-        response.raise_for_status()
+            response = self._request("POST", BASE_URL + path, session=self._wine_session,
+                                     data=params or {})
         return self._handle_response(response.json(), None)
     def discharge_grain(self, params=None):
         volumn = (params or {}).get("volumn", 0)
         if APPID == CURRENT_APPID:
             return self._wine_request('POST', '/garden/gardenmemberwine/makeWine', {'volumn': volumn})
-        resp = self.session.post(
-            BASE_URL + "/garden/gardenmemberwine/makeWine",
+        resp = self._request(
+            "POST", BASE_URL + "/garden/gardenmemberwine/makeWine",
             data={"volumn": volumn},
-            headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
         return self._handle_response(resp.json(), lambda: self.discharge_grain(params))
     def harvest_wine(self, params=None):
         if APPID == CURRENT_APPID:
@@ -1154,12 +1193,11 @@ class GardenClient:
         volumn = (data or {}).get("volumn", 0)
         if APPID == CURRENT_APPID:
             return self._wine_request('POST', '/garden/wheat/makeWineYeast', {'volumn': volumn})
-        resp = self.session.post(
-            BASE_URL + "/garden/wheat/makeWineYeast",
+        resp = self._request(
+            "POST", BASE_URL + "/garden/wheat/makeWineYeast",
             data={"volumn": volumn},
-            headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
         return self._handle_response(resp.json(), lambda: self.make_yeast(data))
 
     # ---- 兑换 & 抽奖 ----
@@ -1178,9 +1216,8 @@ class GardenClient:
         if APPID == CURRENT_APPID:
             answer = ''.join(sorted(set(str(selected).replace(',', '').replace(' ', ''))))
             payload = self._encrypt_payload({'itemid': question_id, 'selected': answer})
-            response = self.session.get(BASE_URL + '/garden/Gardenquestiontask/answerResultsJph',
-                                        params=payload, timeout=15)
-            response.raise_for_status()
+            response = self._request("GET", BASE_URL + '/garden/Gardenquestiontask/answerResultsJph',
+                                    params=payload)
             body = response.json()
             # 此接口前端读取完整响应，答题结果可能直接位于 err/msg。
             if body.get('err') not in (None, 0, '0'):
@@ -1191,8 +1228,7 @@ class GardenClient:
         params = {"answer": answer_str}
         params.update(enc)
         url = BASE_URL + "/garden/Gardenquestiontask/answerResults"
-        resp = self.session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
+        resp = self._request("GET", url, params=params)
         return self._handle_response(resp.json(), lambda: self.answer_results(question_id, selected))
 
 # ============================================================
