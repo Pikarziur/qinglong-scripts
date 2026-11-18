@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  谷雨
-# version: 2026-11-18a
+# version: 2026-11-18c
 # cron: 36 4,14 * * *
 # 积分有效期：积分自获取之日起365天内有效，期满次日0点失效【1】
 # 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取积分-上年的消耗积分
@@ -68,17 +68,22 @@ import requests
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
-    log(tls_status_line())
+    _title = "🏷 脚本名称：谷雨"
+    if APPID:
+        _title += " ｜" + APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-18d"
 ACC_RULE = "=" * 70
+# 统一汇总块顶/底分隔线（新风格）
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
-# ========== 统一日志：[LEVEL] [GY] message ==========
+# ========== 统一日志：[LEVEL] message ==========
 def _emit(level, msg):
-    line = "[%s] [GY] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
 
 
@@ -257,6 +262,12 @@ def now_text() -> str:
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _expire_amount(alert: str) -> Optional[float]:
+    """从提醒文本「💰 积分(700.00)即将过期：…」中提取即将过期金额。"""
+    m = re.search(r"积分\(([\d.]+)\)", str(alert or ""))
+    return float(m.group(1)) if m else None
+
+
 
 def sleep(seconds: float) -> None:
     time.sleep(seconds)
@@ -288,17 +299,7 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
     return resp.get("data") or {}
 
 
-def log_title() -> None:
-    print()
-    log(ACC_RULE)
-    log("🌸 谷雨小程序签到动态 code 版")
-    log(f"🕒 启动时间: {now_text()}")
-    log(f"🔢 账号数量: {len(SERVERS)}")
-    log(ACC_RULE)
-
-
 def log_account_header(index: int, total: int, server: str) -> None:
-    print()
     log(ACC_RULE)
     log(f"👤 账号 {index}/{total} ｜ 来源 {server}")
     log(ACC_RULE)
@@ -402,7 +403,6 @@ def validate_proxy(proxies: Dict[str, str] | None) -> Tuple[bool, str]:
 
 def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
     if not PROXY_API:
-        warn(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
         return None, ""
 
     log(f"🌐 [代理] {account_name} 正在获取品赞代理...")
@@ -469,9 +469,8 @@ def request_with_proxy(
 
 
 def send_qywx(title, content):
-    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时自动跳过。"""
+    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时返回 False，不打印日志。"""
     if not QYWX_TOKEN:
-        warn("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
         return False
     key = QYWX_TOKEN.split("key=")[-1].strip()
     import json as _qywx_json, urllib.request as _qywx_urllib
@@ -483,17 +482,16 @@ def send_qywx(title, content):
         req = _qywx_urllib.Request("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + key,
                                    data=payload, headers={"Content-Type": "application/json"})
         res = _qywx_json.loads(_qywx_urllib.urlopen(req, timeout=10).read().decode("utf-8"))
-        ok = res.get("errcode") == 0
-        err("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
-        return ok
-    except Exception as _exc:
-        err("[企业微信] 推送异常:", _exc)
+        return res.get("errcode") == 0
+    except Exception:
         return False
-def send_pushplus(title: str, content: str) -> None:
-    send_qywx(title, content)  # 企业微信推送（QYWX_TOKEN 未配置时自动跳过）
+
+
+def send_pushplus(title: str, content: str) -> bool:
+    """依次尝试各通知渠道，任一成功返回 True；不打印逐渠道日志。"""
+    ok = send_qywx(title, content)
     if not PLUSPLUS_TOKEN:
-        warn("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
-        return
+        return ok
 
     try:
         requests.post(
@@ -506,9 +504,9 @@ def send_pushplus(title: str, content: str) -> None:
             },
             timeout=10,
         )
-        log("✅ [PushPlus] 推送成功")
-    except Exception as exc:
-        err(f"❌ [PushPlus] 推送失败: {exc}")
+        return True
+    except Exception:
+        return ok
 
 
 def get_code(server: str) -> str | None:
@@ -888,7 +886,7 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
         expire_time = datetime.fromtimestamp(expire_time / 1000).isoformat()
     customer_id = fetch_customer_id(server, token, shop_id, proxies)
     if customer_id:
-        log(f"🆔 用户ID(customerId): {customer_id}")
+        log(f"🆔 [用户] ID(customerId): {customer_id}")
     set_cached_token(server, token, expire_time, shop_id, customer_id)
     return token, shop_id, customer_id, raw_login
 
@@ -1107,7 +1105,7 @@ def get_expiring_points(server: str, token: str, shop_id: str, proxies,
     suffix = f"（账号{account_index}）" if account_index else ""
     line = (f"💰 积分({amount:.2f})即将过期： {expire_date}"
             f"{suffix}（上年获取{gained:.2f}-消耗{consumed:.2f}）")
-    log(f"[过期] {line}")
+    log(f"⏳ [过期] {line}")
     return line
 
 
@@ -1134,7 +1132,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     sleep(PROXY_FETCH_INTERVAL)
 
     delay = random.randint(5, 24)
-    log(f"⏳ [延迟] 启动延迟 {delay}s")
+    log(f"🕒 [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
     token, shop_id, customer_id, raw_login = login_with_cache(server, proxies)
@@ -1225,8 +1223,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
 
 
 def main() -> None:
-    log_startup()
-    log_title()
+    log_startup(len(SERVERS))
     _migrate_state_files()
 
     if not SERVERS:
@@ -1276,15 +1273,24 @@ def main() -> None:
                                 result.get("expireAlert", ""))
 
         if index < len(SERVERS):
-            log("⏳ [间隔] 等待 2s 后处理下一个账号")
+            log("🕒 [间隔] 等待 2s 后处理下一个账号")
             sleep(2)
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
-    log("📊 [执行汇总] 谷雨 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
-        % (len(SERVERS), success_count, fail_count, len(skipped)))
 
-    # 总积分汇总（无论是否跳过、任务是否已完成，都在这里显示）
+    # ===== 统一汇总日志（新风格）=====
+    # 即将过期积分块只在第三项按脚本时间触发（窗口内 expireAlert 非空）时打印；
+    # 总积分无论是否跳过、任务是否已完成都列出（跳过账号从打标缓存读回）。
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("🏷 脚本名称：谷雨")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个" % (success_count, fail_count))
+
+    # 总积分：一行并列，账号之间用 "  |  " 分隔
     points_rows = []
     for item in results:
         val = item.get("totalPoints")
@@ -1294,33 +1300,34 @@ def main() -> None:
         val = item.get("totalPoints")
         if val is not None:
             points_rows.append((int(item.get("index") or 0), float(val)))
-    for idx, val in sorted(points_rows):
-        log(f"💎 总积分({val:.2f})（账号{idx}）")
+    points_rows.sort()
+    if points_rows:
+        log("💰 总积分：" + "  |  ".join("账号%d：%.2f" % (idx, val) for idx, val in points_rows))
 
-    # 即将过期积分汇总（打印在汇总区，并随通知推送；含当日被跳过账号的缓存提醒）
-    expire_alerts = [item.get("expireAlert") or "" for item in results if item.get("expireAlert")]
-    expire_alerts += [item.get("expireAlert") or "" for item in skipped if item.get("expireAlert")]
-    if expire_alerts:
-        log("⏳ [即将过期] 12-31 到期的积分（上年获取-上年消耗）：")
-        for alert in expire_alerts:
-            for line in alert.splitlines():
-                log(f"   {line}")
-
-    print()
-    log(ACC_RULE)
-    log("🏁 谷雨小程序任务执行完成")
-    log(f"✅ 成功: {success_count}")
-    if fail_count:
-        err(f"❌ 失败: {fail_count}")
-    else:
-        log(f"✅ 失败: 0")
-    if skipped:
-        log(f"⏭️ 跳过(今日已完成): {len(skipped)}")
-    log(f"🕒 结束时间: {now_text()}")
-    log(ACC_RULE)
+    # 即将过期积分（仅窗口触发时打印）：树状列表，末行用 └─
+    expire_rows = []
+    for item in results:
+        amt = _expire_amount(item.get("expireAlert") or "")
+        if amt is not None:
+            expire_rows.append((int(item.get("index") or 0), amt))
+    for item in skipped:
+        amt = _expire_amount(item.get("expireAlert") or "")
+        if amt is not None:
+            expire_rows.append((int(item.get("index") or 0), amt))
+    expire_rows.sort()
+    expire_alerts = [a for _, a in expire_rows]
+    if expire_rows:
+        log("⏳  即将过期积分：")
+        for _j, (_idx, _amt) in enumerate(expire_rows):
+            _branch = "└─" if _j == len(expire_rows) - 1 else "├─"
+            log("%s 账号%d %s %.2f" % (_branch, _idx, "·" * 20, _amt))
+    log(SUMMARY_SEP)
 
     notify_title = "⏳ 谷雨积分即将过期提醒" if expire_alerts else "🌸 谷雨小程序任务完成"
-    send_pushplus(notify_title, build_notify(results, skipped))
+    if send_pushplus(notify_title, build_notify(results, skipped)):
+        log("📢 通知已发送成功！")
+    else:
+        warn("⚠️ 通知渠道未配置，跳过推送。")
     return fail_count
 
 
