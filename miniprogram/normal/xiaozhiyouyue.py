@@ -150,7 +150,7 @@ def flush_notify(_site=None, summary="", logger=None, force=False, **_kw):
     if _qn_send is None:
         print(_QN_NOMOD, flush=True)
         return False
-    if not any(_os.getenv(_k) for k in _QN_ENVS):
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
         print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
         return False
     _body = ((summary + "\n\n") if summary else "") + "\n".join(_qn_errors)
@@ -174,7 +174,7 @@ def _qn_atexit():
     if _qn_send is None:
         print(_QN_NOMOD, flush=True)
         return
-    if not any(_os.getenv(_k) for k in _QN_ENVS):
+    if not any(_os.getenv(_k) for _k in _QN_ENVS):
         print("[QL] 未配置通知渠道，错误日志未推送（可在青龙「通知设置」或环境变量中配置）", flush=True)
         return
     if _qn_errors:
@@ -484,8 +484,19 @@ def _yyb_error_detail(body) -> str:
     if upstream:
         codes = []
         for item in upstream:
-            if isinstance(item, dict) and item.get("code") is not None:
-                codes.append(str(item.get("code")))
+            if not isinstance(item, dict):
+                continue
+            # ⚠️ 2026-11-18 修正：YYB-GO 的 /wx/h5code 错误体里，
+            #    upstream_errors 的元素字段名是 **upstream_code**（不是 code），
+            #    例如 {"stage":"shortlink_application","upstream_code":-14}。
+            #    原来只读 item["code"] → 取不到码 → 落到兜底的「上游拒绝」，
+            #    丢掉了 -14（该微信未关注公众号）这个可执行信息。
+            #    两个字段名都兼容，避免服务端换版本后又失效。
+            for key in ("upstream_code", "code"):
+                val = item.get(key)
+                if val is not None:
+                    codes.append(str(val))
+                    break
         if codes:
             joined = "/".join(codes)
             if "14" in joined:
