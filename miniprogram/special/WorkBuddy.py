@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  WorkBuddy 签到
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 31 7,12,23 * * *
 # =========================================================
 
@@ -80,6 +80,10 @@ cron: 31 7,12,23 * * *
    WORKBUDDY_STATE_DIR  【可选】状态文件目录（活跃去重 / 礼包补偿防重）；默认脚本同级目录
    PUSH_PLUS_TOKEN / PLUSPLUS_TOKEN / PUSH_KEY / QYWX_KEY / BARK_PUSH
                         【可选】脚本自带通知通道（青龙 notify.py 未配置时回落）
+
+🔧 脚本内部常量（改脚本顶部，非环境变量）
+   YYB_ONLY_REFS        [] = 跑全部；[1,3] = 只跑第 1、3 个账号（按 YYB_SERVER 行序，1 起）
+                        与 --only / WB_ACCOUNT_FILTER 叠加（取交集）
 
 📦 任务清单（参考上游 v3.48，以下任务以实际下发为准）
    ☁️ 已适配成长任务：每日签到 · 设计创意模式 · 探索优秀灵感 · 桌面端对话 ·
@@ -170,6 +174,10 @@ VERSION = "1.9.6"
 UPSTREAM_VERSION = "3.48"
 UPSTREAM_COMMIT = "94e7f14832fc02760e97f641ab0fc9fa30871126"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
+
+# 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示运行全部账号
+# 与其它脚本的 YYB_ONLY_REFS 行为一致；例如 [1,3] 只跑第 1、3 个账号
+YYB_ONLY_REFS = [1]
 LOGIN_URL = "https://www.codebuddy.cn/v2/plugin/login/token"
 PROFILE_URL = "https://www.codebuddy.cn/v2/as/wechatmp/user/profile"
 REFRESH_URL = "https://copilot.tencent.com/v2/plugin/auth/token/refresh"
@@ -6060,6 +6068,17 @@ def main(argv=None):
     except SafeError as exc:
         print("❌ " + str(exc), flush=True)
         return 1
+    # 账号序号白名单：按 YYB_SERVER 书写顺序从 1 开始编号，留空 [] 表示全部
+    if YYB_ONLY_REFS:
+        _before = len(accounts)
+        _wanted = {int(r) for r in YYB_ONLY_REFS if str(r).strip().isdigit() and int(str(r).strip()) > 0}
+        if _wanted:
+            accounts = [a for a in accounts if a.number in _wanted]
+            print("ℹ️ [账号] 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d/%d 个账号" % (sorted(_wanted), len(accounts), _before), flush=True)
+        else:
+            print("⚠️ [账号] YYB_ONLY_REFS=%s 无效（需为正整数序号），将运行全部账号" % (YYB_ONLY_REFS,), flush=True)
+        if not accounts:
+            print("🚫 [账号] YYB_ONLY_REFS 指定序号无匹配（可选账号共 %d 个），无任务可执行" % _before, flush=True)
     total = len(accounts)
     if args.sign_retry_only:
         try:
