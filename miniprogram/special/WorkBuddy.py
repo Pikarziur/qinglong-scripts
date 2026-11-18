@@ -175,6 +175,10 @@ UPSTREAM_VERSION = "3.48"
 UPSTREAM_COMMIT = "94e7f14832fc02760e97f641ab0fc9fa30871126"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
 
+# ———————————— 统一日志样式 ————————————
+ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
 # 账号序号白名单：按 YYB_SERVER 的书写顺序从 1 开始编号，留空 [] 表示运行全部账号
 # 与其它脚本的 YYB_ONLY_REFS 行为一致；例如 [1,3] 只跑第 1、3 个账号
 YYB_ONLY_REFS = [1]
@@ -213,6 +217,66 @@ def _state_dir():
 
 
 STATE_DIR = _state_dir()
+
+# ———————————— 积分每日快照 ————————————
+# 结构：{账号标识: {"YYYY-MM-DD": 总积分}}；同日覆盖＝保留当天最后一次运行数据。
+# 差值严格取「昨天」那一条，取不到就不显示括号，不报错。
+POINTS_HISTORY_FILE = os.path.join(STATE_DIR, "workbuddy_points_history.json")
+
+
+def load_points_history():
+    """读取积分历史；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_points_history(cache):
+    """写积分历史（临时文件 + rename 原子替换）。"""
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception:
+        pass
+
+
+def record_points_snapshot(key, total_points):
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if key is None or total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(key)
+    if not isinstance(days, dict):
+        days = {}
+    days[datetime.datetime.now().strftime("%Y-%m-%d")] = val
+    hist[key] = days
+    save_points_history(hist)
+
+
+def points_delta(key, today_val):
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(key)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 _SETUP_DATA = (
     "eJw9zUEOwiAQheG7sG46hZpGu/UYpgsKJE5aQWEA0Xh3CSZuvsX/kpk3i35nM7sS3cMMkHPus/"
@@ -1809,6 +1873,19 @@ def _sample_credit(s, summary, phase, log):
         summary["credits"] = text
     if value is None:
         log("   ⚠️%s余额查询失败，保留其他业务结果" % ("操作前" if phase == "before" else "操作后"))
+
+def _credits_numeric(summary):
+    """从账号摘要里取总积分数值（优先操作后，其次操作前）；取不到返回 None。"""
+    for key in ("credits_total", "credits_after", "credits_before"):
+        raw = summary.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(_credit_decimal(raw))
+        except (ValueError, InvalidOperation, TypeError):
+            continue
+    return None
+
 
 def _credit_lines(summary):
     if summary.get("query") or summary.get("enterprise") or not any(k in summary for k in ("credits_before", "credits_after")):
@@ -5492,7 +5569,8 @@ def query_account(client, account):
     kind, prof, message = growth_probe(s)
     if kind in ("restricted", "channel"):
         raise SafeError(message)
-    credits, _paid = queryCredits(s)
+    _meta = {}
+    credits, _paid = queryCredits(s, _meta)
     usage = queryUsage(s)
     issues = ["积分查询失败"] if credits.startswith("查询失败") else []
     try:
@@ -5504,6 +5582,7 @@ def query_account(client, account):
         issues.append("签到状态查询失败")
     return {"idx": account.number, "note": account.ref, "query": True,
             "credits": credits, "usage": usage, "level": prof.get("level", "?"),
+            "credits_total": _meta.get("total_remain"),
             "energy": "?", "streak": "?", "checkin_streak": sd.get("streak_days", "?"),
             "done": 0, "total": 0, "rest": [], "checked": checked is True,
             "checked_in": checked is True, "task_errors": issues,
@@ -5803,7 +5882,28 @@ def build_summary(summaries):
     summaries.sort(key=lambda x: x.get("idx", 0))
     total_done = total_tasks = 0
     lines = []
-    lines.append("📊 各账号运行报告")
+    # ── 统一汇总日志（新风格）──
+    _now = datetime.datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    _ok = sum(1 for sm in summaries
+              if not sm.get("error") and not sm.get("task_errors"))
+    _fail = len(summaries) - _ok
+    lines.append(SUMMARY_SEP)
+    lines.append("📂 汇总日志")
+    lines.append("📃 脚本名称：WorkBuddy")
+    lines.append("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    lines.append("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：0 个" % (_ok, _fail))
+    # 总积分：一行并列，括号内为较昨天最后一次记录的涨跌
+    _cells = []
+    for sm in summaries:
+        _val = _credits_numeric(sm)
+        if _val is None:
+            continue
+        _delta = points_delta(sm.get("note") or str(sm.get("idx")), _val)
+        _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+        _cells.append("账号%d：%.2f%s" % (sm.get("idx", 0), _val, _dt))
+    if _cells:
+        lines.append("💰 总积分：" + "  |  ".join(_cells))
     lines.append("")
     for sm in summaries:
         idx = sm.get("idx", 0)
@@ -5879,6 +5979,7 @@ def build_summary(summaries):
             lines.append("   · %s（%d个账号待完成）" % (cn, cnt))
     lines.append("")
     lines.append("🕐 %s" % time.strftime("%Y-%m-%d %H:%M"))
+    lines.append(SUMMARY_SEP)
     return "\n".join(lines)
 
 
@@ -5924,7 +6025,7 @@ def send_notify(title, content):
         if panel_channel:
             try:
                 sender(title, content)
-                print("✅ [通知] 已通过青龙通知模块发送（通道 %s）" % panel_channel, flush=True)
+                print("ℹ️ [通知] 已通过青龙通知模块发送（通道 %s）" % panel_channel, flush=True)
                 return True
             except Exception as exc:
                 print("⚠️ [通知] 青龙通知发送失败（不影响结果）：%s" % str(exc)[:120], flush=True)
@@ -5942,7 +6043,7 @@ def send_notify(title, content):
                                     "template": "txt"}, timeout=20)
             ok = r.status_code == 200 and (r.json().get("code") == 200)
             sent = sent or ok
-            print("%s [通知] PushPlus 发送%s" % ("✅" if ok else "❌", "成功" if ok else "失败"), flush=True)
+            print("📢 [PushPlus]通知已发送成功！" if ok else "❌ [PushPlus]通知发送失败", flush=True)
         except Exception as exc:
             print("❌ [通知] PushPlus 发送失败：%s" % str(exc)[:120], flush=True)
     server_push = (os.getenv("PUSH_KEY", "") or os.getenv("SERVERPUSHKEY", "") or "").strip()
@@ -5951,7 +6052,7 @@ def send_notify(title, content):
             requests.post("https://sctapi.ftqq.com/%s.send" % server_push,
                           data={"title": title, "desp": content}, timeout=15)
             sent = True
-            print("✅ [通知] Server 酱发送成功", flush=True)
+            print("📢 [Server酱]通知已发送成功！", flush=True)
         except Exception as exc:
             print("❌ [通知] Server 酱发送失败：%s" % str(exc)[:120], flush=True)
     qywx = (os.getenv("QYWX_KEY", "") or os.getenv("QYWX_TOKEN", "") or "").strip()
@@ -5961,7 +6062,7 @@ def send_notify(title, content):
                           json={"msgtype": "text", "text": {"content": "%s\n\n%s" % (title, content)}},
                           timeout=15)
             sent = True
-            print("✅ [通知] 企业微信机器人发送成功", flush=True)
+            print("📢 [企业微信]通知已发送成功！", flush=True)
         except Exception as exc:
             print("❌ [通知] 企业微信机器人发送失败：%s" % str(exc)[:120], flush=True)
     bark = (os.getenv("BARK_PUSH", "") or "").strip()
@@ -5969,7 +6070,7 @@ def send_notify(title, content):
         try:
             requests.post(bark.rstrip("/"), json={"title": title, "body": content}, timeout=15)
             sent = True
-            print("✅ [通知] Bark 发送成功", flush=True)
+            print("📢 [Bark]通知已发送成功！", flush=True)
         except Exception as exc:
             print("❌ [通知] Bark 发送失败：%s" % str(exc)[:120], flush=True)
     if not sent:
@@ -5984,13 +6085,16 @@ def default_cache_dir():
     return Path.home() / ".workbuddy_yyb"
 
 
-def print_banner(query=False):
-    print("╔════════════════════════════════════════╗")
-    print("║ 🌱 WorkBuddy 全能脚本（YYB无感取码）   ║")
-    print("║ 🔐取码 💰积分 📊用量 🌱成长            ║")
-    print("║ ✅任务 🎮玩法 🎁领奖 📢通知            ║")
-    print("╚════════════════════════════════════════╝")
-    print("📦 v%s · %s" % (VERSION, "签到状态查询" if query else "全流程"), flush=True)
+def print_banner(query=False, total=0):
+    print(ACC_RULE)
+    _title = "📃 脚本名称：WorkBuddy"
+    if APP_ID:
+        _title += " ｜" + APP_ID
+    print(_title)
+    print("📌 脚本版本: %s · %s" % (VERSION, "签到状态查询" if query else "全流程"))
+    if total:
+        print("🔢 账号数量: %d" % total)
+    print(ACC_RULE, flush=True)
 
 
 def _notify_ok(summaries):
@@ -6060,12 +6164,12 @@ def main(argv=None):
     started = time.monotonic()
     reports = []
     errors = []
-    if not args.sign_retry_only:
-        print_banner(args.query)
 
     try:
         accounts = select_accounts(accounts_from_env(os.getenv("YYB_SERVER", "")), args.only)
     except SafeError as exc:
+        if not args.sign_retry_only:
+            print_banner(args.query)
         print("❌ " + str(exc), flush=True)
         return 1
     # 账号序号白名单：按 YYB_SERVER 书写顺序从 1 开始编号，留空 [] 表示全部
@@ -6086,7 +6190,8 @@ def main(argv=None):
         except SafeError as exc:
             print(str(exc), flush=True)
             return 1
-    print("👥 账号数: %d" % total, flush=True)
+    if not args.sign_retry_only:
+        print_banner(args.query, total)
 
     do_desktop = not args.no_desktop
     if do_desktop and sys.platform != "win32":
@@ -6125,6 +6230,11 @@ def main(argv=None):
         print("❌ " + errors[-1], flush=True)
 
     elapsed = time.monotonic() - started
+    # 积分每日快照：记录每个账号今天的总积分，供次日对比涨跌
+    for _r in reports:
+        _val = _credits_numeric(_r)
+        if _val is not None:
+            record_points_snapshot(_r.get("note") or str(_r.get("idx")), _val)
     summary_text = build_summary(reports)
     if errors:
         summary_text += "\n\n❌ " + "\n❌ ".join(errors)

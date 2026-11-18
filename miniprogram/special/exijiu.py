@@ -201,7 +201,7 @@ except ImportError:
     _HAS_GETCODE = False
 
 class _ExijiuFormatter(logging.Formatter):
-    """统一日志：[LEVEL] [EXIJIU] emoji message（行首已有 emoji 则沿用，避免重复注入）。
+    """统一日志：[LEVEL] emoji message（行首已有 emoji 则沿用，避免重复注入）。
 
     对齐规则（2026-11-05 修正）：
       - 消息自带前导空格（子项，缩进 3/6 空格）→ 不注入 emoji，保留原始缩进，
@@ -249,7 +249,7 @@ class _ExijiuFormatter(logging.Formatter):
 
 
 _handler = logging.StreamHandler()
-_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(prefix)s%(message)s"))
+_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] %(prefix)s%(message)s"))
 
 
 class _NotifyHandler(logging.Handler):
@@ -261,7 +261,7 @@ class _NotifyHandler(logging.Handler):
 
 
 _notify_handler = _NotifyHandler()
-_notify_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] [EXIJIU] %(prefix)s%(message)s"))
+_notify_handler.setFormatter(_ExijiuFormatter("[%(levelname)s] %(prefix)s%(message)s"))
 logging.basicConfig(level=logging.INFO, handlers=[_handler, _notify_handler])
 log = logging.getLogger(__name__)
 
@@ -275,12 +275,17 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log.info(_ACC_RULE)
-    log.info("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    _title = "📃 脚本名称：习酒果园"
+    if APPID:
+        _title += " ｜" + APPID
+    log.info(_title)
+    log.info("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log.info("🔢 账号数量: %d" % total)
     log.info(_ACC_RULE)
 SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 # ———————————— 接口网络参数 ————————————
 # 业务接口偶发读超时（服务端抖动 / 网络拥塞）曾把整个账号流程打断，
@@ -331,6 +336,68 @@ def add_monthly_brewed(liters):
         pass
     total = round(MONTH_BASE_L + data[key], 2)
     return key, total, round(float(liters), 2)
+
+
+# ———————————— 积分每日快照 ————————————
+# 结构：{账号标识: {"YYYY-MM-DD": 总积分}}；同日覆盖＝保留当天最后一次运行数据。
+# 差值严格取「昨天」那一条，取不到就不显示括号，不报错。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "exijiu_points_history.json")
+
+
+def load_points_history():
+    """读取积分历史；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_points_history(cache):
+    """写积分历史（临时文件 + rename 原子替换）。"""
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception:
+        pass
+
+
+def record_points_snapshot(key, total_points):
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if key is None or total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(key)
+    if not isinstance(days, dict):
+        days = {}
+    days[datetime.now().strftime("%Y-%m-%d")] = val
+    hist[key] = days
+    save_points_history(hist)
+
+
+def points_delta(key, today_val):
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(key)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 # ============================================================
 #  常量配置
@@ -856,6 +923,7 @@ class GardenClient:
         self._wx = None
         self._wx_appid = APPID
         self._wine_session = None
+        self.points_total = None   # 本次运行取到的总积分（供每日快照使用）
         self.ocr = DdddOcr(ocr_server) if ocr_server else None
         if APPID == CURRENT_APPID:
             self.session.headers.update({
@@ -1338,6 +1406,7 @@ def run(client, do_daily=True):
     # ── 会员信息 ──
     log.info("👤 获取会员信息...")
     info = client.member_info()
+    client.points_total = info.get("integration")
     log.info("   👤 昵称: %-12s  积分: %-6s  💧水: %-4s  🌿肥: %-4s" % (
         info.get("nick_name"), info.get("integration"), info.get("water"), info.get("manure")))
     log.info("   🌾高粱: %-6s斤  🌾小麦: %-6s斤  🍺酒曲: %-4s块  🍶酒: %sL" % (
@@ -1685,6 +1754,7 @@ def run(client, do_daily=True):
     # ── 任务汇总 ──
     try:
         info = client.member_info()
+        client.points_total = info.get("integration")
         summary = "积分: %s  💧水: %s  🌾高粱: %s斤  🍺酒曲: %s块  🍶酒: %sL" % (
             info.get("integration"), info.get("water"), info.get("sorghum"), info.get("wine_yeast"), info.get("wine"))
         log.info("✅ 任务完成 │ " + summary)
@@ -1876,7 +1946,6 @@ def auto_login_with_retry(client, wxid, wx_server, ocr_server=None,
 #  主函数
 # ============================================================
 if __name__ == "__main__":
-    log_startup()
     WX_SERVER = os.environ.get("WECHAT_SERVER", DEFAULT_WECHAT_SERVER)
     WX_ID_RAW = (os.getenv("WX_ID") or os.getenv("WXIDXJ", "")).strip()
 
@@ -1898,6 +1967,8 @@ if __name__ == "__main__":
             if not accounts:
                 log.error("❌ YYB_ONLY_REFS 指定的序号均超出账号范围")
                 sys.exit(1)
+
+    log_startup(len(accounts))
 
     CACHE_FILE = Path(__file__).parent / "xijiutoken.json"
 
@@ -1926,6 +1997,18 @@ if __name__ == "__main__":
     cache = load_cache()
     all_min_harvests = []
     completed_count = 0
+    _points_rows = []
+
+    def _record_points_row(idx, key, client_obj):
+        """记录该账号今天的总积分快照（失败/无数据时跳过）。"""
+        try:
+            val = getattr(client_obj, "points_total", None)
+            if val is None:
+                return
+            record_points_snapshot(key, val)
+            _points_rows.append((idx, key, float(val)))
+        except Exception:
+            pass
 
     log.info(f"🔔 习酒花园, 开始! 共 {len(accounts)} 个账号")
 
@@ -1983,6 +2066,7 @@ if __name__ == "__main__":
             summary, min_harvest, _brewed = run(client, do_daily=do_daily)
             log.info("   📋 %s: %s" % (mask, summary))
             completed_count += 1
+            _record_points_row(i + 1, cache_ref, client)
             if do_daily and client.daily_completed: cache[cache_id + "_daily"] = today; save_cache(cache)
             if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
         except (Exception, TokenInvalidError) as e:
@@ -2004,6 +2088,7 @@ if __name__ == "__main__":
                         summary, min_harvest, _brewed = run(client, do_daily=do_daily)
                         log.info("   📋 %s: %s" % (mask, summary))
                         completed_count += 1
+                        _record_points_row(i + 1, cache_ref, client)
                         if do_daily and client.daily_completed: cache[cache_id + "_daily"] = today; save_cache(cache)
                         if min_harvest is not None: all_min_harvests.append((remark, min_harvest))
                         log.info("   ✅ 重新登录重试成功")
@@ -2016,11 +2101,23 @@ if __name__ == "__main__":
         acc_footer(i + 1, len(accounts))
         time.sleep(random.randint(2, 5))
 
-    # ── [执行汇总] ──
-    _sum_rule = "➖" * 35
-    log.info(_sum_rule)
-    log.info("📊 [执行汇总] 习酒花园 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0",
-             len(accounts), completed_count, len(accounts) - completed_count)
+    # ── 统一汇总日志（新风格）──
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    _failed_count = len(accounts) - completed_count
+    log.info(SUMMARY_SEP)
+    log.info("📂 汇总日志")
+    log.info("📃 脚本名称：习酒果园")
+    log.info("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log.info("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：0 个"
+             % (completed_count, _failed_count))
+    if _points_rows:
+        _cells = []
+        for _idx, _key, _val in _points_rows:
+            _delta = points_delta(_key, _val)
+            _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+            _cells.append("账号%d：%.2f%s" % (_idx, _val, _dt))
+        log.info("💰 总积分：" + "  |  ".join(_cells))
     # 全账号本月酿酒合计
     try:
         _mdata = load_monthly(); _mkey = datetime.now().strftime("%Y-%m")
@@ -2056,7 +2153,7 @@ if __name__ == "__main__":
         log.info("   📅 下次执行: %s" % next_run_time.strftime("%Y-%m-%d %H:%M:%S"))
         update_ql_cron_time(cron_schedule)
         print("NEXT_RUN_SECS=%s" % default_secs)
-    log.info(_sum_rule)
+    log.info(SUMMARY_SEP)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     failed_count = len(accounts) - completed_count
     flush_notify(

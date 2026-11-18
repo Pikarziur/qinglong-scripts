@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  微信笔笔省
-# version: 2026-10-29a
+# version: 2026-11-18a
 # cron: 1 10 * * *
 # =========================================================
 #
@@ -16,7 +16,7 @@
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。默认 ["1"]（只跑第 1 个账号）；留空 [] 跑全部
 #   PROXY_API_URL    可选。代理 API，返回「ip:端口」文本，填写后请求走代理
 #
-# 日志规范：[LEVEL] [WXBBS] message   （LEVEL: INFO / WARN / ERROR）
+# 日志规范：[LEVEL] message   （LEVEL: INFO / WARN / ERROR）
 # =========================================================
 
 YYB_ONLY_REFS = ["1"] # 账号序号白名单（1 起），默认 ["1"] = 只跑第 1 个账号；留空 [] = 跑全部
@@ -46,8 +46,9 @@ def now_text() -> str:
     # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 
 _QN_SITE = "微信支付提现笔笔省"
@@ -162,6 +163,73 @@ _sys.excepthook = _qn_excepthook
 MULTI_ACCOUNT_SPLIT = ["\n", "@"] # 分隔符列表
 MULTI_ACCOUNT_PROXY = False # 是否使用多账号代理，默认不使用，True则使用多账号代理
 
+# ———————————— 每日数值快照（提现免费券余额）————————————
+# 结构：{账号标识: {"YYYY-MM-DD": 数值}}；同日覆盖＝保留当天最后一次运行数据。
+# 差值严格取「昨天」那一条，取不到就不显示括号，不报错。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "wxbbs_points_history.json")
+
+
+def account_key(entry):
+    """账号稳定标识：取 YYB 写法的 ref 部分（@ 后），拿不到则用整串。"""
+    text = str(entry or "").strip()
+    return text.rsplit("@", 1)[-1].strip() if "@" in text else text
+
+
+def load_points_history():
+    """读取快照历史；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_points_history(cache):
+    """写快照历史（临时文件 + rename 原子替换）。"""
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception:
+        pass
+
+
+def record_points_snapshot(key, value):
+    """记录该账号今天的数值（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if key is None or value is None:
+        return
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(key)
+    if not isinstance(days, dict):
+        days = {}
+    days[datetime.now().strftime("%Y-%m-%d")] = val
+    hist[key] = days
+    save_points_history(hist)
+
+
+def points_delta(key, today_val):
+    """严格取昨天最后一次记录的数值，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(key)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
+
 class YYBGoEnhancedAdapter:
     """YYB-Go-Enhanced 的 wx.login code 客户端。"""
 
@@ -172,7 +240,7 @@ class YYBGoEnhancedAdapter:
     def log(self, msg, level="info"):
         self.log_msgs.append(str(msg))
         prefix = {"error": "ERROR", "warning": "WARN"}.get(level, "INFO")
-        line = f"[{prefix}] [WXBBS] {msg}"
+        line = f"[{prefix}] {msg}"
         print(line, flush=True)
         if prefix == "ERROR":
             collect_error(line)
@@ -235,7 +303,11 @@ class AutoTask:
     # ========== 启动信息 ==========
     def log_startup(self, total: int = 0) -> None:
         self.log(ACC_RULE)
-        self.log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, self.wx_appid))
+        _title = "📃 脚本名称：%s" % self.script_name
+        if self.wx_appid:
+            _title += " ｜" + self.wx_appid
+        self.log(_title)
+        self.log("📌 脚本版本: %s" % SCRIPT_VER)
         if total:
             self.log("🔢 账号数量: %d" % total)
         self.log(ACC_RULE)
@@ -446,7 +518,6 @@ class AutoTask:
         运行任务
         """
         try:
-            self.log(f"🚀 【{self.script_name}】开始执行任务")
             entries = list(self.check_env())
             # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
             if YYB_ONLY_REFS:
@@ -455,12 +526,14 @@ class AutoTask:
                     entries = [e for i, e in enumerate(entries, 1) if i in wanted]
                     self.log(f"ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 {sorted(wanted)}，命中 {len(entries)} 个账号")
             total_accounts = len(entries)
+            self.log_startup(total_accounts)
             self.log(f"👥 共 {len(entries)} 个账号待执行")
             if not entries:
                 self.log("🚫 没有可执行账号（YYB_SERVER 为空或全部被 YYB_ONLY_REFS 过滤）", level="error")
                 return
             ok_cnt = 0
             skip_cnt = 0
+            points_rows = []
             for index, wx_id in enumerate(entries, 1):
                 # 清理账号信息
                 self.nickname = f"账号{index}"
@@ -525,20 +598,39 @@ class AutoTask:
                         gift_id = gift.get('gift_id')
                         self.redeem_gift(session, gift_id)
                 # 再次获取用户余额
-                self.get_balance(session)
+                _balance = self.get_balance(session)
                 self.log(f"💳 [{self.nickname}] 当前提现免费券: {self.points}元")
+                if _balance is not None:
+                    _key = account_key(wx_id)
+                    points_rows.append((index, _key, float(_balance)))
+                    record_points_snapshot(_key, _balance)
                 ok_cnt += 1
                 # 清理session
                 session.close()
                 self.acc_footer(index, total_accounts)
             # 不落盘：每次运行的 token 均为临时登录获取，不写入本地文件
-            self.log("=" * 70)
-            self.log(f"📊 [执行汇总] {self.script_name} · 账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt - skip_cnt} ｜ 跳过 {skip_cnt}")
-            self.log("=" * 70)
+            # ── 统一汇总日志（新风格）──
+            _now = datetime.now()
+            _week = "一二三四五六日"[_now.weekday()]
+            fail_cnt = total_accounts - ok_cnt - skip_cnt
+            self.log(SUMMARY_SEP)
+            self.log("📂 汇总日志")
+            self.log("📃 脚本名称：%s" % self.script_name)
+            self.log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+            self.log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+                     % (ok_cnt, fail_cnt, skip_cnt))
+            if points_rows:
+                _cells = []
+                for _idx, _key, _val in points_rows:
+                    _delta = points_delta(_key, _val)
+                    _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+                    _cells.append("账号%d：%.2f 元%s" % (_idx, _val, _dt))
+                self.log("💰 总积分：" + "  |  ".join(_cells))
+            self.log(SUMMARY_SEP)
             # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
             flush_notify(
                 "微信支付提现笔笔省",
-                f"账号 {total_accounts} ｜ 成功 {ok_cnt} ｜ 失败 {total_accounts - ok_cnt - skip_cnt} ｜ 跳过 {skip_cnt}",
+                "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total_accounts, ok_cnt, fail_cnt, skip_cnt),
                 logger=self.log,
             )
         except Exception as e:
@@ -546,5 +638,4 @@ class AutoTask:
 
 if __name__ == "__main__":
     auto_task = AutoTask("微信支付提现笔笔省")
-    auto_task.log_startup()
     auto_task.run()
