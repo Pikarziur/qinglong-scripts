@@ -318,7 +318,7 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-11-17b';   // 更新脚本此值
+const SCRIPT_VER = '2026-11-17c';   // 更新脚本此值
 // 签到前健康币流水状态预检（2026-11-17）：getFlow 当天有「签到」入账则跳过签到写请求。
 // 已签跳过写请求避免二次执行数据；查询失败/查不到照常签到，不漏签。
 const ENABLE_SIGN_STATE_CHECK = true;
@@ -905,11 +905,14 @@ async function finishSummary(total, okCount, skipped = 0, expireRows = []){
   logInfo(ACC_RULE);
   logInfo(`📊 [执行汇总] 平安i动 · ${tail}`);
   // 汇总类别里打印每个账号的总积分
-  for (const r of results) {
-    const bal = r.balance ?? r.snapshotBalance;
-    if (bal !== null && bal !== undefined) {
-      logInfo(`💰 [总积分] ${r.label}：${bal}`);
-    }
+  // 数据源：expireRows（{ label, balance }），跳过账号的余额由打标缓存读回
+  const pointLines = [];
+  for (const r of (expireRows || [])){
+    if (!r || r.balance === null || r.balance === undefined) continue;
+    const bal = Number(r.balance);
+    if (!Number.isFinite(bal)) continue;
+    logInfo(`💎 总积分(${bal})（${r.label}）`);
+    pointLines.push(`${r.label} 总积分 ${bal}`);
   }
   // 过期提醒打印在汇总类别内：年尾最后 7 天、余额>0 才提醒，连续提醒 + 独立强推
   try {
@@ -919,7 +922,8 @@ async function finishSummary(total, okCount, skipped = 0, expireRows = []){
   }
   logInfo(ACC_RULE);
   // 错误日志推送：有错误才发；未配置通知渠道则只提示一行
-  await flushNotify(_QN_SITE, tail, logInfo);
+  const notifyTail = pointLines.length ? (tail + '\n' + pointLines.join(' ｜ ')) : tail;
+  await flushNotify(_QN_SITE, notifyTail, logInfo);
 }
 
 async function main(){

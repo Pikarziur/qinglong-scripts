@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  谷雨
-# version: 2026-11-17c
+# version: 2026-11-18a
 # cron: 36 4,14 * * *
 # 积分有效期：积分自获取之日起365天内有效，期满次日0点失效【1】
 # 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取积分-上年的消耗积分
@@ -20,7 +20,7 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
 
 
 """
-谷雨小程序动态 code 版
+谷雨
 
 功能：
   1. 本地 code 服务获取微信 code
@@ -69,10 +69,11 @@ import requests
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
     log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    log(tls_status_line())
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-17c"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
 
 # ========== 统一日志：[LEVEL] [GY] message ==========
@@ -96,12 +97,34 @@ def err(msg):
 # TLS 指纹伪装: 服务端按 TLS 指纹识别客户端, requests 的原生指纹会被判为异常请求,
 # 登录接口直接返回 996「当前请求异常，请刷新重试」。用 curl_cffi 模拟浏览器指纹即可通过。
 # 未安装 curl_cffi 时回落 requests(登录必然失败, 需 pip install curl_cffi)。
+# 2026-11-18: 加载状态显式打印; "chrome" 泛称在新版 curl_cffi/服务端可能失效,
+#             故维护候选列表, 登录 996 时逐个轮换指纹重试, 并在日志里如实反映。
+TLS_IMPERSONATE_CANDIDATES = ["chrome", "chrome124", "chrome120", "chrome116", "chrome110", "chrome107"]
 try:
     from curl_cffi import requests as _cf_requests
-except Exception:
+    _CF_IMPORT_ERROR = ""
+except Exception as _cf_exc:
     _cf_requests = None
+    _CF_IMPORT_ERROR = str(_cf_exc)[:160]
 
-TLS_IMPERSONATE = "chrome"
+# 按当前已安装的 curl_cffi 实际支持的指纹值过滤候选, 避免传入库不认识的值
+try:
+    from curl_cffi.requests.impersonate import BrowserTypeLiteral
+    _CF_SUPPORTED = set(getattr(BrowserTypeLiteral, "__args__", ()))
+except Exception:
+    _CF_SUPPORTED = set()
+if _CF_SUPPORTED:
+    _FILTERED = [c for c in TLS_IMPERSONATE_CANDIDATES if c in _CF_SUPPORTED]
+    if _FILTERED:
+        TLS_IMPERSONATE_CANDIDATES = _FILTERED
+TLS_IMPERSONATE = TLS_IMPERSONATE_CANDIDATES[0] if TLS_IMPERSONATE_CANDIDATES else "chrome"
+
+def tls_status_line() -> str:
+    """启动/失败时打印真实的指纹状态, 不再用写死提示误导排查。"""
+    if _cf_requests is None:
+        return ("🔐 [指纹] curl_cffi 未加载（回落 requests，登录必被判 996）｜ 导入错误: %s ｜ 青龙执行: pip3 install -U curl_cffi"
+                % (_CF_IMPORT_ERROR or "未知"))
+    return "🔐 [指纹] curl_cffi 已加载 ｜ 候选 %s ｜ 首选 %s" % (",".join(TLS_IMPERSONATE_CANDIDATES), TLS_IMPERSONATE)
 
 
 APP_NAME = "谷雨小程序"
@@ -177,12 +200,48 @@ EXPIRE_CHECK_ENABLED = True                # 总开关，设 False 关闭过期�
 SECRET_KEY = "R6WbJ830wNsEdjH9GumwKYiYxHz0K9QD"
 DEFAULT_SHOP_ID = "100186753"
 
-COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gycookie.json")
+# 2026-11-18: 状态文件改放青龙固定配置目录 —— 脚本改名(xxx_code.py→xxx.py)或订阅
+# 同步重建 scripts 目录时, 同目录的 json 缓存会被清掉 → token 全失效 → 被迫重新登录 → 996。
+# 固定目录不受脚本文件变动影响；青龙无该目录时回退脚本目录（本地/其它环境仍可用）。
+def _pick_state_dir() -> str:
+    ql_dir = os.getenv("QL_DIR", "").strip() or "/ql"
+    candidates = [os.path.join(ql_dir, "config", "qinglong-scripts-state")]
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return d
+        except Exception:
+            pass
+    return os.path.dirname(os.path.abspath(__file__))
+
+_STATE_DIR = _pick_state_dir()
+COOKIE_FILE = os.path.join(_STATE_DIR, "gycookie.json")
 
 # 每日任务完成标记：记录「今天这个账号已经完整跑完」，避免同一天重复调用。
 # 结构：{ "<server>": {"date": "2026-11-07", "doneTime": "...", "note": "签到成功"} }
-# 跨天自动失效（读时比对当天日期）；标记文件在脚本同目录，非隐藏，便于面板查看/删除。
-DAILY_DONE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guyu_daily_done.json")
+# 跨天自动失效（读时比对当天日期）；与 token 缓存同放固定目录，非隐藏便于面板查看/删除。
+DAILY_DONE_FILE = os.path.join(_STATE_DIR, "guyu_daily_done.json")
+
+# 旧目录（脚本同目录）缓存，首次切到固定目录时一次性搬迁，避免这次白丢 token
+_LEGACY_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gycookie.json")
+_LEGACY_DAILY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guyu_daily_done.json")
+
+def _migrate_state_files() -> None:
+    """固定目录尚无缓存、而旧脚本目录有缓存时，搬过来（源=目标时跳过）。"""
+    for src, dst in ((_LEGACY_COOKIE_FILE, COOKIE_FILE), (_LEGACY_DAILY_FILE, DAILY_DONE_FILE)):
+        try:
+            if os.path.abspath(src) == os.path.abspath(dst):
+                continue
+            if os.path.exists(dst) or not os.path.exists(src):
+                continue
+            with open(src, "rb") as _f:
+                _blob = _f.read()
+            with open(dst, "wb") as _f:
+                _f.write(_blob)
+            log("📦 [缓存] 已迁移旧缓存到固定目录: " + os.path.basename(dst))
+        except Exception as _exc:
+            warn("⚠️ [缓存] 迁移失败（%s）: %s" % (os.path.basename(dst), _exc))
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -550,30 +609,47 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
             "scene": 1168,
             "referrerInfo": {"appId": APPID},
         }
-        response = request_with_proxy(
-            "POST",
-            LOGIN_URL,
-            headers=signed_headers("POST", "", None, payload),
-            json=payload,
-            proxies=proxies,
-            server=server,
-        )
+        headers = signed_headers("POST", "", None, payload)
 
-        try:
-            data = response.json()
-        except Exception:
-            data = {"raw": response.text[:800]}
+        # 2026-11-18: 996 是服务端按 TLS 指纹拒客户端。curl_cffi 已加载时逐个候选
+        # 指纹重试（"chrome" 泛称在新版可能失效），拿到 token 立即返回；未加载时
+        # 只有原生 requests 一次（必败），并如实打印根因。非 996 错误换指纹无意义，停。
+        imps = list(TLS_IMPERSONATE_CANDIDATES) if _cf_requests is not None else [None]
+        tried = []
+        last_data: Dict[str, Any] = {}
+        for imp in imps:
+            kw = {"headers": headers, "json": payload, "proxies": proxies, "server": server}
+            if imp:
+                kw["impersonate"] = imp
+            response = request_with_proxy("POST", LOGIN_URL, **kw)
+            try:
+                data = response.json()
+            except Exception:
+                data = {"raw": getattr(response, "text", "")[:800]}
+            last_data = data
+            token = extract_token(data)
+            if token:
+                tag = imp or "requests(原生)"
+                if imp and imp != TLS_IMPERSONATE:
+                    log(f"✅ [登录] token 获取成功（指纹 {tag} 重试生效）: {mask(token)}")
+                else:
+                    log(f"✅ [登录] token 获取成功（指纹 {tag}）: {mask(token)}")
+                return token, data
+            biz_code = str(data.get("code")) if isinstance(data, dict) else ""
+            tried.append("%s:%s" % (imp or "requests", biz_code or "?"))
+            if biz_code != "996":
+                break
 
-        token = extract_token(data)
-        if token:
-            log(f"✅ [登录] token 获取成功: {mask(token)}")
-            return token, data
-
+        data = last_data
         biz_code = str(data.get("code")) if isinstance(data, dict) else ""
         if biz_code == "996":
-            err("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」")
-            log("   根因: 服务端按 TLS 指纹识别客户端。本脚本已用 curl_cffi 模拟浏览器指纹,")
-            err("   若仍失败, 多半是 curl_cffi 未安装 —— 请在青龙执行: pip install curl_cffi")
+            err("❌ [登录] 服务端返回 996「当前请求异常，请刷新重试」（已轮换 %d 种指纹均失败）" % len(tried))
+            log("   " + tls_status_line())
+            log("   轮换明细: " + ", ".join(tried))
+            if _cf_requests is None:
+                err("   根因确定: curl_cffi 未安装，requests 原生指纹被识别 —— 青龙执行: pip3 install -U curl_cffi")
+            else:
+                log("   curl_cffi 已加载但全部指纹仍被拒：多为服务端风控升级或出口 IP 异常，可稍后重试/换 IP")
             log(f"   本次发送的请求体: {json_preview(payload, 400)}")
         else:
             err(f"❌ [登录] 未识别 token 字段: {json_preview(data)}")
@@ -1151,6 +1227,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
 def main() -> None:
     log_startup()
     log_title()
+    _migrate_state_files()
 
     if not SERVERS:
         log("🚫 [账号] 没有可执行账号（YYB_SERVER 为空或已被 YYB_ONLY_REFS 过滤空）")
