@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  君品荟
-# version: 2026-11-17b
+# version: 2026-11-18a
 # cron: 30 4,14 * * *
 # 积分有效期：每年7月19日（7-13 ~ 7-19 含到期当天共7天提醒，用 queryNearExpirePoints 的30天数据）【1】
 =========================================================*/
@@ -183,7 +183,7 @@ function emit(level, text) {
         const line = raw.trim();
         if (!line) continue;
         const lv = level || _levelOfLine(line);
-        const _line = `[${lv}] [${SRC}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`;
+        const _line = `[${lv}] ${_EMOJI_HEAD.test(line) ? line : _LEVEL_EMOJI[lv] + ' ' + line}`;
         console.log(_line);
         if (lv === 'ERROR') collectError(_line);
     }
@@ -267,12 +267,57 @@ function clear_daily_done(key = '') {
 // ========== 启动信息 ==========
 function logStartup(total) {
   log(ACC_RULE);
-  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${WX_APPID}`);
+  _title = `📃 脚本名称：君品荟`;
+  if (WX_APPID) _title += ` ｜${WX_APPID}`;
+  log(_title);
+  log(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-16a';
+const SCRIPT_VER = '2026-11-18a';
 const ACC_RULE = '➖'.repeat(35);
+const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
+
+// 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const POINTS_HISTORY_FILE = path.join(__dirname, 'exijiu_jph_points_history.json');
+function load_points_history() {
+  try {
+    if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
+      const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d;
+    }
+  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  return {};
+}
+function save_points_history(cache) {
+  try {
+    const tmp = `${POINTS_HISTORY_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
+  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+}
+function record_points_snapshot(account, totalPoints) {
+  if (totalPoints === null || totalPoints === undefined) return;
+  const val = Number(totalPoints);
+  if (!Number.isFinite(val)) return;
+  const hist = load_points_history();
+  let days = hist[account];
+  if (!days || typeof days !== 'object') days = {};
+  days[_today()] = val;
+  hist[account] = days;
+  save_points_history(hist);
+}
+function points_delta(account, todayVal) {
+  try {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    const yesterday = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const hist = load_points_history();
+    const days = hist[account];
+    if (!days || typeof days !== 'object' || !(yesterday in days)) return null;
+    return todayVal - Number(days[yesterday]);
+  } catch (e) { return null; }
+}
 function accBanner(idx, total, ident = '') {
     log(ACC_RULE);
     log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
@@ -356,6 +401,7 @@ function parseYybGoEntry(rawValue) {
         const accExpireInfo = [];
         // 各账号总积分（跳过的账号从打标缓存读回）
         const accPoints = [];
+        const accPointsKeys = {};
         const expireWindow = isExpireWindow();
         // 登录成功的账号数，即 msg 中「✅ 用户手机号获取成功」分块的序号
         let loginOk = 0;
@@ -381,6 +427,7 @@ function parseYybGoEntry(rawValue) {
                 if (cachedTotal !== null && cachedTotal !== undefined
                     && Number.isFinite(Number(cachedTotal))) {
                     accPoints[index] = Number(cachedTotal);
+                    accPointsKeys[index] = doneKey;
                 }
                 continue;
             }
@@ -521,14 +568,23 @@ function parseYybGoEntry(rawValue) {
             if (signed) mark_done_today(doneKey, '签到成功', accExpireInfo[index] || null, pointsValue);
             if (pointsValue !== null && pointsValue !== undefined && Number.isFinite(Number(pointsValue))) {
                 accPoints[index] = Number(pointsValue);
+                accPointsKeys[index] = doneKey;
+                record_points_snapshot(doneKey, pointsValue);
             }
             await $await(10000)
             accFooter(num, xjhdArr.length);
         }
         const okCount = (msg.match(/签到成功/g) || []).length;
         const failCount = xjhdArr.length - okCount - skipped;
-        log('➖'.repeat(35));
-        log(`📊 [执行汇总] 君品荟 · 账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 失败 ${failCount} ｜ 跳过 ${skipped}`);
+        const _nowJ = new Date();
+        const _pJ = (n) => String(n).padStart(2, '0');
+        const _wkJ = '日一二三四五六'[_nowJ.getDay()];
+        const _dateJ = `${_nowJ.getFullYear()}-${_pJ(_nowJ.getMonth()+1)}-${_pJ(_nowJ.getDate())}`;
+        log(SUMMARY_SEP);
+        log('📂 汇总日志');
+        log('📃 脚本名称：君品荟');
+        log(`📅 运行日期：${_dateJ}  周${_wkJ}`);
+        log(`📊 运行结果：✔️ 成功：${okCount} 个；❌ 失败：${failCount} 个；⏭️ 跳过：${skipped} 个`);
         // 渲染分账号汇总（简洁精要；账号行含总积分，签到状态 ✔️/❌）
         const seqEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
         const blocks = msg.split(/✅ 用户手机号获取成功:\s*/).slice(1);
@@ -574,13 +630,16 @@ function parseYybGoEntry(rawValue) {
             if (totalMatch) summaryOut.push(`💰 总积分${totalMatch[1]}`);
         }
         for (const line of summaryOut) log(line);
-        // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
+        const _cellsJ = [];
         for (let i = 0; i < xjhdArr.length; i++) {
             const val = accPoints[i];
-            if (val !== undefined && val !== null && Number.isFinite(Number(val))) {
-                log(`💎 总积分(${Number(val)})（账号${i + 1}）`);
-            }
+            if (val === undefined || val === null || !Number.isFinite(Number(val))) continue;
+            const _v = Number(val);
+            const _delta = points_delta(accPointsKeys[i] || String(i + 1), _v);
+            const _dt = _delta === null ? '' : `(${_delta >= 0 ? '+' : ''}${_delta.toFixed(2)})`;
+            _cellsJ.push(`账号${i + 1}：${_v.toFixed(2)}${_dt}`);
         }
+        if (_cellsJ.length) log('💰 总积分：' + _cellsJ.join('  |  '));
         // 即将失效积分提醒：窗口内命中即在汇总区输出，每轮强推一次通知
         const expireLines = [];
         const bjYear = new Date(Date.now() + 8 * 3600 * 1000).getUTCFullYear();
@@ -589,8 +648,14 @@ function parseYybGoEntry(rawValue) {
                 expireLines.push(`💰 积分(${Number(info.amount).toFixed(2)})即将过期： ${bjYear}-${info.expireDate || '07-19'}（账号${i + 1}）`);
             }
         }
-        for (const line of expireLines) log(line);
-        log('➖'.repeat(35));
+        if (expireLines.length) {
+            log('⏳  即将过期积分：');
+            expireLines.forEach((line, j) => {
+                const _br = j === expireLines.length - 1 ? '└─' : '├─';
+                log(`${_br} ${line}`);
+            });
+        }
+        log(SUMMARY_SEP);
         // 错误日志推送：有错误或积分即将过期才发；未配置通知渠道则只提示一行
         let notifySummary = `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`;
         const pointLines = [];

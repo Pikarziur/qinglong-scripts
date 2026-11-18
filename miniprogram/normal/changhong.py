@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  长虹智慧家居
-# version: 2026-11-17b
+# version: 2026-11-18a
 # cron: 12 4,14 * * *
 # 积分有效期：本年获取的积分，下一年12月31日过期
 # 检测过期积分：每年 12-25 ~ 12-31 检查「上年获取」的积分，汇总后提醒并推送通知；过期积分：上年获取总量 − 上年消费；
@@ -36,7 +36,7 @@ import sys
 import socket
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -214,7 +214,7 @@ _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
 def _emit(level, msg):
-    line = f"[{level}] [CHANGHONG] {msg}"
+    line = f"[{level}] {msg}"
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -233,12 +233,74 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
+    _title = "📃 脚本名称：长虹智慧家居"
+    if APP_ID:
+        _title += " ｜" + APP_ID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17b"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "changhong_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 def acc_banner(idx, total, ident=""):
     """打印账号分隔标识（开始）。"""
@@ -742,7 +804,7 @@ def main():
             # 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
             tp = cached.get("totalPoints") if isinstance(cached, dict) else None
             if isinstance(tp, (int, float)) and not isinstance(tp, bool):
-                points_rows.append((index, float(tp)))
+                points_rows.append((index, float(tp), key))
             continue
         acc_banner(index, len(lines), "标识：" + str(entry_ref(line) or line))
         client = None
@@ -772,7 +834,8 @@ def main():
             if isinstance(info, dict) and float(info.get("amount") or 0) > 0:
                 expire_alerts.append((index, info))
             if isinstance(total_points, (int, float)) and not isinstance(total_points, bool):
-                points_rows.append((index, float(total_points)))
+                points_rows.append((index, float(total_points), key))
+                record_points_snapshot(key, total_points)
         results.append(msg)
         acc_footer(index, len(lines))
     if not lines:
@@ -780,19 +843,33 @@ def main():
     # 控制台执行汇总
     _n = len(lines)
     _ok = _n - fail_count - skipped
-    log(_ACC_RULE)
-    log(f"📊 [执行汇总] {TITLE} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}")
-    # 账户总积分（无论是否跳过、任务是否已完成，都在这里汇总）
-    for idx, bal in points_rows:
-        log(f"💎 总积分({bal:.2f})（账号{idx}）")
-    # 积分过期提醒：仅 12-24 ~ 12-31 且上年有积分时输出，每轮都推一次汇总通知
-    for idx, info in expire_alerts:
-        log(expire_alert_line(info, idx))
-    log(_ACC_RULE)
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：长虹智慧家居")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (_ok, fail_count, skipped))
+    if points_rows:
+        _cells = []
+        for idx, bal, akey in points_rows:
+            _delta = points_delta(akey, bal)
+            _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+            _cells.append("账号%d：%.2f%s" % (idx, bal, _dt))
+        log("💰 总积分：" + "  |  ".join(_cells))
+    if expire_alerts:
+        log("⏳  即将过期积分：")
+        for _j, (idx, info) in enumerate(expire_alerts):
+            _branch = "└─" if _j == len(expire_alerts) - 1 else "├─"
+            log("%s 账号%d %s %.2f（%s到期）" % (
+                _branch, idx, "·" * 20, float(info.get("amount") or 0),
+                str(info.get("expire_date") or "")))
+    log(SUMMARY_SEP)
     notify_summary = f"账号 {_n} ｜ 成功 {_ok} ｜ 失败 {fail_count} ｜ 跳过 {skipped}"
     if points_rows:
         notify_summary += "\n" + " ｜ ".join(
-            f"账号{idx} 总积分 {bal:.2f}" for idx, bal in points_rows)
+            f"账号{idx} 总积分 {bal:.2f}" for idx, bal, _k in points_rows)
     if expire_alerts:
         notify_summary += "\n" + "\n".join(
             expire_alert_line(info, idx) for idx, info in expire_alerts)

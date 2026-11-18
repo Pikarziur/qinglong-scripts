@@ -68,7 +68,7 @@ import requests
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    _title = "🏷 脚本名称：谷雨"
+    _title = "📃 脚本名称：谷雨"
     if APPID:
         _title += " ｜" + APPID
     log(_title)
@@ -76,7 +76,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-18d"
+SCRIPT_VER = "2026-11-18e"
 ACC_RULE = "=" * 70
 # 统一汇总块顶/底分隔线（新风格）
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
@@ -487,12 +487,13 @@ def send_qywx(title, content):
         return False
 
 
-def send_pushplus(title: str, content: str) -> bool:
-    """依次尝试各通知渠道，任一成功返回 True；不打印逐渠道日志。"""
-    ok = send_qywx(title, content)
+def send_pushplus(title: str, content: str) -> list:
+    """依次尝试各通知渠道，返回成功的渠道名列表；不打印逐渠道日志。"""
+    ok_channels = []
+    if send_qywx(title, content):
+        ok_channels.append("企业微信")
     if not PLUSPLUS_TOKEN:
-        return ok
-
+        return ok_channels
     try:
         requests.post(
             "https://www.pushplus.plus/send",
@@ -504,10 +505,10 @@ def send_pushplus(title: str, content: str) -> bool:
             },
             timeout=10,
         )
-        return True
+        ok_channels.append("PushPlus")
     except Exception:
-        return ok
-
+        pass
+    return ok_channels
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
@@ -778,6 +779,67 @@ def clear_daily_done(server: str = "") -> None:
     else:
         cache = {}
     save_daily_done(cache)
+
+
+# 积分每日快照：按账号存每天最后一次记录的总积分，用于次日对比涨跌。
+# 结构：{ "<server>": { "2026-11-17": 612.5, "2026-11-18": 688.0 } }
+# 与 token/打标同放固定目录；每天覆盖同一 date 键（当天多次跑仅保留最后一次）。
+POINTS_HISTORY_FILE = os.path.join(_STATE_DIR, "guyu_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    """读取积分历史；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    """写积分历史（临时文件 + rename 原子替换）。"""
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(server: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    val = parse_points(total_points)
+    if val is None:
+        return
+    hist = load_points_history()
+    days = hist.get(server)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[server] = days
+    save_points_history(hist)
+
+
+def points_delta(server: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或任何异常都返回 None（不打印差值）。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(server)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        prev = parse_points(days.get(yesterday))
+        if prev is None:
+            return None
+        return today_val - prev
+    except Exception:
+        # 历史文件脏数据等任何意外都不触发差值打印，汇总行只显示总积分本身
+        return None
 
 
 def get_cached_token(server: str) -> str | None:
@@ -1249,6 +1311,9 @@ def main() -> None:
             result = run_account(index, len(SERVERS), server)
             result["index"] = index
             results.append(result)
+            # 真实跑完且拿到总积分时写入今日快照（跳过账号不重复写，沿用首次记录）
+            if result.get("totalPoints") is not None:
+                record_points_snapshot(server, result["totalPoints"])
             # 只有整个流程走完（success=True）才算今日完成
             should_mark = bool(result.get("success"))
             note = str(result.get("signMsg", ""))
@@ -1286,23 +1351,29 @@ def main() -> None:
     _week = "一二三四五六日"[_now.weekday()]
     log(SUMMARY_SEP)
     log("📂 汇总日志")
-    log("🏷 脚本名称：谷雨")
+    log("📃 脚本名称：谷雨")
     log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
-    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个" % (success_count, fail_count))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个" % (success_count, fail_count, len(skipped)))
 
-    # 总积分：一行并列，账号之间用 "  |  " 分隔
+    # 总积分：一行并列，账号之间用 "  |  " 分隔；括号内为较昨天最后一次记录的涨跌
     points_rows = []
     for item in results:
         val = item.get("totalPoints")
         if val is not None:
-            points_rows.append((int(item.get("index") or 0), float(val)))
+            points_rows.append((int(item.get("index") or 0), float(val), item.get("server", "")))
     for item in skipped:
         val = item.get("totalPoints")
         if val is not None:
-            points_rows.append((int(item.get("index") or 0), float(val)))
+            points_rows.append((int(item.get("index") or 0), float(val), item.get("server", "")))
     points_rows.sort()
     if points_rows:
-        log("💰 总积分：" + "  |  ".join("账号%d：%.2f" % (idx, val) for idx, val in points_rows))
+        _cells = []
+        for idx, val, srv in points_rows:
+            _delta = points_delta(srv, val)
+            # 昨天有记录才显示 (+x.xx)/(-x.xx)，无基准则只显示数值
+            _delta_text = "%+.2f" % _delta if _delta is not None else None
+            _cells.append("账号%d：%.2f%s" % (idx, val, ("(%s)" % _delta_text) if _delta_text else ""))
+        log("💰 总积分：" + "  |  ".join(_cells))
 
     # 即将过期积分（仅窗口触发时打印）：树状列表，末行用 └─
     expire_rows = []
@@ -1324,8 +1395,9 @@ def main() -> None:
     log(SUMMARY_SEP)
 
     notify_title = "⏳ 谷雨积分即将过期提醒" if expire_alerts else "🌸 谷雨小程序任务完成"
-    if send_pushplus(notify_title, build_notify(results, skipped)):
-        log("📢 通知已发送成功！")
+    _channels = send_pushplus(notify_title, build_notify(results, skipped))
+    if _channels:
+        log("📢 [%s]通知已发送成功！" % "、".join(_channels))
     else:
         warn("⚠️ 通知渠道未配置，跳过推送。")
     return fail_count

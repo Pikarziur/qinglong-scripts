@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  雀巢
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 48 5,15 * * *
 # 积分有效期：自获得起约1年；
 # 检测过期积分：每年12/25~12/31检测提醒（过期数=本年获取-本年消耗）
@@ -115,16 +115,21 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    _title = "📃 脚本名称：雀巢"
+    if APPID:
+        _title += " ｜" + APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 # ========== 统一日志：[LEVEL] [QC] message ==========
 def _emit(level, msg):
-    line = "[%s] [QC] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
 
 
@@ -576,7 +581,7 @@ async def send_plusplus_notification(title: str, content: str) -> None:
                 }
             )
         if response.status_code == 200:
-            log("✅ 通知推送成功")
+            log("📢 [PushPlus]通知已发送成功！")
     except Exception as e:
         err(f"❌ 通知推送失败 | 原因: {str(e)}")
 
@@ -1001,9 +1006,13 @@ async def main():
     log(f"📊 成功: {sum(1 for r in results if r['success'])}/{len(results)} 个")
     log(f"💰 今日总新增: {sum(r['gained_score'] for r in results if r['success'])} 积分")
     log('='*40)
-    log(ACC_RULE)
-    log("📊 [执行汇总] 雀巢 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (
-        len(SERVERS),
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：雀巢")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个" % (
         sum(1 for r in results if r["success"]),
         sum(1 for r in results if not r["success"]),
         len(skipped)))
@@ -1018,7 +1027,7 @@ async def main():
         await check_expire_remind(expire_rows)
     except Exception as e:
         warn(f"⚠️ [积分过期提醒] 检查异常: {e}")
-    log(ACC_RULE)
+    log(SUMMARY_SEP)
 
 
 if __name__ == "__main__":

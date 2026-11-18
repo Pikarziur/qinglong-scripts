@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小米社区
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 36 5,15 * * *
 # 积分有效期：无
 # =========================================================
@@ -165,7 +165,7 @@ _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
 def _emit(level, msg):
-    line = f"[{level}] [MI] {msg}"
+    line = f"[{level}] {msg}"
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -184,12 +184,17 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    _title = "📃 脚本名称：小米社区"
+    if APPID:
+        _title += " ｜" + APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17a"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 def acc_banner(idx, total, ident=""):
     """打印账号分隔标识（开始）。"""
@@ -742,13 +747,19 @@ def main():
 
     executed = len(accounts) - skipped
     success = executed - failed
-    log(_ACC_RULE)
-    log(f"📊 [执行汇总] {SCRIPT_NAME} · 账号 {len(accounts)} ｜ 成功 {success} ｜ 失败 {failed} ｜ 跳过 {skipped}")
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：小米社区")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (success, failed, skipped))
     if summary_rows:
         log("🏅 [等级汇总]")
         for ref, lv in summary_rows:
             log(f"   · 账号 {ref}：等级 {lv or '未知'}")
-    log(_ACC_RULE)
+    log(SUMMARY_SEP)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(
         "小米社区",

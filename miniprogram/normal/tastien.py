@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  塔斯汀会员
-# version: 2026-11-15a  （取码层新增瞬时失败重试）
+# version: 2026-11-18a
 # cron: 12 6,16 * * *
 # 积分有效期：获得起6个月内
 # 检测过期积分：每年6月30日前三天和12月31日前三天检测并提醒（即将过期积分=现有总积分）
@@ -58,7 +58,7 @@ import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
@@ -215,7 +215,7 @@ _sys.excepthook = _qn_excepthook
 
 
 def _emit(level, msg):
-    line = "[%s] [TASTIEN] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -235,12 +235,74 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, MINI_APPID))
+    _title = "📃 脚本名称：塔斯汀"
+    if MINI_APPID:
+        _title += " ｜" + MINI_APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-15a"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "tastien_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 
 def acc_banner(idx, total, ident=""):
@@ -940,6 +1002,7 @@ def main() -> int:
             # 只有签到流程完整走完（success=True）才算今日完成；异常路径不打标
             if result.get("success"):
                 mark_done_today(key, result.get("status", ""), result.get("expirePoints"))
+                record_points_snapshot(key, result.get("point"))
         except Exception as exc:
             message = _TOKEN_INVALID if auth_error(exc) else str(exc)
             err("❌ 账号 %d 失败：%s" % (index, message))
@@ -954,14 +1017,32 @@ def main() -> int:
     tail = "📊 [执行汇总] %s · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (APP_NAME, total, ok, fail, skipped)
     if already:
         tail += " ｜ 已签 %d" % already
-    log(_ACC_RULE)
-    log(tail)
-    # 汇总类别里打印每个账号的总积分
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：塔斯汀")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (ok, fail, skipped))
+    _cells = []
     for i, r in enumerate(results, 1):
         pt = r.get("point")
-        if pt not in (None, "-"):
-            log(f"💰 [总积分] 账号{i}：{pt}")
-    log(_ACC_RULE)
+        if pt in (None, "-"):
+            continue
+        try:
+            _dv = float(pt)
+        except (TypeError, ValueError):
+            _dv = None
+        if _dv is None:
+            _cells.append("账号%d：%s" % (i, pt))
+            continue
+        _delta = points_delta(str(i), _dv)
+        _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+        _cells.append("账号%d：%.2f%s" % (i, _dv, _dt))
+    if _cells:
+        log("💰 总积分：" + "  |  ".join(_cells))
+    log(SUMMARY_SEP)
     try:
         check_expire_remind(expire_rows)
     except Exception as exc:

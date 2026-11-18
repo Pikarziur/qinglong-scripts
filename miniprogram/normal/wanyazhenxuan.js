@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  丸丫甄选
-# version: 2026-11-15a
+# version: 2026-11-18a
 # cron: 18 6,16 * * *
 # 积分有效期：当前积分有效期为1年【1】
 # 检测过期积分：每年12/25~12/31检测提醒（即将过期积分=现有总积分）
@@ -116,7 +116,7 @@ global.resolveAccounts = _resolveYybAccounts;
 
 // ========== 统一日志：[LEVEL] [WANYAZX] message ==========
 function emit(level, emoji, msg) {
-    const _line = `[${level}] [WANYAZX] ${emoji} ${msg}`;
+    const _line = `[${level}] ${msg}`;
     console.log(_line);
     if (level === 'ERROR') collectError(_line);
 }
@@ -129,12 +129,57 @@ function err(msg)  { emit('ERROR', '❌', msg); }
 // ========== 启动信息 ==========
 function logStartup(total) {
   log(ACC_RULE);
-  log(`📌 脚本版本: ${SCRIPT_VER} ｜ ${MINI_APP_ID}`);
+  _title = `📃 脚本名称：丸丫甄选`;
+  if (MINI_APP_ID) _title += ` ｜${MINI_APP_ID}`;
+  log(_title);
+  log(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-15a';
+const SCRIPT_VER = '2026-11-18a';
 const ACC_RULE = '='.repeat(70);
+const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
+
+// 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const POINTS_HISTORY_FILE = path.join(__dirname, 'wanyazhenxuan_points_history.json');
+function load_points_history() {
+  try {
+    if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
+      const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d;
+    }
+  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  return {};
+}
+function save_points_history(cache) {
+  try {
+    const tmp = `${POINTS_HISTORY_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
+  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+}
+function record_points_snapshot(account, totalPoints) {
+  if (totalPoints === null || totalPoints === undefined) return;
+  const val = Number(totalPoints);
+  if (!Number.isFinite(val)) return;
+  const hist = load_points_history();
+  let days = hist[account];
+  if (!days || typeof days !== 'object') days = {};
+  days[_today()] = val;
+  hist[account] = days;
+  save_points_history(hist);
+}
+function points_delta(account, todayVal) {
+  try {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    const yesterday = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const hist = load_points_history();
+    const days = hist[account];
+    if (!days || typeof days !== 'object' || !(yesterday in days)) return null;
+    return todayVal - Number(days[yesterday]);
+  } catch (e) { return null; }
+}
 function accBanner(idx, total, ident = '') {
     log(ACC_RULE);
     log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
@@ -877,18 +922,29 @@ async function printSummary(results, skipped = 0, expireRows = []) {
     }
     const total = list.length + skipped;
     const fail = list.length - ok - signed;
-    log('='.repeat(70));
-    log(`📊 [执行汇总] 丸丫甄选 · 账号 ${total} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped} ｜ 已签 ${signed}`);
-    // 汇总类别里打印每个账号的总积分
+    const _now3 = new Date();
+    const _p3 = (n) => String(n).padStart(2, '0');
+    const _wk3 = '日一二三四五六'[_now3.getDay()];
+    const _date3 = `${_now3.getFullYear()}-${_p3(_now3.getMonth()+1)}-${_p3(_now3.getDate())}`;
+    log(SUMMARY_SEP);
+    log('📂 汇总日志');
+    log('📃 脚本名称：丸丫甄选');
+    log(`📅 运行日期：${_date3}  周${_wk3}`);
+    log(`📊 运行结果：✔️ 成功：${ok} 个；❌ 失败：${fail} 个；⏭️ 跳过：${skipped} 个`);
+    const _cells3 = [];
     for (const t of list) {
-        if (t.totalPoints !== null && t.totalPoints !== undefined) {
-            log(`💰 [总积分] 账号${t.index}：${t.totalPoints}`);
-        }
+        if (t.totalPoints === null || t.totalPoints === undefined) continue;
+        const _v3 = Number(t.totalPoints);
+        if (!Number.isFinite(_v3)) continue;
+        const _delta = points_delta(t.key || String(t.index), _v3);
+        const _dt = _delta === null ? '' : `(${_delta >= 0 ? '+' : ''}${_delta.toFixed(2)})`;
+        _cells3.push(`账号${t.index}：${_v3.toFixed(2)}${_dt}`);
     }
+    if (_cells3.length) log('💰 总积分：' + _cells3.join('  |  '));
     for (const line of buildSummaryContent(list).split('\n')) {
         if (line) log(line);
     }
-    log('='.repeat(70));
+    log(SUMMARY_SEP);
     try {
         await printExpireRemind(expireRows);
     } catch (e) {
@@ -916,7 +972,7 @@ async function printSummary(results, skipped = 0, expireRows = []) {
         if (is_done_today(doneKey)) {
             log(`[打标] 账号 ${_i + 1}/${$.userList.length} 今日任务已完成，跳过`);
             skipped++;
-            expireRows.push({ label: `账号${_i + 1}`, expirePoints: expirePointsFromDone(doneKey) });
+            expireRows.push({ label: `账号${_i + 1}`, expirePoints: expirePointsFromDone(doneKey), key: doneKey });
             continue;
         }
         accBanner(_i + 1, $.userList.length, `标识：${openid}`);
@@ -927,6 +983,7 @@ async function printSummary(results, skipped = 0, expireRows = []) {
         // 今日已签到（服务端已签）或本次签到成功，都表示今日任务已完成
         if (task.todayStatus === '签到成功' || task.todayStatus === '今日已签') {
             mark_done_today(doneKey, task.todayStatus, task.expirePoints);
+            if (task.totalPoints !== null && task.totalPoints !== undefined) record_points_snapshot(doneKey, task.totalPoints);
         }
         accFooter(_i + 1, $.userList.length);
         await $.wait(800);

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  回收猿旧衣服回收
-# version: 2026-11-17b
+# version: 2026-11-18a
 # cron: 0 5,15 * * *
 # 奖励金说明：提现型奖励金，永久有效、不过期（满 1 元可提现）
 # 提现提醒：每年 6/30 与 12/31 汇总打印并通知用户手动提现
@@ -27,7 +27,7 @@
 
 import hashlib
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import os
 import sys
@@ -213,7 +213,7 @@ _sys.excepthook = _qn_excepthook
 
 
 def _emit(level, msg):
-    line = "[%s] [HSY] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -232,12 +232,74 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
+    _title = "📃 脚本名称：回收猿"
+    if APP_ID:
+        _title += " ｜" + APP_ID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17b"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "huishouyuan_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 
 # ====================== 提现提醒（半年一次） ======================
@@ -717,10 +779,12 @@ def main():
             skipped += 1
             # 从打标缓存读回当天可提现金额，保证下午 cron 跳过时仍能提醒
             withdraw_results.append({"label": label, "withdrawable": withdrawable_from_done(key),
-                                     "total": total_points_from_done(key)})
+                                     "total": total_points_from_done(key), "key": key})
             continue
         _lines, ok, errmsg, withdrawable, balance = run_one(index, server, ref, context)
-        withdraw_results.append({"label": label, "withdrawable": withdrawable, "total": balance})
+        withdraw_results.append({"label": label, "withdrawable": withdrawable,
+                                 "total": balance, "key": key})
+        record_points_snapshot(key, balance)
         if ok:
             ok_count += 1
             # _lines 顺序：账号行 / 初始奖励金 / 签到结果；签到失败不算今日完成
@@ -731,15 +795,25 @@ def main():
             err("❌ 账号 %d 失败：%s" % (index, errmsg))
     fail_count = total - ok_count - skipped
     _tail = "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok_count, fail_count, skipped)
-    log(_ACC_RULE)
-    log("📊 [执行汇总] 回收猿 · %s" % _tail)
-    # 总积分（奖励金余额）汇总：无论是否跳过、任务是否已完成，都在这里显示
-    for item in withdraw_results:
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：回收猿")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (ok_count, fail_count, skipped))
+    _cells = []
+    for idx, item in enumerate(withdraw_results, 1):
         total = item.get("total")
         if total is None:
             continue
-        log(f"💎 总积分({total:.2f} 元)（{item.get('label') or '账号'}）")
-    log(_ACC_RULE)
+        _delta = points_delta(item.get("key") or str(idx), total)
+        _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+        _cells.append("账号%d：%.2f 元%s" % (idx, total, _dt))
+    if _cells:
+        log("💰 总积分：" + "  |  ".join(_cells))
+    log(SUMMARY_SEP)
     # 提现提醒：6/30 与 12/31，任一账号可提现达标则汇总打印 + 独立强推
     try:
         check_withdraw_remind(withdraw_results)

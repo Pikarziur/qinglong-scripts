@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  影视飓风
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 6 6,16 * * *
 # 积分有效期：1年有效期【1】
 # 检测过期积分：每年12/25~12/31检测提醒（即将过期积分=现有总积分）
@@ -64,16 +64,21 @@ import requests
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    _title = "📃 脚本名称：影视飓风"
+    if APPID:
+        _title += " ｜" + APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-17a"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 # ========== 统一日志：[LEVEL] [STORM] message ==========
 def _emit(level, msg):
-    line = "[%s] [STORM] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
 
 
@@ -244,7 +249,6 @@ def log_title() -> None:
 
 
 def log_account_header(index: int, total: int, server: str) -> None:
-    print()
     log(ACC_RULE)
     log(f"👤 账号 {index}/{total} ｜ 来源 {server}")
     log(ACC_RULE)
@@ -405,9 +409,8 @@ def request_with_proxy(
 
 
 def send_qywx(title, content):
-    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时自动跳过。"""
+    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时返回 False，不打印日志。"""
     if not QYWX_TOKEN:
-        warn("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
         return False
     key = QYWX_TOKEN.split("key=")[-1].strip()
     import json as _qywx_json, urllib.request as _qywx_urllib
@@ -419,18 +422,18 @@ def send_qywx(title, content):
         req = _qywx_urllib.Request("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + key,
                                    data=payload, headers={"Content-Type": "application/json"})
         res = _qywx_json.loads(_qywx_urllib.urlopen(req, timeout=10).read().decode("utf-8"))
-        ok = res.get("errcode") == 0
-        err("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
-        return ok
-    except Exception as _exc:
-        err("[企业微信] 推送异常:", _exc)
+        return res.get("errcode") == 0
+    except Exception:
         return False
-def send_pushplus(title: str, content: str) -> None:
-    send_qywx(title, content)  # 企业微信推送（QYWX_TOKEN 未配置时自动跳过）
-    if not PLUSPLUS_TOKEN:
-        warn("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
-        return
 
+
+def send_pushplus(title: str, content: str) -> list:
+    """依次尝试各通知渠道，返回成功的渠道名列表；不打印逐渠道日志。"""
+    ok_channels = []
+    if send_qywx(title, content):
+        ok_channels.append("企业微信")
+    if not PLUSPLUS_TOKEN:
+        return ok_channels
     try:
         requests.post(
             "https://www.pushplus.plus/send",
@@ -442,10 +445,10 @@ def send_pushplus(title: str, content: str) -> None:
             },
             timeout=10,
         )
-        log("✅ [PushPlus] 推送成功")
-    except Exception as exc:
-        err(f"❌ [PushPlus] 推送失败: {exc}")
-
+        ok_channels.append("PushPlus")
+    except Exception:
+        pass
+    return ok_channels
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
@@ -1087,8 +1090,7 @@ def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    log_startup()
-    log_title()
+    log_startup(len(SERVERS))
 
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
@@ -1135,36 +1137,36 @@ def main() -> None:
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
-    log("📊 [执行汇总] StormCrew · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
-        % (len(SERVERS), success_count, fail_count, len(skipped)))
-    # 汇总类别里打印每个账号的总积分
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：影视飓风")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (success_count, fail_count, len(skipped)))
+    _pts = []
     for i, r in enumerate(results, 1):
         pt = r.get("totalPoints") or r.get("point")
         if pt:
-            log(f"💰 [总积分] 账号{i}：{pt}")
-    for i, _ in enumerate(skipped, len(results) + 1):
-        pt = expire_points_from_done(_.get("server") or "")
+            _pts.append((i, pt))
+    for i, s in enumerate(skipped, len(results) + 1):
+        pt = expire_points_from_done(s.get("server") or "")
         if pt:
-            log(f"💰 [总积分] 账号{i}：{pt}")
+            _pts.append((i, pt))
+    if _pts:
+        log("💰 总积分：" + "  |  ".join("账号%d：%s" % (i, pt) for i, pt in _pts))
     try:
         check_expire_remind(expire_rows)
     except Exception as exc:
         warn(f"⚠️ [积分过期提醒] 检查异常: {exc}")
+    log(SUMMARY_SEP)
 
-    print()
-    log(ACC_RULE)
-    log("🏁 影视飓风任务执行完成")
-    log(f"✅ 成功: {success_count}")
-    if fail_count:
-        err(f"❌ 失败: {fail_count}")
+    _channels = send_pushplus("🎬 影视飓风任务完成", build_notify(results, skipped))
+    if _channels:
+        log("📢 [%s]通知已发送成功！" % "、".join(_channels))
     else:
-        log(f"✅ 失败: 0")
-    if skipped:
-        log(f"⏭️ 跳过(今日已完成): {len(skipped)}")
-    log(f"🕒 结束时间: {now_text()}")
-    log(ACC_RULE)
-
-    send_pushplus("🎬 影视飓风任务完成", build_notify(results, skipped))
+        warn("⚠️ 通知渠道未配置，跳过推送。")
     return fail_count
 
 

@@ -1200,9 +1200,9 @@ function chronocatNotify(title, desp) {
               console.log('Chronocat 发送QQ通知消息失败😞\n', err);
             } else {
               if (chat_type === 1) {
-                console.log(`Chronocat 个人消息 ${ids}推送成功🎉`);
+                console.log('📢 [Chronocat个人消息]通知已发送成功！');
               } else {
-                console.log(`Chronocat 群消息 ${ids}推送成功🎉`);
+                console.log('📢 [Chronocat群消息]通知已发送成功！');
               }
             }
           } catch (e) {

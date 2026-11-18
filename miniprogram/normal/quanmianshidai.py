@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  全棉时代
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 54 5,15 * * *
 # 积分有效期：今年获取的积分明年年底过期；
 # 检测过期积分：每年12/15~12/18检测提醒（过期数=上年获取-上年消耗）
@@ -68,16 +68,21 @@ import requests
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APPID))
+    _title = "📃 脚本名称：全棉时代"
+    if APPID:
+        _title += " ｜" + APPID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 # ========== 统一日志：[LEVEL] [QMSD] message ==========
 def _emit(level, msg):
-    line = "[%s] [QMSD] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
 
 
@@ -308,7 +313,6 @@ def log_title() -> None:
 
 
 def log_account_header(index: int, total: int, server: str) -> None:
-    print()
     log(ACC_RULE)
     log(f"👤 账号 {index}/{total} ｜ 来源 {server}")
     log(ACC_RULE)
@@ -517,9 +521,8 @@ def proxy_retry_safe(method, error):
 
 
 def send_qywx(title, content):
-    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时自动跳过。"""
+    """企业微信机器人推送（Webhook）。未配置 QYWX_TOKEN 时返回 False，不打印日志。"""
     if not QYWX_TOKEN:
-        warn("[企业微信] 未配置 QYWX_TOKEN，跳过推送")
         return False
     key = QYWX_TOKEN.split("key=")[-1].strip()
     import json as _qywx_json, urllib.request as _qywx_urllib
@@ -531,20 +534,18 @@ def send_qywx(title, content):
         req = _qywx_urllib.Request("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + key,
                                    data=payload, headers={"Content-Type": "application/json"})
         res = _qywx_json.loads(_qywx_urllib.urlopen(req, timeout=10).read().decode("utf-8"))
-        ok = res.get("errcode") == 0
-        err("[企业微信] 推送%s errcode=%s errmsg=%s" % ("成功 ✓" if ok else "失败 ✗", res.get("errcode"), res.get("errmsg", "")))
-        return ok
-    except Exception as _exc:
-        err("[企业微信] 推送异常:", _exc)
+        return res.get("errcode") == 0
+    except Exception:
         return False
 
 
-def send_pushplus(title: str, content: str) -> None:
-    send_qywx(title, content)  # 企业微信推送（QYWX_TOKEN 未配置时自动跳过）
+def send_pushplus(title: str, content: str) -> list:
+    """依次尝试各通知渠道，返回成功的渠道名列表；不打印逐渠道日志。"""
+    ok_channels = []
+    if send_qywx(title, content):
+        ok_channels.append("企业微信")
     if not PLUSPLUS_TOKEN:
-        warn("⚠️ [PushPlus] 未配置 PLUSPLUS_TOKEN，跳过推送")
-        return
-
+        return ok_channels
     try:
         requests.post(
             "https://www.pushplus.plus/send",
@@ -556,10 +557,10 @@ def send_pushplus(title: str, content: str) -> None:
             },
             timeout=10,
         )
-        log("✅ [PushPlus] 推送成功")
-    except Exception as exc:
-        err(f"❌ [PushPlus] 推送失败: {exc}")
-
+        ok_channels.append("PushPlus")
+    except Exception:
+        pass
+    return ok_channels
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
@@ -729,6 +730,61 @@ def save_token_cache(cache: Dict[str, Any]) -> None:
         log("✅ [缓存] Token保存成功")
     except Exception as exc:
         err(f"❌ [缓存] 保存失败: {exc}")
+
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+# 结构：{ "<server>": { "2026-11-17": 612.5, "2026-11-18": 688.0 } }
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quanmianshidai_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(server: str, total_points: Any) -> None:
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(server)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[server] = days
+    save_points_history(hist)
+
+
+def points_delta(server: str, today_val: float) -> Optional[float]:
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(server)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
 
 
 def get_cached_token(server: str) -> str | None:
@@ -1431,8 +1487,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
 
 
 def main() -> None:
-    log_startup()
-    log_title()
+    log_startup(len(SERVERS))
 
     results: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
@@ -1449,6 +1504,8 @@ def main() -> None:
         try:
             result = run_account(index, len(SERVERS), server)
             results.append(result)
+            if result.get("expirePoints") is not None:
+                record_points_snapshot(server, result["expirePoints"])
             expire_rows.append({"server": server, "expirePoints": result.get("expirePoints")})
             # 只有整个流程走完（success=True）才打标
             if result.get("success"):
@@ -1473,32 +1530,41 @@ def main() -> None:
 
     success_count = sum(1 for item in results if item["success"])
     fail_count = len(results) - success_count
-    log("📊 [执行汇总] 全面时代 · 账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d"
-        % (len(SERVERS), success_count, fail_count, len(skipped)))
-    # 汇总类别里打印每个账号的总积分（本脚本无独立总积分接口，窗口内用过期积分代替）
-    for i, r in enumerate(results, 1):
-        pt = r.get("expirePoints")
-        if pt is not None:
-            log(f"💰 [总积分] 账号{i}：{pt:.2f}")
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：全棉时代")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (success_count, fail_count, len(skipped)))
+    _pts = []
+    for item in results:
+        val = item.get("expirePoints")
+        if val is not None:
+            try:
+                _pts.append((int(item.get("idx") or 0), float(val), item.get("server", "")))
+            except (TypeError, ValueError):
+                pass
+    _pts.sort()
+    if _pts:
+        _cells = []
+        for idx, val, srv in _pts:
+            _delta = points_delta(srv, val)
+            _dt = "(%+.2f)" % _delta if _delta is not None else ""
+            _cells.append("账号%d：%.2f%s" % (idx, val, _dt))
+        log("💰 总积分：" + "  |  ".join(_cells))
     try:
         check_expire_remind(expire_rows)
     except Exception as exc:
         warn(f"⚠️ [积分过期提醒] 检查异常: {exc}")
+    log(SUMMARY_SEP)
 
-    print()
-    log(ACC_RULE)
-    log("🏁 全棉时代任务执行完成")
-    log(f"✅ 成功: {success_count}")
-    if fail_count:
-        err(f"❌ 失败: {fail_count}")
+    _channels = send_pushplus("🌱 全棉时代任务完成", build_notify(results, skipped))
+    if _channels:
+        log("📢 [%s]通知已发送成功！" % "、".join(_channels))
     else:
-        log(f"✅ 失败: 0")
-    if skipped:
-        log(f"⏭️ 跳过(今日已完成): {len(skipped)}")
-    log(f"🕒 结束时间: {now_text()}")
-    log(ACC_RULE)
-
-    send_pushplus("🌱 全棉时代任务完成", build_notify(results, skipped))
+        warn("⚠️ 通知渠道未配置，跳过推送。")
     return fail_count
 
 

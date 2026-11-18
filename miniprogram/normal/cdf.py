@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  中免会员
-# version: 2026-11-17e
+# version: 2026-11-18a
 # cron: 6 4,14 * * *
 # 积分有效期：积分到账后36个自然月有效（到期日 = 到账日 + 3 年同月同日）【1+2】
 # 检测过期积分：到期日前 7 天起每天检测、到期日前一天停（当天不提醒），提醒量=账户现有总积分；整池三年清空一次，检测年份按 2028 → 2031 → 2034 → 2037 → 2040 … 递推（每轮窗口固定 12-25 ~ 12-31）
@@ -23,7 +23,7 @@
 #   YYB_SERVER      必填。格式「地址@ref#备注」，多账号换行 / 空格 / & 分隔
 #   YYB_ONLY_REFS   账号序号白名单（1 起）。留空 [] 跑全部；填 [1,2] 只跑第 1、2 个账号
 #
-# 日志规范：[LEVEL] [CDF] message   （LEVEL: INFO / WARN / ERROR）
+# 日志规范：[LEVEL] message   （LEVEL: INFO / WARN / ERROR）
 #
 # =========================================================
 
@@ -31,8 +31,8 @@ YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；
 
 import os, re, time, random, traceback, json
 import requests
-from datetime import datetime
-from typing import Any, Dict
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
 
 # ============== 新手配置区 ==============
 APP_ID = "wxdf26125d1f97992c"
@@ -218,7 +218,7 @@ _sys.excepthook = _qn_excepthook
 
 # ———————————— 统一日志 ————————————
 def _emit(level, msg):
-    line = f"[{level}] [CDF] {msg}"
+    line = f"[{level}] {msg}"
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -236,12 +236,17 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_ID))
+    _title = "📃 脚本名称：中免会员"
+    if APP_ID:
+        _title += " ｜" + APP_ID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17e"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 def acc_banner(idx, total, ident=""):
     """打印账号分隔标识（开始）。"""
@@ -332,6 +337,65 @@ def clear_daily_done(server: str = "") -> None:
     else:
         cache = {}
     save_daily_done(cache)
+
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+# 结构：{ "<账号key>": { "2026-11-17": 612.5, "2026-11-18": 688.0 } }
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "cdf_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 # ———————————— 基础组件 ————————————
 def _common_headers(token=None, page="pages/main/main"):
@@ -756,7 +820,6 @@ def run_account(server, ref):
     return True, "ref " + str(ref) + ": " + emoji + " " + tag, status, expire_info, points_info
 
 def main():
-    log_startup()
     entries = list(YYBClient(APP_ID).entries())
     # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
     if YYB_ONLY_REFS:
@@ -765,6 +828,7 @@ def main():
             entries = [e for i, e in enumerate(entries, 1) if i in wanted]
             log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号" % (sorted(wanted), len(entries)))
     total = len(entries)
+    log_startup(total)
     tday, _, _ = today_str()
 
     log("🚀 中免会员小程序 每日签到开始 · 日期 " + tday + " · 共 " + str(total) + " 个账号")
@@ -790,7 +854,7 @@ def main():
                 expire_alerts.append((i, info))
             pinfo = cached.get("pointsInfo") if isinstance(cached, dict) else None
             if isinstance(pinfo, dict) and pinfo:
-                points_rows.append((i, float(pinfo.get("balance") or 0)))
+                points_rows.append((i, float(pinfo.get("balance") or 0), key))
             continue
         acc_banner(i, total, "标识：" + str(ref))
         try:
@@ -803,7 +867,10 @@ def main():
             if is_expire_alert(expire_info):
                 expire_alerts.append((i, expire_info))
             if isinstance(points_info, dict):
-                points_rows.append((i, float(points_info.get("balance") or 0)))
+                _bal = float(points_info.get("balance") or 0)
+                points_rows.append((i, _bal, key))
+                # 真实跑完且拿到总积分时写入今日快照（跳过账号不重复写，沿用首次记录）
+                record_points_snapshot(key, _bal)
         except Exception as e:
             err("💥 账号异常: " + str(e))
             err(traceback.format_exc())
@@ -814,21 +881,37 @@ def main():
             time.sleep(wait)
 
     fail = total - success - skipped
-    log(_ACC_RULE)
-    log(f"📊 [执行汇总] 中免会员 · 账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}")
-    # 账户总积分汇总（每个账号一行，便于对比）
-    for idx, bal in points_rows:
-        log("💎 总积分(%.2f)（账号%d）" % (bal, idx))
-    # 预过期积分提醒：只在最近一笔到期日距今 ≤ EXPIRE_WARN_DAYS 天时输出
-    for idx, info in expire_alerts:
-        log(expire_alert_line(info, idx))
-    log(_ACC_RULE)
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：中免会员")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (success, fail, skipped))
+    # 账户总积分：一行并列，账号之间用 "  |  " 分隔；括号内为较昨天最后一次记录的涨跌
+    if points_rows:
+        _cells = []
+        for idx, bal, akey in points_rows:
+            _delta = points_delta(akey, bal)
+            _delta_text = ("(%+.2f)" % _delta) if _delta is not None else ""
+            _cells.append("账号%d：%.2f%s" % (idx, bal, _delta_text))
+        log("💰 总积分：" + "  |  ".join(_cells))
+    # 预过期积分提醒（树状）：只在最近一笔到期日距今 ≤ EXPIRE_WARN_DAYS 天时输出
+    if expire_alerts:
+        log("⏳  即将过期积分：")
+        for _j, (idx, info) in enumerate(expire_alerts):
+            _branch = "└─" if _j == len(expire_alerts) - 1 else "├─"
+            _amt = float(info.get("amount") or 0)
+            _date = str(info.get("date") or "到期日未知")
+            log("%s 账号%d %s %.2f（%s到期）" % (_branch, idx, "·" * 20, _amt, _date))
+    log(SUMMARY_SEP)
 
     # 通知：有 ERROR 照旧推；检测到积分即将过期时，即使全成功也强制推一次汇总
     notify_summary = f"账号 {total} ｜ 成功 {success} ｜ 失败 {fail} ｜ 跳过 {skipped}"
     if points_rows:
         notify_summary += "\n" + " ｜ ".join(
-            "账号%d 总积分 %.2f" % (idx, bal) for idx, bal in points_rows)
+            "账号%d 总积分 %.2f" % (idx, bal) for idx, bal, _k in points_rows)
     if expire_alerts:
         notify_summary += "\n" + "\n".join(
             expire_alert_line(info, idx) for idx, info in expire_alerts)

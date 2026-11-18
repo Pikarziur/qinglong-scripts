@@ -195,7 +195,7 @@ def bark(title: str, content: str) -> None:
     ).json()
 
     if response["code"] == 200:
-        print("bark 推送成功！")
+        print("📢 [bark]通知已发送成功！")
     else:
         print("bark 推送失败！")
 
@@ -231,7 +231,7 @@ def dingding_bot(title: str, content: str) -> None:
     ).json()
 
     if not response["errcode"]:
-        print("钉钉机器人 推送成功！")
+        print("📢 [钉钉机器人]通知已发送成功！")
     else:
         print("钉钉机器人 推送失败！")
 
@@ -263,7 +263,7 @@ def feishu_bot(title: str, content: str) -> None:
     response = requests.post(url, data=json.dumps(data)).json()
 
     if response.get("StatusCode") == 0 or response.get("code") == 0:
-        print("飞书 推送成功！")
+        print("📢 [飞书]通知已发送成功！")
     else:
         print("飞书 推送失败！错误信息如下：\n", response)
 
@@ -280,7 +280,7 @@ def go_cqhttp(title: str, content: str) -> None:
     response = requests.get(url).json()
 
     if response["status"] == "ok":
-        print("go-cqhttp 推送成功！")
+        print("📢 [go-cqhttp]通知已发送成功！")
     else:
         print("go-cqhttp 推送失败！")
 
@@ -302,7 +302,7 @@ def gotify(title: str, content: str) -> None:
     response = requests.post(url, data=data).json()
 
     if response.get("id"):
-        print("gotify 推送成功！")
+        print("📢 [gotify]通知已发送成功！")
     else:
         print("gotify 推送失败！")
 
@@ -321,7 +321,7 @@ def iGot(title: str, content: str) -> None:
     response = requests.post(url, data=data, headers=headers).json()
 
     if response["ret"] == 0:
-        print("iGot 推送成功！")
+        print("📢 [iGot]通知已发送成功！")
     else:
         print(f'iGot 推送失败！{response["errMsg"]}')
 
@@ -346,7 +346,7 @@ def serverJ(title: str, content: str) -> None:
     response = requests.post(url, data=data).json()
 
     if response.get("errno") == 0 or response.get("code") == 0:
-        print("serverJ 推送成功！")
+        print("📢 [serverJ]通知已发送成功！")
     else:
         print(f'serverJ 推送失败！错误码：{response["message"]}')
 
@@ -371,7 +371,7 @@ def pushdeer(title: str, content: str) -> None:
     response = requests.post(url, data=data).json()
 
     if len(response.get("content").get("result")) > 0:
-        print("PushDeer 推送成功！")
+        print("📢 [PushDeer]通知已发送成功！")
     else:
         print("PushDeer 推送失败！错误信息：", response)
 
@@ -388,7 +388,7 @@ def chat(title: str, content: str) -> None:
     response = requests.post(url, data=data)
 
     if response.status_code == 200:
-        print("Chat 推送成功！")
+        print("📢 [Chat]通知已发送成功！")
     else:
         print("Chat 推送失败！错误信息：", response)
 
@@ -432,8 +432,7 @@ def pushplus_bot(title: str, content: str) -> None:
         response = requests.post(url=url_old, data=body, headers=headers).json()
 
         if response["code"] == 200:
-            print("PUSHPLUS(hxtrip) 推送成功！")
-
+            print("📢 [PushPlus]通知已发送成功！")
         else:
             print("PUSHPLUS 推送失败！")
 
@@ -464,7 +463,7 @@ def weplus_bot(title: str, content: str) -> None:
     response = requests.post(url=url, data=body, headers=headers).json()
 
     if response["code"] == 200:
-        print("微加机器人 推送成功！")
+        print("📢 [微加机器人]通知已发送成功！")
     else:
         print("微加机器人 推送失败！")
 
@@ -482,7 +481,7 @@ def qmsg_bot(title: str, content: str) -> None:
     response = requests.post(url=url, params=payload).json()
 
     if response["code"] == 0:
-        print("qmsg 推送成功！")
+        print("📢 [qmsg]通知已发送成功！")
     else:
         print(f'qmsg 推送失败！{response["reason"]}')
 
@@ -516,7 +515,7 @@ def wecom_app(title: str, content: str) -> None:
         response = wx.send_mpnews(title, content, media_id, touser)
 
     if response == "ok":
-        print("企业微信推送成功！")
+        print("📢 [企业微信]通知已发送成功！")
     else:
         print("企业微信推送失败！错误信息如下：\n", response)
 
@@ -603,7 +602,7 @@ def wecom_bot(title: str, content: str) -> None:
     ).json()
 
     if response["errcode"] == 0:
-        print("企业微信机器人推送成功！")
+        print("📢 [企业微信机器人]通知已发送成功！")
     else:
         print("企业微信机器人推送失败！")
 
@@ -647,7 +646,7 @@ def telegram_bot(title: str, content: str) -> None:
     ).json()
 
     if response["ok"]:
-        print("tg 推送成功！")
+        print("📢 [tg]通知已发送成功！")
     else:
         print("tg 推送失败！")
 
@@ -683,7 +682,7 @@ def aibotk(title: str, content: str) -> None:
     response = requests.post(url=url, data=body, headers=headers).json()
     print(response)
     if response["code"] == 0:
-        print("智能微秘书 推送成功！")
+        print("📢 [智能微秘书]通知已发送成功！")
     else:
         print(f'智能微秘书 推送失败！{response["error"]}')
 
@@ -731,7 +730,7 @@ def smtp(title: str, content: str) -> None:
             message.as_bytes(),
         )
         smtp_server.close()
-        print("SMTP 邮件 推送成功！")
+        print("📢 [SMTP 邮件]通知已发送成功！")
     except Exception as e:
         print(f"SMTP 邮件 推送失败！{e}")
 
@@ -759,7 +758,7 @@ def pushme(title: str, content: str) -> None:
     response = requests.post(url, data=data)
 
     if response.status_code == 200 and response.text == "success":
-        print("PushMe 推送成功！")
+        print("📢 [PushMe]通知已发送成功！")
     else:
         print(f"PushMe 推送失败！{response.status_code} {response.text}")
 
@@ -802,9 +801,9 @@ def chronocat(title: str, content: str) -> None:
             response = requests.post(url, headers=headers, data=json.dumps(data))
             if response.status_code == 200:
                 if chat_type == 1:
-                    print(f"QQ个人消息:{ids}推送成功！")
+                    print("📢 [QQ个人消息]通知已发送成功！")
                 else:
-                    print(f"QQ群消息:{ids}推送成功！")
+                    print("📢 [QQ群消息]通知已发送成功！")
             else:
                 if chat_type == 1:
                     print(f"QQ个人消息:{ids}推送失败！")
@@ -848,7 +847,7 @@ def ntfy(title: str, content: str) -> None:
     url = push_config.get("NTFY_URL") + "/" + push_config.get("NTFY_TOPIC")
     response = requests.post(url, data=data, headers=headers)
     if response.status_code == 200:  # 使用 response.status_code 进行检查
-        print("Ntfy 推送成功！")
+        print("📢 [Ntfy]通知已发送成功！")
     else:
         print("Ntfy 推送失败！错误信息：", response.text)
 
@@ -904,7 +903,7 @@ def wxpusher_bot(title: str, content: str) -> None:
     response = requests.post(url=url, json=data, headers=headers).json()
 
     if response.get("code") == 1000:
-        print("wxpusher 推送成功！")
+        print("📢 [wxpusher]通知已发送成功！")
     else:
         print(f"wxpusher 推送失败！错误信息：{response.get('msg')}")
 
@@ -951,7 +950,7 @@ def wxpusher_spt(title: str, content: str) -> None:
     response = requests.post(url=url, json=data, headers=headers).json()
 
     if response.get("code") == 1000:
-        print("wxpusher SPT 推送成功！")
+        print("📢 [wxpusher SPT]通知已发送成功！")
     else:
         print(f"wxpusher SPT 推送失败！错误信息：{response.get('msg')}")
 
@@ -988,7 +987,7 @@ def openilink(title: str, content: str) -> None:
     response = requests.post(url=url, json=data, headers=headers).json()
 
     if response.get("ok"):
-        print("OpeniLink 推送成功！")
+        print("📢 [OpeniLink]通知已发送成功！")
     else:
         print(f'OpeniLink 推送失败！错误信息：{response.get("error")}')
 
@@ -1079,7 +1078,7 @@ def custom_notify(title: str, content: str) -> None:
     )
 
     if response.status_code == 200:
-        print("自定义通知推送成功！")
+        print("📢 [自定义通知]通知已发送成功！")
     else:
         print(f"自定义通知推送失败！{response.status_code} {response.text}")
 

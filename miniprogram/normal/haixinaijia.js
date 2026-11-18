@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  海信爱家
-# version: 2026-11-17d
+# version: 2026-11-18a
 # cron: 42 4,14 * * *
 # 积分有效期：有效期至少为1年，即从获得开始至次年年底【1+1】
 # 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取积分-上年的消耗积分
@@ -163,7 +163,7 @@ process.on('uncaughtException', (e) => {
 
 // ========== 统一日志：[LEVEL] [HXAJ] message ==========
 function emit(level, msg) {
-    const _line = `[${level}] [HXAJ] ${msg}`;
+    const _line = `[${level}] ${msg}`;
     console.log(_line);
     if (level === 'ERROR') collectError(_line);
 }
@@ -246,12 +246,57 @@ function clear_daily_done(key = '') {
 // ========== 启动信息 ==========
 function logStartup(total) {
   logInfo(ACC_RULE);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${CONSTS.WX_APP_ID}`);
+  _title = `📃 脚本名称：海信爱家`;
+  if (CONSTS.WX_APP_ID) _title += ` ｜${CONSTS.WX_APP_ID}`;
+  logInfo(_title);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-17c';
+const SCRIPT_VER = '2026-11-18a';
 const ACC_RULE = '='.repeat(70);
+const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
+
+// 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const POINTS_HISTORY_FILE = path.join(__dirname, 'haixinaijia_points_history.json');
+function load_points_history() {
+  try {
+    if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
+      const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d;
+    }
+  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  return {};
+}
+function save_points_history(cache) {
+  try {
+    const tmp = `${POINTS_HISTORY_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
+  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+}
+function record_points_snapshot(account, totalPoints) {
+  if (totalPoints === null || totalPoints === undefined) return;
+  const val = Number(totalPoints);
+  if (!Number.isFinite(val)) return;
+  const hist = load_points_history();
+  let days = hist[account];
+  if (!days || typeof days !== 'object') days = {};
+  days[_today()] = val;
+  hist[account] = days;
+  save_points_history(hist);
+}
+function points_delta(account, todayVal) {
+  try {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    const yesterday = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const hist = load_points_history();
+    const days = hist[account];
+    if (!days || typeof days !== 'object' || !(yesterday in days)) return null;
+    return todayVal - Number(days[yesterday]);
+  } catch (e) { return null; }
+}
 
 // ── YYB-GO 取码参数 ────────────────────────────────────────────────
 // YYB_TIMEOUT：YYB-GO 内部会轮询多个上游长连接节点（实测候选 6 个），
@@ -3138,7 +3183,7 @@ async function main() {
       const cachedTotal = cachedEntry.totalPoints;
       if (cachedTotal !== null && cachedTotal !== undefined
           && Number.isFinite(Number(cachedTotal))) {
-        pointsRows.push([i + 1, Number(cachedTotal)]);
+        pointsRows.push([i + 1, Number(cachedTotal), doneKey]);
       }
       if (cachedEntry.expireAlert) expireAlerts.push(String(cachedEntry.expireAlert));
       continue;
@@ -3155,7 +3200,8 @@ async function main() {
         ? Number(result.pointsAfter) : null;
       mark_done_today(doneKey, '任务完成', totalPoints, result?.expireAlert || '');
       if (totalPoints !== null && Number.isFinite(totalPoints)) {
-        pointsRows.push([i + 1, totalPoints]);
+        pointsRows.push([i + 1, totalPoints, doneKey]);
+        record_points_snapshot(doneKey, totalPoints);
       }
 
       const toSave = Object.assign({}, merged, result.account, {
@@ -3177,15 +3223,30 @@ async function main() {
   }
 
   const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped}`;
-  logInfo(ACC_RULE);
-  logInfo(`📊 [执行汇总] ${_QN_SITE} · ${tail}`);
-  // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
-  for (const [idx, total] of pointsRows) logInfo(`💎 总积分(${total})（账号${idx}）`);
-  if (expireAlerts.length) {
-    logInfo(`⏳ [即将过期] 12-31 到期的积分（上年获取-上年消耗）：`);
-    for (const line of expireAlerts) logInfo(`   ${line}`);
+  const _now = new Date();
+  const _p = (n) => String(n).padStart(2, '0');
+  const _wk = '日一二三四五六'[_now.getDay()];
+  const _date = `${_now.getFullYear()}-${_p(_now.getMonth()+1)}-${_p(_now.getDate())}`;
+  logInfo(SUMMARY_SEP);
+  logInfo('📂 汇总日志');
+  logInfo('📃 脚本名称：海信爱家');
+  logInfo(`📅 运行日期：${_date}  周${_wk}`);
+  logInfo(`📊 运行结果：✔️ 成功：${ok} 个；❌ 失败：${fail} 个；⏭️ 跳过：${skipped} 个`);
+  const _cells = [];
+  for (const [idx, total, akey] of pointsRows) {
+    const _delta = points_delta(akey, Number(total));
+    const _dt = _delta === null ? '' : `(${_delta >= 0 ? '+' : ''}${_delta.toFixed(2)})`;
+    _cells.push(`账号${idx}：${Number(total).toFixed(2)}${_dt}`);
   }
-  logInfo(ACC_RULE);
+  if (_cells.length) logInfo('💰 总积分：' + _cells.join('  |  '));
+  if (expireAlerts.length) {
+    logInfo('⏳  即将过期积分：');
+    expireAlerts.forEach((line, j) => {
+      const _br = j === expireAlerts.length - 1 ? '└─' : '├─';
+      logInfo(`${_br} ${line}`);
+    });
+  }
+  logInfo(SUMMARY_SEP);
   // 过期提醒：命中窗口时强制推送一次（与错误通知独立）
   if (expireAlerts.length) {
     await pushExpireAlert(expireAlerts.join('\n'));

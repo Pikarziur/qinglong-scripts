@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  中通快递
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 30 6,16 * * *
 # 积分有效期：次年6月30日【1+0.5】
 # 检测过期积分：每年6月30日前七天检测并提醒（即将过期积分=上年已获取-上年已使用）
@@ -50,7 +50,7 @@ import os
 import json
 import traceback
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # ———————————— 错误通知（可选项，想用则用）————————————
 # 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
@@ -84,8 +84,65 @@ def now_text() -> str:
     # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
-SCRIPT_VER = "2026-11-17a"
+SCRIPT_VER = "2026-11-18a"
 ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "ztkuaidi_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
 
 # 签到前状态预检开关：查 queryRecentSign 判断今日是否已签，已签跳过签到写请求（防二次写请求）。
 # 查询异常/无今日记录一律照常签到，防漏签。与本地日打标互补。想关闭改成 False。
@@ -317,7 +374,11 @@ class AutoTask:
     # ========== 启动信息 ==========
     def log_startup(self, total: int = 0) -> None:
         self.log(ACC_RULE)
-        self.log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, self.wx_appid))
+        _title = "📃 脚本名称：中通快递"
+        if self.wx_appid:
+            _title += " ｜" + self.wx_appid
+        self.log(_title)
+        self.log("📌 脚本版本: %s" % SCRIPT_VER)
         if total:
             self.log("🔢 账号数量: %d" % total)
         self.log(ACC_RULE)
@@ -393,7 +454,7 @@ class AutoTask:
             return False
     def log(self, msg, level="info"):
         prefix = {"error": "ERROR", "warning": "WARN"}.get(level, "INFO")
-        line = f"[{prefix}] [ZTKD] {msg}"
+        line = f"[{prefix}] {msg}"
         print(line, flush=True)
         if prefix == "ERROR":
             collect_error(line)
@@ -889,7 +950,10 @@ class AutoTask:
                     "final_points": final_points,
                     "normal": _done,
                     "expirePoints": expire_pts,
+                    "key": _done_key,
                 })
+                if final_points is not None:
+                    record_points_snapshot(_done_key, final_points)
                 # 签到成功或今日已签 → 打上「今日已完成」标记
                 if _done:
                     mark_done_today(_done_key, sign_message, expire_pts)
@@ -904,17 +968,35 @@ class AutoTask:
             _ok = sum(1 for it in self.account_results if it.get("normal"))
             _sk = sum(1 for it in self.account_results if it.get("skipped"))
             _fail = _n - _ok - _sk
-            self.log("=" * 70)
-            self.log(f"📊 [执行汇总] {self.site_name} · 账号 {_n} ｜ 成功 {_ok} ｜ 失败 {_fail} ｜ 跳过 {_sk}")
-            # 汇总类别里打印每个账号的总积分
+            _now = datetime.now()
+            _week = "一二三四五六日"[_now.weekday()]
+            self.log(SUMMARY_SEP)
+            self.log("📂 汇总日志")
+            self.log("📃 脚本名称：中通快递")
+            self.log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+            self.log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+                % (_ok, _fail, _sk))
+            _cells = []
             for _i, _r in enumerate(self.account_results, 1):
                 _pt = _r.get("final_points")
                 if _pt is None:
                     _pt = _r.get("initial_points")
                 if _pt is None:
                     _pt = _r.get("point")
-                if _pt is not None and _pt != "-":
-                    self.log(f"💰 [总积分] 账号{_i}：{_pt}")
+                if _pt is None or _pt == "-":
+                    continue
+                try:
+                    _dv = float(_pt)
+                except (TypeError, ValueError):
+                    _dv = None
+                if _dv is None:
+                    _cells.append("账号%d：%s" % (_i, _pt))
+                    continue
+                _delta = points_delta(_r.get("key") or str(_i), _dv)
+                _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+                _cells.append("账号%d：%.2f%s" % (_i, _dv, _dt))
+            if _cells:
+                self.log("💰 总积分：" + "  |  ".join(_cells))
             # 积分过期提醒：窗口内汇总打印 + 独立强推（与错误推送分开，命中即推）
             try:
                 check_expire_remind(self.account_results)

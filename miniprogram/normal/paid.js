@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  平安i动
-# version: 2026-11-17c
+# version: 2026-11-18a
 # cron: 42 5,15 * * *
 # 积分有效期：无明确说明
 # 检测过期积分：按惯例每年12/25~12/31连续检测并提醒；过期积分=现有余额积分
@@ -212,7 +212,7 @@ process.on('uncaughtException', (e) => {
 
 // ========== 统一日志：[LEVEL] [PAID] message ==========
 function emit(level, msg) {
-    const _line = `[${level}] [PAID] ${msg}`;
+    const _line = `[${level}] ${msg}`;
     console.log(_line);
     if (level === 'ERROR') collectError(_line);
 }
@@ -224,6 +224,48 @@ function logErr(msg)  { emit('ERROR', msg); }
 
 // ========== 账号分隔标识 ==========
 const ACC_RULE = '='.repeat(70);
+const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
+
+// 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const POINTS_HISTORY_FILE = path.join(__dirname, 'paid_points_history.json');
+function load_points_history() {
+  try {
+    if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
+      const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d;
+    }
+  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  return {};
+}
+function save_points_history(cache) {
+  try {
+    const tmp = `${POINTS_HISTORY_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
+  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+}
+function record_points_snapshot(account, totalPoints) {
+  if (totalPoints === null || totalPoints === undefined) return;
+  const val = Number(totalPoints);
+  if (!Number.isFinite(val)) return;
+  const hist = load_points_history();
+  let days = hist[account];
+  if (!days || typeof days !== 'object') days = {};
+  days[_today()] = val;
+  hist[account] = days;
+  save_points_history(hist);
+}
+function points_delta(account, todayVal) {
+  try {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    const yesterday = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const hist = load_points_history();
+    const days = hist[account];
+    if (!days || typeof days !== 'object' || !(yesterday in days)) return null;
+    return todayVal - Number(days[yesterday]);
+  } catch (e) { return null; }
+}
 
 // 账号序号白名单（1 起），留空 [] = 跑 YYB_SERVER 里的全部账号；例如 [1,3] 只跑第 1、3 个账号
 const YYB_ONLY_REFS = [];
@@ -318,7 +360,7 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-11-17c';   // 更新脚本此值
+const SCRIPT_VER = '2026-11-18a';   // 更新脚本此值
 // 签到前健康币流水状态预检（2026-11-17）：getFlow 当天有「签到」入账则跳过签到写请求。
 // 已签跳过写请求避免二次执行数据；查询失败/查不到照常签到，不漏签。
 const ENABLE_SIGN_STATE_CHECK = true;
@@ -903,7 +945,26 @@ async function checkExpireRemind(rows){
 async function finishSummary(total, okCount, skipped = 0, expireRows = []){
   const tail = `账号 ${total} ｜ 成功 ${okCount} ｜ 失败 ${total - okCount - skipped} ｜ 跳过 ${skipped}`;
   logInfo(ACC_RULE);
-  logInfo(`📊 [执行汇总] 平安i动 · ${tail}`);
+  const _now = new Date();
+  const _p2 = (n) => String(n).padStart(2, '0');
+  const _wk2 = '日一二三四五六'[_now.getDay()];
+  const _date2 = `${_now.getFullYear()}-${_p2(_now.getMonth()+1)}-${_p2(_now.getDate())}`;
+  logInfo(SUMMARY_SEP);
+  logInfo('📂 汇总日志');
+  logInfo('📃 脚本名称：平安i动');
+  logInfo(`📅 运行日期：${_date2}  周${_wk2}`);
+  logInfo(`📊 运行结果：✔️ 成功：${okCount} 个；❌ 失败：${total - okCount - skipped} 个；⏭️ 跳过：${skipped} 个`);
+  const _cells2 = [];
+  for (const r of (expireRows || [])) {
+    if (!r || r.balance === null || r.balance === undefined) continue;
+    const bal = Number(r.balance);
+    if (!Number.isFinite(bal)) continue;
+    const _delta = points_delta(r.key || r.label, bal);
+    const _dt = _delta === null ? '' : `(${_delta >= 0 ? '+' : ''}${_delta.toFixed(2)})`;
+    _cells2.push(`${r.label}：${bal.toFixed(2)}${_dt}`);
+  }
+  if (_cells2.length) logInfo('💰 总积分：' + _cells2.join('  |  '));
+  logInfo(SUMMARY_SEP);
   // 汇总类别里打印每个账号的总积分
   // 数据源：expireRows（{ label, balance }），跳过账号的余额由打标缓存读回
   const pointLines = [];
@@ -911,7 +972,6 @@ async function finishSummary(total, okCount, skipped = 0, expireRows = []){
     if (!r || r.balance === null || r.balance === undefined) continue;
     const bal = Number(r.balance);
     if (!Number.isFinite(bal)) continue;
-    logInfo(`💎 总积分(${bal})（${r.label}）`);
     pointLines.push(`${r.label} 总积分 ${bal}`);
   }
   // 过期提醒打印在汇总类别内：年尾最后 7 天、余额>0 才提醒，连续提醒 + 独立强推
@@ -928,7 +988,10 @@ async function finishSummary(total, okCount, skipped = 0, expireRows = []){
 
 async function main(){
   logInfo(ACC_RULE);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${APPID}`);
+  _title = `📃 脚本名称：平安i动`;
+  if (APPID) _title += ` ｜${APPID}`;
+  logInfo(_title);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER}`);
   logInfo(ACC_RULE);
   const raw = process.env.YYB_SERVER || '';
   if (!raw.trim()){ logErr('❌ 未配置 YYB_SERVER，格式：地址@账号ref，多账号一行一个'); await finishSummary(0, 0); process.exitCode = 1; return; }
@@ -966,7 +1029,7 @@ async function main(){
       logInfo(`⏭️ [打标] 账号 ${idx + 1}/${total} 今日任务已完成，跳过`);
       skipped++;
       // 跳过账号从打标缓存读回余额，保证汇总的过期提醒仍连续
-      expireRows.push({ label, balance: balance_from_done(doneKey) });
+      expireRows.push({ label, balance: balance_from_done(doneKey), key: doneKey });
       continue;
     }
     logInfo(ACC_RULE);
@@ -974,7 +1037,8 @@ async function main(){
     logInfo(ACC_RULE);
     const r = await runOne(account, cache, tkmap);
     r.line.forEach(logLine);
-    expireRows.push({ label, balance: r.balance });
+    expireRows.push({ label, balance: r.balance, key: doneKey });
+    if (r.balance !== null && r.balance !== undefined) record_points_snapshot(doneKey, r.balance);
     if (r.alreadySigned) {
       // 状态预检命中今日已签：跳过写请求，计入跳过并补打标（与日打标同口径）
       skipped++;

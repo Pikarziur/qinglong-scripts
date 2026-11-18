@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  漓泉啤酒生态营地
-# version: 2026-11-17b
+# version: 2026-11-18a
 # cron: 24 5,15 * * *
 # 积分有效期：未知
 # 每月最后一天统一检测「即将过期积分」(getExpirePoints)，有数据则连续提醒 3 天
@@ -158,7 +158,7 @@ _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
 def _emit(level, msg):
-    line = f"[{level}] [LQPIJIU] {msg}"
+    line = f"[{level}] {msg}"
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -176,12 +176,74 @@ def now_text() -> str:
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, MINI_APP_ID))
+    _title = "📃 脚本名称：漓泉啤酒"
+    if MINI_APP_ID:
+        _title += " ｜" + MINI_APP_ID
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17b"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "liquanpijiu_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 def acc_banner(idx, total, ident=""):
     """打印账号分隔标识（开始）。"""
@@ -976,7 +1038,7 @@ def main():
             # 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
             cached_total = total_points_from_done(openid)
             if cached_total is not None:
-                points_rows.append((i, labels[openid], cached_total))
+                points_rows.append((i, labels[openid], cached_total, openid))
             continue
         acc_banner(i, len(entries), ("备注：" + remark) if remark else ("标识：" + openid))
         try:
@@ -988,19 +1050,37 @@ def main():
             if ok:
                 mark_done_today(openid, "签到完成", total_points)
                 if total_points is not None:
-                    points_rows.append((i, labels[openid], total_points))
+                    points_rows.append((i, labels[openid], total_points, openid))
+                    record_points_snapshot(openid, total_points)
         except Exception as e:
             err(f"❌ 账号 {i} 执行异常: {e}")
         acc_footer(i, len(entries))
         time.sleep(1)
 
     fail_count = len(entries) - ok_count - skipped
-    log(_ACC_RULE)
-    log(f"📊 [执行汇总] 漓泉啤酒 · 账号 {len(entries)} ｜ 成功 {ok_count} ｜ 失败 {fail_count} ｜ 跳过 {skipped}")
-    # 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
-    for idx, label, total in points_rows:
-        log(f"💎 总积分({total})（{label}）")
-    log(_ACC_RULE)
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：漓泉啤酒")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (ok_count, fail_count, skipped))
+    _cells = []
+    for idx, label, total, akey in points_rows:
+        try:
+            _dv = float(total)
+        except (TypeError, ValueError):
+            _dv = None
+        if _dv is None:
+            _cells.append("账号%d：%s" % (idx, total))
+            continue
+        _delta = points_delta(akey, _dv)
+        _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+        _cells.append("账号%d：%.2f%s" % (idx, _dv, _dt))
+    if _cells:
+        log("💰 总积分：" + "  |  ".join(_cells))
+    log(SUMMARY_SEP)
     # 积分过期提醒：检测日写入的 3 天窗口内，每天汇总打印 + 强推（每天最多一条）
     try:
         check_expire_remind(expire_remind_hits(), labels)
@@ -1008,7 +1088,7 @@ def main():
         warn(f"⚠️ 过期提醒处理异常: {e}")
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     _notify_tail = f"账号 {len(entries)} ｜ 成功 {ok_count} ｜ 失败 {fail_count} ｜ 跳过 {skipped}"
-    _point_lines = [f"{label} 总积分 {total}" for _idx, label, total in points_rows]
+    _point_lines = [f"{label} 总积分 {total}" for _idx, label, total, _k in points_rows]
     if _point_lines:
         _notify_tail += "\n" + " ｜ ".join(_point_lines)
     flush_notify(

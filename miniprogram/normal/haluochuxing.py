@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  哈啰出行
-# version: 2026-11-17c
+# version: 2026-11-18a
 # cron: 48 4,14 * * *
 # 积分有效期：获得起3个月内
 # 检测过期积分：每3个月月底前七天 检查并连续提醒；过期积分=现有积分
@@ -169,7 +169,7 @@ sys.excepthook = _qn_excepthook
 
 
 def _emit(level, msg):
-    line = "[%s] [HLCX] %s" % (level, msg)
+    line = "[%s] %s" % (level, msg)
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
@@ -186,12 +186,74 @@ def err(msg):  _emit("ERROR", msg)
 # ========== 启动信息 ==========
 def log_startup(total: int = 0) -> None:
     log(_ACC_RULE)
-    log("📌 脚本版本: %s ｜ %s" % (SCRIPT_VER, APP_NO))
+    _title = "📃 脚本名称：哈啰出行"
+    if APP_NO:
+        _title += " ｜" + APP_NO
+    log(_title)
+    log("📌 脚本版本: %s" % SCRIPT_VER)
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-17d"
+SCRIPT_VER = "2026-11-18a"
 _ACC_RULE = "=" * 70
+SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
+
+# 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "haluochuxing_points_history.json")
+
+
+def load_points_history() -> Dict[str, Any]:
+    try:
+        if os.path.exists(POINTS_HISTORY_FILE):
+            with open(POINTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+    return {}
+
+
+def save_points_history(cache: Dict[str, Any]) -> None:
+    try:
+        tmp = POINTS_HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, POINTS_HISTORY_FILE)
+    except Exception as exc:
+        err(f"❌ [积分] 历史保存失败: {exc}")
+
+
+def record_points_snapshot(account: str, total_points: Any) -> None:
+    """记录该账号今天的总积分（覆盖同日旧值＝保留当天最后一次运行数据）。"""
+    if total_points is None:
+        return
+    try:
+        val = float(total_points)
+    except (TypeError, ValueError):
+        return
+    hist = load_points_history()
+    days = hist.get(account)
+    if not isinstance(days, dict):
+        days = {}
+    days[_today()] = val
+    hist[account] = days
+    save_points_history(hist)
+
+
+def points_delta(account: str, today_val: float) -> Optional[float]:
+    """严格取昨天最后一次记录的总积分，返回 今天-昨天；昨天无记录或异常都返回 None。"""
+    try:
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = load_points_history()
+        days = hist.get(account)
+        if not isinstance(days, dict) or yesterday not in days:
+            return None
+        return today_val - float(days.get(yesterday))
+    except Exception:
+        return None
+
 
 # 积分过期提醒：按脚本头部注释规则（每3个月月底前七天 检查并连续提醒；
 # 过期积分=现有积分）。命中窗口时，任一账号现有积分>0 则在汇总日志连续打印并强推。
@@ -903,17 +965,27 @@ def _finish(total: int, ok_count: int, skipped: int = 0,
     """打印尾部 [执行汇总] 并推送错误日志，返回退出码。"""
     fail_count = total - ok_count - skipped
     tail = "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total, ok_count, fail_count, skipped)
-    log(_ACC_RULE)
-    log("📊 [执行汇总] 哈啰出行 · %s" % tail)
-    # 总积分汇总（无论是否跳过、任务是否已完成，都在这里显示）
+    _now = datetime.now()
+    _week = "一二三四五六日"[_now.weekday()]
+    log(SUMMARY_SEP)
+    log("📂 汇总日志")
+    log("📃 脚本名称：哈啰出行")
+    log("📅 运行日期：%s  周%s" % (_now.strftime("%Y-%m-%d"), _week))
+    log("📊 运行结果：✔️ 成功：%d 个；❌ 失败：%d 个；⏭️ 跳过：%d 个"
+        % (ok_count, fail_count, skipped))
+    _cells = []
     if results:
         for idx, r in enumerate(results, 1):
             total_points = r.get("totalPoints")
             if total_points is None:
                 continue
-            label = b32(r.get("label")) or "账号"
-            log(f"💎 总积分({total_points})（{label}）")
-    log(_ACC_RULE)
+            _akey = r.get("server") or str(idx)
+            _delta = points_delta(_akey, total_points)
+            _dt = ("(%+.2f)" % _delta) if _delta is not None else ""
+            _cells.append("账号%d：%s%s" % (idx, total_points, _dt))
+    if _cells:
+        log("💰 总积分：" + "  |  ".join(_cells))
+    log(SUMMARY_SEP)
     # 积分过期提醒：每 3 个月的月底前 7 天窗口内、现有积分>0 时连续打印 + 强推
     if results is not None:
         try:
@@ -990,6 +1062,8 @@ def main() -> int:
         try:
             result = run_account(index, total, account)
             results.append(result)
+            if result.get("totalPoints") is not None:
+                record_points_snapshot(account.server, result["totalPoints"])
             # 只有整个流程走完（success=True）才算今日完成；
             # 未绑定账号（skipped）、DRY_RUN、关闭签到等不算真正完成，不打标
             if (result.get("success") and not result.get("skipped")

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  创维会员中心
-# version: 2026-11-17a
+# version: 2026-11-18a
 # cron: 18 4,14 * * *
 # 积分有效期：自账号注册日起每 365 天清算一次（按各账号实际注册时间）
 =========================================================*/
@@ -268,7 +268,7 @@ function parseAccounts(raw) {
 
 // ========== 统一日志：[LEVEL] [CHUANGWEI] message ==========
 function emit(level, msg) {
-  const _line = `[${level}] [CHUANGWEI] ${msg}`;
+  const _line = `[${level}] ${msg}`;
   console.log(_line);
   if (level === 'ERROR') collectError(_line);
 }
@@ -353,12 +353,57 @@ function section(title) { logInfo(`━━━ ${title} ━━━`); }
 // ========== 启动信息 ==========
 function logStartup(total) {
   logInfo(ACC_RULE);
-  logInfo(`📌 脚本版本: ${SCRIPT_VER} ｜ ${APPID}`);
+  _title = `📃 脚本名称：创维会员中心`;
+  if (APPID) _title += ` ｜${APPID}`;
+  logInfo(_title);
+  logInfo(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-17a';
+const SCRIPT_VER = '2026-11-18a';
 const ACC_RULE = '='.repeat(70);
+const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
+
+// 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const POINTS_HISTORY_FILE = path.join(__dirname, 'chuangwei_points_history.json');
+function load_points_history() {
+  try {
+    if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
+      const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d;
+    }
+  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  return {};
+}
+function save_points_history(cache) {
+  try {
+    const tmp = `${POINTS_HISTORY_FILE}.tmp`;
+    _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
+    _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
+  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+}
+function record_points_snapshot(account, totalPoints) {
+  if (totalPoints === null || totalPoints === undefined) return;
+  const val = Number(totalPoints);
+  if (!Number.isFinite(val)) return;
+  const hist = load_points_history();
+  let days = hist[account];
+  if (!days || typeof days !== 'object') days = {};
+  days[_today()] = val;
+  hist[account] = days;
+  save_points_history(hist);
+}
+function points_delta(account, todayVal) {
+  try {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n) => String(n).padStart(2, '0');
+    const yesterday = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const hist = load_points_history();
+    const days = hist[account];
+    if (!days || typeof days !== 'object' || !(yesterday in days)) return null;
+    return todayVal - Number(days[yesterday]);
+  } catch (e) { return null; }
+}
 function accBanner(idx, total, ident = '') {
   logInfo(ACC_RULE);
   logInfo(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
@@ -1346,7 +1391,7 @@ async function runOne(account, idx, state = {}) {
       // 被跳过也要在汇总里显示总积分：从打标缓存读回，不重新登录取码
       const cachedTotal = cached?.totalPoints;
       if (cachedTotal !== null && cachedTotal !== undefined && Number.isFinite(Number(cachedTotal))) {
-        points_rows.push([i + 1, Number(cachedTotal)]);
+        points_rows.push([i + 1, Number(cachedTotal), doneKey]);
       }
       continue;
     }
@@ -1371,17 +1416,35 @@ async function runOne(account, idx, state = {}) {
     }
     if (state.totalPoints !== null && state.totalPoints !== undefined
         && Number.isFinite(Number(state.totalPoints))) {
-      points_rows.push([i + 1, Number(state.totalPoints)]);
+      points_rows.push([i + 1, Number(state.totalPoints), doneKey]);
+      record_points_snapshot(doneKey, state.totalPoints);
     }
     accFooter(i + 1, accounts.length);
   }
-  logInfo('='.repeat(70));
-  logInfo(`📊 [执行汇总] 创维 · 账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`);
-  // 总积分汇总：无论是否跳过、任务是否已完成，都在这里显示
-  for (const [idx, total] of points_rows) logInfo(`💎 总积分(${total})（账号${idx}）`);
-  // 积分过期提醒：清算日前 7 天内命中即输出，每轮强推一次汇总通知
-  for (const [idx, info] of expire_alerts) logInfo(expireAlertLine(info, idx));
-  logInfo('='.repeat(70));
+  const _now = new Date();
+  const _p = (n) => String(n).padStart(2, '0');
+  const _wk = '日一二三四五六'[_now.getDay()];
+  const _date = `${_now.getFullYear()}-${_p(_now.getMonth()+1)}-${_p(_now.getDate())}`;
+  logInfo(SUMMARY_SEP);
+  logInfo('📂 汇总日志');
+  logInfo('📃 脚本名称：创维会员中心');
+  logInfo(`📅 运行日期：${_date}  周${_wk}`);
+  logInfo(`📊 运行结果：✔️ 成功：${accounts.length - failed - skipped} 个；❌ 失败：${failed} 个；⏭️ 跳过：${skipped} 个`);
+  const _cells = [];
+  for (const [idx, total, akey] of points_rows) {
+    const _delta = points_delta(akey, Number(total));
+    const _dt = _delta === null ? '' : `(${_delta >= 0 ? '+' : ''}${_delta.toFixed(2)})`;
+    _cells.push(`账号${idx}：${Number(total).toFixed(2)}${_dt}`);
+  }
+  if (_cells.length) logInfo('💰 总积分：' + _cells.join('  |  '));
+  if (expire_alerts.length) {
+    logInfo('⏳  即将过期积分：');
+    expire_alerts.forEach(([idx, info], j) => {
+      const _br = j === expire_alerts.length - 1 ? '└─' : '├─';
+      logInfo(`${_br} 账号${idx} ${'·'.repeat(20)} ${Number(info.amount || 0).toFixed(2)}（${info.date || info.expireDate || ''}到期）`);
+    });
+  }
+  logInfo(SUMMARY_SEP);
   let notifySummary = `账号 ${accounts.length} ｜ 成功 ${accounts.length - failed - skipped} ｜ 失败 ${failed} ｜ 跳过 ${skipped}`;
   if (points_rows.length) {
     notifySummary += '\n' + points_rows.map(([idx, total]) => `账号${idx} 总积分 ${total}`).join(' ｜ ');
