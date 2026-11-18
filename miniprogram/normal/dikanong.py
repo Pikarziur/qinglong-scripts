@@ -242,7 +242,7 @@ def safe_data(resp: Dict[str, Any]) -> Dict[str, Any]:
 def log_title() -> None:
     print()
     log(ACC_RULE)
-    log("🏃 迪卡侬小程序动态 code 版")
+    log("🏃 迪卡侬")
     log(f"🕒 启动时间: {now_text()}")
     log(f"🔢 账号数量: {len(SERVERS)}")
     log(ACC_RULE)

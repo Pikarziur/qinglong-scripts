@@ -3,7 +3,7 @@
 # =========================================================
 # name:  影视飓风
 # version: 2026-11-18a
-# cron: 6 6,16 * * *
+# cron: 12 6,16 * * *
 # 积分有效期：1年有效期【1】
 # 检测过期积分：每年12/25~12/31检测提醒（即将过期积分=现有总积分）
 # =========================================================
@@ -20,7 +20,7 @@ QYWX_TOKEN = __import__("os").getenv("QYWX_TOKEN", "")  # 企业微信机器人 
 
 
 """
-影视飓风小程序动态 code 版
+影视飓风
 
 功能：
   1. 本地 code 服务获取微信 code
@@ -242,7 +242,7 @@ def mask_phone(phone: Any) -> str:
 def log_title() -> None:
     print()
     log(ACC_RULE)
-    log("🎬 影视飓风小程序动态 code 版")
+    log("🎬 影视飓风")
     log(f"🕒 启动时间: {now_text()}")
     log(f"🔢 账号数量: {len(SERVERS)}")
     log(ACC_RULE)
@@ -1043,7 +1043,7 @@ def build_notify(results: List[Dict[str, Any]], skipped: Optional[List[Dict[str,
     fail_count = len(results) - success_count
     skip_count = len(skipped or [])
 
-    content = f"""🎬 影视飓风动态 code 任务结果
+    content = f"""🎬 影视飓风
 
 ━━━━━━━━━━━━━━━━━━━━
 🏁 总结：{success_count} 成功 / {fail_count} 失败{' / %d 跳过（今日已完成）' % skip_count if skip_count else ''}
