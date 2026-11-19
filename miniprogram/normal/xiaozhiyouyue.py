@@ -35,6 +35,13 @@
 
 YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
 
+# 直填登录态（可选，最高优先级）：环境变量 XZY_SESSION，每行一个账号，
+#   格式 `[备注@]SESSION值`。配了就跳过 YYBGO 取码，直接用现成 SESSION 跑。
+#   SESSION 有效期 48 小时，适合「取码被风控挡了但手里有 HAR 抓到的 SESSION」时兜底。
+#   ⚠️ SESSION 是 base64 明文，base64 解出来就是 userId + channelCode + siteId，
+#      等同于账号凭据，别贴到公开渠道。
+# 例：
+#   XZY_SESSION=我的号@JDE3MTk2Njc0JCRXWGp4cmlvbDhlODI5M3dlenUkJFNJVEVfMzMyNTQyNDI2...
 import os, re, time, random, json, traceback
 import requests
 from datetime import datetime, timedelta
@@ -490,7 +497,7 @@ def _yyb_error_detail(body) -> str:
             #    upstream_errors 的元素字段名是 **upstream_code**（不是 code），
             #    例如 {"stage":"shortlink_application","upstream_code":-14}。
             #    原来只读 item["code"] → 取不到码 → 落到兜底的「上游拒绝」，
-            #    丢掉了 -14（该微信未关注公众号）这个可执行信息。
+            #    丢掉了结构化错误码这个可执行信息。
             #    两个字段名都兼容，避免服务端换版本后又失效。
             for key in ("upstream_code", "code"):
                 val = item.get(key)
@@ -499,8 +506,20 @@ def _yyb_error_detail(body) -> str:
                     break
         if codes:
             joined = "/".join(codes)
-            if "14" in joined:
-                return "上游拒绝（-14，该微信未关注公众号）"
+            # ⚠️ 2026-11-18 再修正：**-14 不是「该微信未关注公众号」**。
+            #    实证（YYB-GO system_logs）：20:42:39 acct=4 拒绝(-14)，
+            #    20:42:46 acct=5 成功、20:42:51 acct=9 也成功 —— 同一 app_id、
+            #    同一时间窗口内失败与成功交替出现，属账号/节点级的临时拒绝
+            #    （YYB-GO 有编队 failover，换个成员就能成），与关注状态无关。
+            if "-14" in codes or "14" in codes:
+                # 实测原文明细：ShortLink response failed (authorization not replayed):
+                #   shortlink application rejected: code=-14
+                # → 语义是「该微信的授权无法重放」（登录态/授权凭据失效，或被临时风控），
+                #   与「是否关注公众号」无关。持续失败需在 YYB-GO 里重新扫码登录该微信号。
+                return ("上游拒绝（-14，该微信授权无法重放，"
+                        "多为登录态失效或临时风控；持续失败需在 YYB-GO 重新扫码该号）")
+            if "10009" in codes:
+                return "上游拒绝（10009，微信侧授权频率限制）"
             return "上游拒绝（错误码 %s）" % joined
         return "上游拒绝"
 
@@ -519,9 +538,52 @@ def _yyb_error_detail(body) -> str:
     return ""
 
 
+def _yyb_retryable(detail: str) -> bool:
+    """判断这类取码失败是否值得重试。
+
+    ⚠️ 2026-11-18 实测依据（YYB-GO system_logs，app_id=wx3db193ecdebd3fea）：
+        20:42:39  acct=4 拒绝(-14, shortlink_application)  耗时 2119ms
+        20:42:46  acct=5 协议调用成功                        耗时  345ms
+        20:42:51  acct=9 协议调用成功                        耗时  351ms
+    同一 app_id、同一时间窗口内失败与成功交替出现 → 这是**账号/节点级的临时拒绝**
+    （YYB-GO 有编队 failover 机制，换个成员就可能成），不是该微信的永久状态。
+
+    原来只对「上游连接超时」重试，其余（-14 / 10009 等）直接判死，
+    结果一次风控抖动就让整轮账号全灭。故把「上游拒绝」也纳入重试。
+    唯一明确不可重试的是「账号不存在」（ref 配错了，重试多少次都没用）。
+    """
+    if not detail:
+        return False
+    if "账号不存在" in detail:
+        return False
+    return True
+
+
+def load_direct_sessions():
+    """解析环境变量 XZY_SESSION 里直填的登录态。
+
+    格式：每行一个账号，`[备注@]SESSION值`；`@` 前面的部分只作账号标识（缺省用序号）。
+    留空 / 只有注释行 → 返回空列表，脚本回退到 YYBGO 取码模式。
+
+    返回 [(标识, SESSION值), ...]
+    """
+    out = []
+    raw = os.getenv("XZY_SESSION") or ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        ident, sep, val = line.rpartition("@")
+        val = val.strip()
+        if not sep or not val:
+            # 没有 @ 分隔：整行就是 SESSION，标识用序号
+            val, ident = line, ""
+        out.append((ident.strip() or ("直填%d" % (len(out) + 1)), val))
+    return out
+
+
 class YYBClient:
     """YYB-Go-Enhanced 客户端：只负责取公众号网页授权 code。"""
-
     @staticmethod
     def parse_entry(entry):
         entry = (entry or "").strip()
@@ -560,7 +622,11 @@ class YYBClient:
         return "（未配置）"
 
     def get_h5_code(self, server: str, ref: str) -> Tuple[Optional[str], str]:
-        """取公众号网页授权 code；仅「上游连接超时」自动重试。
+        """取公众号网页授权 code。
+
+        ⚠️ 2026-11-18：可重试范围从「仅连接超时」扩大到「连接超时 + 上游拒绝」
+        （-14 / 10009 等临时性拒绝），间隔按 2 的幂递增退避（封顶 30 秒）。
+        依据见 _yyb_retryable() 的说明。
 
         返回 (code, "") 或 (None, 原因)。
         """
@@ -582,9 +648,10 @@ class YYBClient:
             except requests.RequestException as exc:
                 if attempt >= YYB_RETRY_TIMES:
                     return None, "YYB 请求异常：%s" % exc
+                delay = min(YYB_RETRY_DELAY * (2 ** attempt), 30)
                 log("⏳ [重试] h5code 第%d/%d次失败（连接层），%d秒后重试"
-                    % (attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
-                time.sleep(YYB_RETRY_DELAY)
+                    % (attempt + 1, YYB_RETRY_TIMES + 1, delay))
+                time.sleep(delay)
                 continue
 
             try:
@@ -594,12 +661,17 @@ class YYBClient:
 
             if r.status_code >= 400:
                 detail = _yyb_error_detail(body)
-                if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
+                # ⚠️ 2026-11-18 修正：原来只对「上游连接超时」重试，
+                #    「上游拒绝」(-14 / 10009 等) 直接判死 → 一次风控抖动就全灭。
+                #    现在按 _yyb_retryable() 判定，并对重试间隔做递增退避，
+                #    避免密集重试反过来加重微信侧限流。
+                if not _yyb_retryable(detail) or attempt >= YYB_RETRY_TIMES:
                     return None, ("HTTP %d%s" % (r.status_code,
                                   ("（%s）" % detail) if detail else ""))
+                delay = min(YYB_RETRY_DELAY * (2 ** attempt), 30)
                 log("⏳ [重试] h5code 第%d/%d次失败（%s），%d秒后重试"
-                    % (attempt + 1, YYB_RETRY_TIMES + 1, detail, YYB_RETRY_DELAY))
-                time.sleep(YYB_RETRY_DELAY)
+                    % (attempt + 1, YYB_RETRY_TIMES + 1, detail, delay))
+                time.sleep(delay)
                 continue
 
             if not isinstance(body, dict):
@@ -842,36 +914,46 @@ def coupon_summary(coupons: list) -> str:
 
 
 # ———————————— 单账号流程 ————————————
-def run_account(server: str, ref: str):
+def run_account(server: str, ref: str, direct_session: str = ""):
     """跑一个账号。
+
+    direct_session 非空 → 直填登录态模式，跳过 YYB 取码，直接用现成 SESSION。
 
     返回 (ok, 汇总行, 状态, points_info, extra_lines)
       状态：成功 / 已签 / 失败
     """
     extra_lines = []
 
-    # 1) 取公众号网页授权 code
-    code, err_msg = YYBClient().get_h5_code(server, ref)
-    if not code:
-        brief = " ".join(str(err_msg).split())[:90]
-        err("❌ 取码失败 · 原因: " + brief)
-        return False, "ref %s: ❌ 取码失败（%s）" % (ref, brief), "失败", None, extra_lines
-    log("🔑 授权码 · 获取成功")
+    # 1) 取公众号网页授权 code（直填模式跳过）
+    if direct_session:
+        sess = _make_session()
+        sess.cookies.set("SESSION", direct_session, domain=HOST, path="/")
+        log("🔑 登录态 · 直填 SESSION（跳过 YYB 取码）")
+    else:
+        code, err_msg = YYBClient().get_h5_code(server, ref)
+        if not code:
+            brief = " ".join(str(err_msg).split())[:90]
+            err("❌ 取码失败 · 原因: " + brief)
+            return False, "ref %s: ❌ 取码失败（%s）" % (ref, brief), "失败", None, extra_lines
+        log("🔑 授权码 · 获取成功")
 
-    # 2) code 换已登录 SESSION
-    sess = _make_session()
-    ok, msg = exchange_session(sess, code)
-    if not ok:
-        brief = " ".join(str(msg).split())[:110]
-        err("❌ 登录失败 · 原因: " + brief)
-        return False, "ref %s: ❌ 登录失败（%s）" % (ref, brief), "失败", None, extra_lines
-    log("🔑 登录态 · " + msg)
+        # 2) code 换已登录 SESSION
+        sess = _make_session()
+        ok, msg = exchange_session(sess, code)
+        if not ok:
+            brief = " ".join(str(msg).split())[:110]
+            err("❌ 登录失败 · 原因: " + brief)
+            return False, "ref %s: ❌ 登录失败（%s）" % (ref, brief), "失败", None, extra_lines
+        log("🔑 登录态 · " + msg)
 
     # 3) 校验登录态
     li = check_login(sess)
     if not li.get("ok"):
         brief = str(li.get("err") or "未知")[:90]
         err("❌ 会话校验失败 · " + brief)
+        if direct_session:
+            err("   ↳ 直填的 SESSION 已失效（有效期 48 小时）—— "
+                "需重新抓 HAR 取新 SESSION，或改用 YYBGO 取码模式")
         return False, "ref %s: ❌ 会话无效" % ref, "失败", None, extra_lines
     log("🆔 会员ID · %s" % (li.get("userId") or "-"))
 
@@ -945,24 +1027,33 @@ def run_account(server: str, ref: str):
 
 
 def main():
-    entries = list(YYBClient().entries())
-    # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
-    if YYB_ONLY_REFS:
-        wanted = set(int(x) for x in YYB_ONLY_REFS
-                     if str(x).strip().isdigit() and int(x) > 0)
-        if wanted:
-            entries = [e for i, e in enumerate(entries, 1) if i in wanted]
-            log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号"
-                % (sorted(wanted), len(entries)))
+    # 账号来源优先级：XZY_SESSION 直填 > XZY_SERVER / YYB_SERVER 取码
+    direct = load_direct_sessions()
+    if direct:
+        entries = [(None, ident, sval) for ident, sval in direct]
+        source = "XZY_SESSION（直填登录态）"
+    else:
+        entries = list(YYBClient().entries())
+        # 按 YYB_ONLY_REFS 序号白名单筛选（1 起）；留空 [] 则运行全部账号
+        if YYB_ONLY_REFS:
+            wanted = set(int(x) for x in YYB_ONLY_REFS
+                         if str(x).strip().isdigit() and int(x) > 0)
+            if wanted:
+                entries = [e for i, e in enumerate(entries, 1) if i in wanted]
+                log("ℹ️ 按 YYB_ONLY_REFS 筛选：请求序号 %s，命中 %d 个账号"
+                    % (sorted(wanted), len(entries)))
+        source = YYBClient.env_source()
+
     total = len(entries)
     log_startup(total)
-    log("🔌 账号来源 · %s" % YYBClient.env_source())
+    log("🔌 账号来源 · %s" % source)
 
     log("🚀 %s 每日签到开始 · 日期 %s · 共 %d 个账号"
         % (SITE_NAME, today_str(), total))
 
     if not entries:
-        err("🚫 没有可执行账号（青龙环境变量 XZY_SERVER / YYB_SERVER 为空，或被 YYB_ONLY_REFS 过滤空）")
+        err("🚫 没有可执行账号（青龙环境变量 XZY_SESSION / XZY_SERVER / YYB_SERVER 为空，"
+            "或被 YYB_ONLY_REFS 过滤空）")
         return
 
     success = 0
@@ -970,8 +1061,8 @@ def main():
     points_rows = []   # [(账号序号, 总积分, 账号key)]
     expire_alerts = []  # [(账号序号, 即将过期积分)]
 
-    for i, (server, ref, _) in enumerate(entries, start=1):
-        key = "%s@%s" % (server, ref)
+    for i, (server, ref, sess_val) in enumerate(entries, start=1):
+        key = ("直填@%s" % ref) if server is None else ("%s@%s" % (server, ref))
         # 今日已成功签到的账号直接跳过，不再消耗 YYB 取码配额
         if is_done_today(key):
             log(f"⏭️ [打标] 账号 {i}/{total} 今日任务已完成，跳过")
@@ -986,7 +1077,8 @@ def main():
 
         acc_banner(i, total, "标识：" + str(ref))
         try:
-            ok, line, status, points_info, extra = run_account(server, ref)
+            ok, line, status, points_info, extra = run_account(
+                server, ref, direct_session=sess_val or "")
             if ok:
                 success += 1
             # 只有服务端明确返回「签到成功 / 今日已签到」才算今日完成
