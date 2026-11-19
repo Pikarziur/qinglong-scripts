@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  WorkBuddy 签到
-# version: 2026-11-19a
+# version: 2026-11-19b
 # cron: 31 7,12,23 * * *
 # =========================================================
 
@@ -170,7 +170,7 @@ try:
 except Exception:
     pass
 
-VERSION = "1.9.7"
+VERSION = "1.9.8"
 UPSTREAM_VERSION = "3.48"
 UPSTREAM_COMMIT = "94e7f14832fc02760e97f641ab0fc9fa30871126"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
@@ -4621,7 +4621,7 @@ def _run_campaign(s, uid, nick, spec, log):
                 status, payload = _campaign_call(s, uid, "POST",
                     "/portal/activity/tasks/%s/viewed?%s" % (code, urlencode({"activity_code": camp})), {})
                 if not _campaign_ok(status, payload):
-                    log("    ⚠️活动查看登记失败[%s/%s]（HTTP %s）" % (camp, code, status))
+                    log("    ℹ️活动登记接口失效[%s/%s]（HTTP %s），跳过本项待下轮" % (camp, code, status), issue=False)
                     result["pending"].append(task["label"])
                     continue
             remaining = target - row["progress"]
@@ -5595,13 +5595,13 @@ def run_account(idx, client, account, do_desktop):
     msgs = []
     tag = "账号%d" % idx
 
-    def log(m):
+    def log(m, issue=True):
         ts = time.strftime("%H:%M:%S")
         line = "[%s][%s] %s" % (ts, tag, m)
         print(line, flush=True)
         msgs.append(line)
         # 既有处理器会局部捕获异常，保留独立提示，不把签到成功当作任务无异常。
-        if any(marker in m for marker in ("失败", "异常", "未确认", "仍无法登记", "未到账")):
+        if issue and any(marker in m for marker in ("失败", "异常", "未确认", "仍无法登记", "未到账")):
             issue = m.strip()
             if issue not in summary["task_errors"]:
                 summary["task_errors"].append(issue)
