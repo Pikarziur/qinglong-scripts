@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小紫有约
-# version: 2026-11-19b
+# version: 2026-11-19c
 # cron: 36 6,16 * * *
 # 站点：sxkyziqidonglai.cn（ycb SaaS 商城，公众号「小紫有约」渠道 WXjxriol8e8293wezu）
 # =========================================================
@@ -60,7 +60,7 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.
       "(KHTML, like Gecko) MicroMessenger/8.0.75(0x18004b66) NetType/WIFI Language/zh_CN")
 # ========================================
 
-SCRIPT_VER = "2026-11-19b"
+SCRIPT_VER = "2026-11-19c"
 SITE_NAME = "小紫有约"
 
 BASE = "https://" + HOST
@@ -81,8 +81,8 @@ REDIRECT_URI = ("https://" + HOST + "/auth/wxAutomatic"
 # 现象：YYB-GO 频繁返回 HTTP 502，msg 为 "call failed: context deadline exceeded"
 #       或 "all ShortLink targets failed ... i/o timeout"（上游长连接节点 8 秒内不响应），
 #       属纯连接层故障，拿不到上游错误码。
-# YYB-GO 每次新请求会把请求轮转到编队的下一个成员，重试正好能命中可用成员。
-# 不重试的情况：429（限速/熔断）、404（账号不存在）、带上游错误码的 502（如 -14 未关注）。
+# H5 OAuth 已到上游后的明确拒绝（如 manual_auth -10 / shortlink -14）不重发，
+# 避免重复触发授权恢复；只对没有上游业务拒绝码的连接/超时故障重试。
 YYB_RETRY_TIMES = int(os.getenv("XZY_YYB_RETRY", "5") or 5)        # 额外重试次数（不含首次）
 YYB_RETRY_DELAY = int(os.getenv("XZY_YYB_RETRY_DELAY", "4") or 4)  # 重试间隔秒数
 YYB_CODE_TIMEOUT = 180     # h5code 单次超时（微信授权偶发较慢）
@@ -600,12 +600,17 @@ def _yyb_error_detail(body) -> str:
                 #   shortlink application rejected: code=-14
                 # → 语义是「该微信的授权无法重放」（登录态/授权凭据失效，或被临时风控），
                 #   与「是否关注公众号」无关。持续失败需在 YYB-GO 里重新扫码登录该微信号。
-                return ("上游拒绝（%s-14，该微信授权无法重放，"
-                        "多为登录态失效或临时风控；持续失败需在 YYB-GO 重新扫码该号）"
-                        % stage_text)
+                hint = ("；YYB-GO 标记需重新授权" if data.get("rescan_required") else "")
+                return ("上游拒绝（%s-14，该微信授权无法重放%s；请核对 YYB-GO 中该 ref "
+                        "是否对应刚扫码的账号）" % (stage_text, hint))
             if "10009" in codes:
                 return "上游拒绝（%s10009，微信侧授权频率限制）" % stage_text
-            return "上游拒绝（%s错误码 %s）" % (stage_text, joined)
+            hint = ("；YYB-GO 标记需重新授权" if data.get("rescan_required") else "")
+            if "manual_auth" in stages and "-10" in codes:
+                return ("上游拒绝（%smanual_auth -10，YYB-GO 的 ManualAuth 授权凭据被拒绝%s；"
+                        "请核对该 ref 是否为刚扫码的账号，必要时在 YYB-GO 删除旧条目后重新扫码）"
+                        % (stage_text, hint))
+            return "上游拒绝（%s错误码 %s%s）" % (stage_text, joined, hint)
         return "上游拒绝"
 
     # 本地熔断 / 限速
@@ -615,8 +620,8 @@ def _yyb_error_detail(body) -> str:
         return "服务端熔断中"
 
     # 连接层超时（无上游错误码 + 8 秒 deadline）
-    if ("context deadline exceeded" in low or "shortlink" in low
-            or "i/o timeout" in low or "timeout" in low):
+    if ("context deadline exceeded" in low or "i/o timeout" in low
+            or "timeout" in low):
         return "上游连接超时"
     if "not found" in low:
         return "账号不存在"
@@ -624,24 +629,8 @@ def _yyb_error_detail(body) -> str:
 
 
 def _yyb_retryable(detail: str) -> bool:
-    """判断这类取码失败是否值得重试。
-
-    ⚠️ 2026-11-18 实测依据（YYB-GO system_logs，app_id=wx3db193ecdebd3fea）：
-        20:42:39  acct=4 拒绝(-14, shortlink_application)  耗时 2119ms
-        20:42:46  acct=5 协议调用成功                        耗时  345ms
-        20:42:51  acct=9 协议调用成功                        耗时  351ms
-    同一 app_id、同一时间窗口内失败与成功交替出现 → 这是**账号/节点级的临时拒绝**
-    （YYB-GO 有编队 failover 机制，换个成员就可能成），不是该微信的永久状态。
-
-    原来只对「上游连接超时」重试，其余（-14 / 10009 等）直接判死，
-    结果一次风控抖动就让整轮账号全灭。故把「上游拒绝」也纳入重试。
-    唯一明确不可重试的是「账号不存在」（ref 配错了，重试多少次都没用）。
-    """
-    if not detail:
-        return False
-    if "账号不存在" in detail:
-        return False
-    return True
+    """只重试没有上游业务拒绝码的连接超时，不重发 OAuth 业务拒绝。"""
+    return "上游连接超时" in (detail or "")
 
 
 def load_direct_sessions():
