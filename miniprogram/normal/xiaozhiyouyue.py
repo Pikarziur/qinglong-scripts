@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小紫有约
-# version: 2026-11-18a
+# version: 2026-11-19b
 # cron: 36 6,16 * * *
 # 站点：sxkyziqidonglai.cn（ycb SaaS 商城，公众号「小紫有约」渠道 WXjxriol8e8293wezu）
 # =========================================================
@@ -11,7 +11,8 @@
 #   1. 读取 YYB_SERVER 账号基座，按 YYB_ONLY_REFS 序号白名单筛选（1 起）
 #   2. 调 YYBGO 的 /wx/h5code 取公众号网页授权 code（scope=snsapi_base，静默授权）
 #   3. 用 code 调 /api/platform/weChatAuthLogin 换已登录 SESSION
-#      （每次运行重新换，不落盘；SESSION 本身 48h 有效也用不到）
+#      （SESSION 落盘缓存：48h 内校验有效直接复用，免取码；失效才重新取码换，
+#       取码失败时仍先试缓存兜底 —— 参考拼多多果园 pddgygzc 的 Token 复用机制）
 #   4. 探测当月签到活动码 actCode（命中后缓存到本地，不必每月手改）
 #   5. 查活动页签到状态 → 未签则调 /activity/launchByValidater 完成签到，
 #      已签则跳过写请求（幂等，不重复提交）
@@ -33,7 +34,7 @@
 #
 # =========================================================
 
-YYB_ONLY_REFS = []   # 账号序号白名单（1 起），留空 [] 跑全部；例如 [1,3] 只跑第 1、3 个账号
+YYB_ONLY_REFS = [3]   # 当前仅排查第 3 个账号；排查完成后恢复 [] 跑全部
 
 # 直填登录态（可选，最高优先级）：环境变量 XZY_SESSION，每行一个账号，
 #   格式 `[备注@]SESSION值`。配了就跳过 YYBGO 取码，直接用现成 SESSION 跑。
@@ -59,7 +60,7 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.
       "(KHTML, like Gecko) MicroMessenger/8.0.75(0x18004b66) NetType/WIFI Language/zh_CN")
 # ========================================
 
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-19b"
 SITE_NAME = "小紫有约"
 
 BASE = "https://" + HOST
@@ -319,6 +320,84 @@ def mark_done_today(server: str, note: str = "",
     log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
 
 
+# ====================== SESSION 缓存复用（参考 pddgygzc） ======================
+# 换到的 SESSION 落盘保存，48h 内先校验复用，避免每次运行都依赖 YYBGO 取码。
+# 结构：{ "<账号key>": { "session": "xxx", "uid": "xxx", "savedAt": "2026-11-19 09:00:00",
+#                        "ts": 1763519xxx } }
+SESSION_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "xzyy_session_cache.json")
+SESSION_MAX_AGE = 40 * 3600   # 缓存最长复用 40h（SESSION 标称 48h，留 8h 安全余量）
+
+
+def load_session_cache() -> Dict[str, Any]:
+    """读取 SESSION 缓存文件；不存在或损坏时返回空字典。"""
+    try:
+        if os.path.exists(SESSION_CACHE_FILE):
+            with open(SESSION_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        warn(f"⚠️ [会话缓存] 读取失败: {exc}")
+    return {}
+
+
+def save_session_cache(cache: Dict[str, Any]) -> None:
+    """写 SESSION 缓存（临时文件 + rename 原子替换）。"""
+    try:
+        tmp = SESSION_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SESSION_CACHE_FILE)
+    except Exception as exc:
+        err(f"❌ [会话缓存] 保存失败: {exc}")
+
+
+def get_cached_session(key: str) -> str:
+    """取未过期的缓存 SESSION；无缓存/已过期/损坏则返回空串。"""
+    entry = load_session_cache().get(key)
+    if not isinstance(entry, dict):
+        return ""
+    val = str(entry.get("session") or "")
+    if not val:
+        return ""
+    ts = entry.get("ts")
+    try:
+        if time.time() - float(ts) > SESSION_MAX_AGE:
+            log("🗑️ [会话缓存] 缓存已超过 %dh，弃用" % (SESSION_MAX_AGE // 3600))
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return val
+
+
+def get_cached_session_any(key: str) -> str:
+    """取缓存 SESSION，不检查时效（供取码失败时兜底用）。
+
+    缓存标记 40h 只是「主动弃用」阈值；SESSION 标称 48h，超 40h 未必真失效。
+    取码失败时仍值得拿它试一次，由服务端 check_login 最终判定。
+    """
+    entry = load_session_cache().get(key)
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("session") or "")
+
+
+def put_cached_session(key: str, session_val: str, uid: str = "") -> None:
+    """保存新换到的 SESSION 到缓存。"""
+    if not session_val:
+        return
+    cache = load_session_cache()
+    cache[key] = {
+        "session": session_val,
+        "uid": str(uid or ""),
+        "savedAt": now_text(),
+        "ts": time.time(),
+    }
+    save_session_cache(cache)
+    log("💾 [会话缓存] 已保存（%s）" % now_text())
+
+
 # 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
 # 结构：{ "<账号key>": { "2026-11-17": 5.0, "2026-11-18": 5.0 } }
 POINTS_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -490,9 +569,13 @@ def _yyb_error_detail(body) -> str:
     upstream = data.get("upstream_errors") or data.get("rejections")
     if upstream:
         codes = []
+        stages = []
         for item in upstream:
             if not isinstance(item, dict):
                 continue
+            stage = item.get("stage")
+            if stage and str(stage) not in stages:
+                stages.append(str(stage))
             # ⚠️ 2026-11-18 修正：YYB-GO 的 /wx/h5code 错误体里，
             #    upstream_errors 的元素字段名是 **upstream_code**（不是 code），
             #    例如 {"stage":"shortlink_application","upstream_code":-14}。
@@ -506,6 +589,7 @@ def _yyb_error_detail(body) -> str:
                     break
         if codes:
             joined = "/".join(codes)
+            stage_text = ("阶段 %s，" % "/".join(stages)) if stages else ""
             # ⚠️ 2026-11-18 再修正：**-14 不是「该微信未关注公众号」**。
             #    实证（YYB-GO system_logs）：20:42:39 acct=4 拒绝(-14)，
             #    20:42:46 acct=5 成功、20:42:51 acct=9 也成功 —— 同一 app_id、
@@ -516,11 +600,12 @@ def _yyb_error_detail(body) -> str:
                 #   shortlink application rejected: code=-14
                 # → 语义是「该微信的授权无法重放」（登录态/授权凭据失效，或被临时风控），
                 #   与「是否关注公众号」无关。持续失败需在 YYB-GO 里重新扫码登录该微信号。
-                return ("上游拒绝（-14，该微信授权无法重放，"
-                        "多为登录态失效或临时风控；持续失败需在 YYB-GO 重新扫码该号）")
+                return ("上游拒绝（%s-14，该微信授权无法重放，"
+                        "多为登录态失效或临时风控；持续失败需在 YYB-GO 重新扫码该号）"
+                        % stage_text)
             if "10009" in codes:
-                return "上游拒绝（10009，微信侧授权频率限制）"
-            return "上游拒绝（错误码 %s）" % joined
+                return "上游拒绝（%s10009，微信侧授权频率限制）" % stage_text
+            return "上游拒绝（%s错误码 %s）" % (stage_text, joined)
         return "上游拒绝"
 
     # 本地熔断 / 限速
@@ -721,8 +806,33 @@ def exchange_session(sess, code: str) -> Tuple[bool, str]:
     return False, "换取登录态失败（status %s）：%s" % (status, msg or "未知原因")
 
 
+def _cookie_session_value(sess) -> str:
+    """安全取 SESSION cookie 值。
+
+    不用 sess.cookies.get("SESSION")：直填/缓存模式下我们手动 set 的 SESSION
+    （domain=HOST）与服务器 Set-Cookie 回来的 SESSION（domain=.HOST）同名不同域，
+    requests 的 .get() 会因重名抛 CookieConflictError。这里改为遍历 jar，
+    优先返回 domain 精确等于 HOST 的那个（即我们手动 set 的值）。
+    """
+    fallback = ""
+    try:
+        for c in sess.cookies:
+            if getattr(c, "name", "") != "SESSION":
+                continue
+            val = getattr(c, "value", "") or ""
+            if not val:
+                continue
+            dom = (getattr(c, "domain", "") or "").lstrip(".")
+            if dom == HOST:
+                return val
+            fallback = val
+    except Exception:
+        pass
+    return fallback
+
+
 def check_login(sess) -> Dict[str, Any]:
-    """校验登录态，返回 isLogin / userId / merUserId。"""
+    """校验登录态，返回 isLogin / userId / merUserId / session（当前 cookie 值）。"""
     code, jr, err = _post_form(sess, API_IS_LOGIN,
                                 {"channelCode": CHANNEL_CODE, "siteId": SITE_ID})
     if err:
@@ -730,10 +840,12 @@ def check_login(sess) -> Dict[str, Any]:
     if not _api_ok(jr):
         return {"ok": False, "err": _api_msg(jr) or ("status=%s" % _api_status(jr))}
     data = jr.get("data") if isinstance(jr.get("data"), dict) else {}
+    _ck = _cookie_session_value(sess)
     return {
         "ok": bool(data.get("isLogin")),
         "userId": data.get("userId"),
         "merUserId": data.get("merUserId"),
+        "session": _ck,
         "err": "" if data.get("isLogin") else "会话未登录",
     }
 
@@ -914,46 +1026,92 @@ def coupon_summary(coupons: list) -> str:
 
 
 # ———————————— 单账号流程 ————————————
-def run_account(server: str, ref: str, direct_session: str = ""):
+def run_account(server: str, ref: str, direct_session: str = "",
+                session_key: str = ""):
     """跑一个账号。
 
     direct_session 非空 → 直填登录态模式，跳过 YYB 取码，直接用现成 SESSION。
+    否则走「缓存复用」：SESSION 落盘缓存 48h 内校验有效直接复用，
+    失效才重新取码；取码失败时再退回缓存兜底一次。
 
     返回 (ok, 汇总行, 状态, points_info, extra_lines)
       状态：成功 / 已签 / 失败
     """
     extra_lines = []
+    cache_key = session_key or (("直填@%s" % ref) if server is None
+                                else ("%s@%s" % (server, ref)))
 
-    # 1) 取公众号网页授权 code（直填模式跳过）
+    sess = _make_session()
+    li = None
+
+    # 1) 直填模式：用现成 SESSION，跳过取码与缓存
     if direct_session:
-        sess = _make_session()
         sess.cookies.set("SESSION", direct_session, domain=HOST, path="/")
         log("🔑 登录态 · 直填 SESSION（跳过 YYB 取码）")
-    else:
-        code, err_msg = YYBClient().get_h5_code(server, ref)
-        if not code:
-            brief = " ".join(str(err_msg).split())[:90]
-            err("❌ 取码失败 · 原因: " + brief)
-            return False, "ref %s: ❌ 取码失败（%s）" % (ref, brief), "失败", None, extra_lines
-        log("🔑 授权码 · 获取成功")
-
-        # 2) code 换已登录 SESSION
-        sess = _make_session()
-        ok, msg = exchange_session(sess, code)
-        if not ok:
-            brief = " ".join(str(msg).split())[:110]
-            err("❌ 登录失败 · 原因: " + brief)
-            return False, "ref %s: ❌ 登录失败（%s）" % (ref, brief), "失败", None, extra_lines
-        log("🔑 登录态 · " + msg)
-
-    # 3) 校验登录态
-    li = check_login(sess)
-    if not li.get("ok"):
-        brief = str(li.get("err") or "未知")[:90]
-        err("❌ 会话校验失败 · " + brief)
-        if direct_session:
+        li = check_login(sess)
+        if not li.get("ok"):
+            brief = str(li.get("err") or "未知")[:90]
+            err("❌ 会话校验失败 · " + brief)
             err("   ↳ 直填的 SESSION 已失效（有效期 48 小时）—— "
                 "需重新抓 HAR 取新 SESSION，或改用 YYBGO 取码模式")
+            return False, "ref %s: ❌ 会话无效" % ref, "失败", None, extra_lines
+
+    else:
+        # 2) 缓存复用：未过期缓存先校验，有效就直接跳过取码
+        cached = get_cached_session(cache_key)
+        if cached:
+            log("♻️ [会话缓存] 命中未过期缓存，先验有效性（免取码）")
+            sess.cookies.set("SESSION", cached, domain=HOST, path="/")
+            li = check_login(sess)
+            if li.get("ok"):
+                log("✅ [会话缓存] 缓存有效，直接复用（跳过 YYB 取码）")
+            else:
+                log("⚠️ [会话缓存] 缓存已失效，重新取码")
+                sess = _make_session()
+                li = None
+
+        # 3) 缓存无效/无缓存 → 取码换 SESSION
+        if li is None:
+            code, err_msg = YYBClient().get_h5_code(server, ref)
+            if not code:
+                brief = " ".join(str(err_msg).split())[:90]
+                err("❌ 取码失败 · 原因: " + brief)
+                # 3b) 取码失败兜底：即便缓存超 40h 也试一次（48h 内可能仍有效）
+                any_cached = get_cached_session_any(cache_key)
+                if any_cached:
+                    log("🆘 [兜底] 取码失败，试缓存 SESSION（由服务端判有效性）")
+                    sess = _make_session()
+                    sess.cookies.set("SESSION", any_cached, domain=HOST, path="/")
+                    li = check_login(sess)
+                    if li.get("ok"):
+                        log("✅ [兜底] 缓存仍有效，本次照常签到")
+                        extra_lines.append("🆘 取码失败，已用缓存登录态兜底")
+                    else:
+                        li = None
+                        err("❌ [兜底] 缓存也已失效，无法签到")
+                if li is None:
+                    return False, "ref %s: ❌ 取码失败（%s）" % (ref, brief), "失败", None, extra_lines
+            else:
+                log("🔑 授权码 · 获取成功")
+                ok, msg = exchange_session(sess, code)
+                if not ok:
+                    brief = " ".join(str(msg).split())[:110]
+                    err("❌ 登录失败 · 原因: " + brief)
+                    return False, "ref %s: ❌ 登录失败（%s）" % (ref, brief), "失败", None, extra_lines
+                log("🔑 登录态 · " + msg)
+                li = check_login(sess)
+                if not li.get("ok"):
+                    brief = str(li.get("err") or "未知")[:90]
+                    err("❌ 会话校验失败 · " + brief)
+                    return False, "ref %s: ❌ 会话无效" % ref, "失败", None, extra_lines
+                # 新换的 SESSION 落盘缓存，供后续运行复用
+                put_cached_session(cache_key, str(li.get("session") or ""),
+                                   uid=str(li.get("userId") or ""))
+
+    # 4) 统一校验登录态（直填/缓存/取码三条路都到这里）
+    if li is None or not li.get("ok"):
+        brief = str((li or {}).get("err") or "未知")[:90]
+        err("❌ 会话校验失败 · " + brief)
         return False, "ref %s: ❌ 会话无效" % ref, "失败", None, extra_lines
     log("🆔 会员ID · %s" % (li.get("userId") or "-"))
 
@@ -1077,8 +1235,12 @@ def main():
 
         acc_banner(i, total, "标识：" + str(ref))
         try:
+            # 只有 XZY_SESSION 直填模式下 server 为 None、sess_val 才是 SESSION 值；
+            # YYB_SERVER/XZY_SERVER 取码模式下 sess_val 是配置行文本（host:port@ref），
+            # 绝不能当 SESSION 传入，否则会误走直填并把配置行塞进 cookie 触发重名崩溃。
+            _direct = (sess_val or "") if server is None else ""
             ok, line, status, points_info, extra = run_account(
-                server, ref, direct_session=sess_val or "")
+                server, ref, direct_session=_direct, session_key=key)
             if ok:
                 success += 1
             # 只有服务端明确返回「签到成功 / 今日已签到」才算今日完成
