@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  WorkBuddy 签到
-# version: 2026-11-18a
+# version: 2026-11-19a
 # cron: 31 7,12,23 * * *
 # =========================================================
 
@@ -170,7 +170,7 @@ try:
 except Exception:
     pass
 
-VERSION = "1.9.6"
+VERSION = "1.9.7"
 UPSTREAM_VERSION = "3.48"
 UPSTREAM_COMMIT = "94e7f14832fc02760e97f641ab0fc9fa30871126"
 APP_ID = "wx907c65e5e107ddcf"                     # WorkBuddy 小程序 AppID
@@ -1323,7 +1323,7 @@ def _accept_expert_task(s, code, log):
         current = next((r for r in rows if (r.get("task_code") or r.get("code")) == code), None)
         if current and current.get("accept_status") in ("accepted", "completed", "claimed"):
             return True
-    log("   专家任务接受结果未确认，停止本任务")
+    log("    专家任务接受结果未确认，停止本任务")
     return False
 
 def _task_claimable(task):
@@ -1567,7 +1567,7 @@ def _claim_readback(s, code, log, headers):
         return False
     if any((row.get("task_code") or row.get("code")) == code and _row_claimed(row) for row in rows):
         _claim_attempts(s)[code] = True
-        log("   🎁领奖[%s]: 已由实时任务状态确认" % code)
+        log("    🎁领奖[%s]: 已由实时任务状态确认" % code)
         return True
     return False
 
@@ -1588,26 +1588,26 @@ def _claim_task(s, code, log, *, mp):
     except requests.RequestException:
         if _claim_readback(s, code, log, headers):
             return True
-        log("   🎁领奖[%s]: 请求中断，等待回读，本轮暂缓重复提交" % code)
+        log("    🎁领奖[%s]: 请求中断，等待回读，本轮暂缓重复提交" % code)
         return False
     payload = _json_or_empty(r)
     ok, data, already = _claim_response_ok(r, payload)
     attempts[code] = ok
     if already:
-        log("   🎁领奖[%s]: 已领过" % code)
+        log("    🎁领奖[%s]: 已领过" % code)
     elif ok:
         credit = data.get("credit", data.get("reward_credit"))
         energy = data.get("energy", data.get("reward_energy"))
         reward = "、".join("+%s%s" % (value, unit) for value, unit in (
             (credit, "积分"), (energy, "能量")) if value is not None)
-        log("   🎁领奖[%s]: %s" % (code, reward or "回执确认已领"))
+        log("    🎁领奖[%s]: %s" % (code, reward or "回执确认已领"))
     elif (200 <= r.status_code < 300 and (payload.get("code") is None or _api_code_ok(payload.get("code")))
           or r.status_code >= 500 or r.status_code in (408, 429)):
         if _claim_readback(s, code, log, headers):
             return True
-        log("   🎁领奖[%s]: 回执缺少到账凭据，等待实时回读" % code)
+        log("    🎁领奖[%s]: 回执缺少到账凭据，等待实时回读" % code)
     else:
-        log("   领奖[%s]: 请求失败 HTTP %s" % (code, r.status_code))
+        log("    领奖[%s]: 请求失败 HTTP %s" % (code, r.status_code))
         if 200 <= r.status_code < 500:
             attempts.pop(code, None)  # 明确被拒的请求仍可由后续达标扫描处理。
     return ok
@@ -1872,7 +1872,7 @@ def _sample_credit(s, summary, phase, log):
     elif not summary.get("credits"):
         summary["credits"] = text
     if value is None:
-        log("   ⚠️%s余额查询失败，保留其他业务结果" % ("操作前" if phase == "before" else "操作后"))
+        log("    ⚠️%s余额查询失败，保留其他业务结果" % ("操作前" if phase == "before" else "操作后"))
 
 def _credits_numeric(summary):
     """从账号摘要里取总积分数值（优先操作后，其次操作前）；取不到返回 None。"""
@@ -1919,7 +1919,7 @@ def _finish_credit_sample(s, summary, log):
         for line in _credit_lines(summary):
             log(line.strip())
     except Exception as exc:
-        log("   ⚠️余额收尾异常（%s），保留原始业务结果" % type(exc).__name__)
+        log("    ⚠️余额收尾异常（%s），保留原始业务结果" % type(exc).__name__)
 
 def _settle_before_play(s, log):
     # 单独判断每个开关，避免某一个黑名单项目屏蔽其他已启用玩法。
@@ -1929,7 +1929,7 @@ def _settle_before_play(s, log):
     try:
         claim_ready_tasks(s, log)
     except Exception as exc:
-        log("   ⚠️玩法前领奖异常（%s），继续后续流程" % type(exc).__name__)
+        log("    ⚠️玩法前领奖异常（%s），继续后续流程" % type(exc).__name__)
 
 
 def queryCredits(s, meta=None):
@@ -2018,7 +2018,7 @@ def t_daily_activity(s, uid, nick, log):
     except Exception:
         state = {}
     if state.get(uid) == today:
-        log("   🔥每日活跃: 今日已上报，跳过")
+        log("    🔥每日活跃: 今日已上报，跳过")
         return
     now = int(time.time() * 1000)
     conv_id = _new_conversation_id()
@@ -2073,17 +2073,17 @@ def t_daily_activity(s, uid, nick, log):
         },
     )
     if status not in (200, 201):
-        log("   🔥每日活跃: 上报失败 HTTP %s" % status)
+        log("    🔥每日活跃: 上报失败 HTTP %s" % status)
         return
 
     # HTTP 200 只代表事件已受理，必须由热力图 score 确认真正计分。
     score = _heatmap_today_score(s)
     if score is None:
-        log("   🔥每日活跃: 合成事件已发送，热力图回读失败（不写本地完成标记）")
+        log("    🔥每日活跃: 合成事件已发送，热力图回读失败（不写本地完成标记）")
     elif score > 0:
-        log("   🔥每日活跃: 热力图已点亮 %s 分" % score)
+        log("    🔥每日活跃: 热力图已点亮 %s 分" % score)
     elif _env_enabled("WORKBUDDY_ACTIVITY_CHAT_FALLBACK", True):
-        log("   🔥每日活跃: 合成事件未计分，尝试一次真实对话兜底")
+        log("    🔥每日活跃: 合成事件未计分，尝试一次真实对话兜底")
         try:
             conv_id, _reply, _message_id = webchat2(
                 s, "activity", "你好，回答OK即可")
@@ -2091,14 +2091,14 @@ def t_daily_activity(s, uid, nick, log):
                 time.sleep(3)
                 score = _heatmap_today_score(s)
                 if score and score > 0:
-                    log("   🔥每日活跃: 真实对话兜底成功，热力图 %s 分" % score)
+                    log("    🔥每日活跃: 真实对话兜底成功，热力图 %s 分" % score)
         except Exception as exc:
-            log("   🔥每日活跃: 真实对话兜底失败 %s" % str(exc)[:60])
+            log("    🔥每日活跃: 真实对话兜底失败 %s" % str(exc)[:60])
     else:
-        log("   🔥每日活跃: 合成事件未计分，真实对话兜底已关闭")
+        log("    🔥每日活跃: 合成事件未计分，真实对话兜底已关闭")
 
     if not score or score <= 0:
-        log("   🔥每日活跃: 今日计分仍未确认，下轮继续重试")
+        log("    🔥每日活跃: 今日计分仍未确认，下轮继续重试")
         return
     try:
         state[uid] = today
@@ -2106,17 +2106,17 @@ def t_daily_activity(s, uid, nick, log):
             json.dump(state, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
     except Exception as exc:
-        log("   🔥每日活跃: 本地去重状态保存失败 %s" % str(exc)[:50])
+        log("    🔥每日活跃: 本地去重状态保存失败 %s" % str(exc)[:50])
     try:
         data = (s.get("https://copilot.tencent.com/activity/growth/streak",
                       timeout=20, verify=False).json().get("data") or {})
         days = (data.get("streak") or {}).get("days")
         if days in (None, 0):
-            log("   🔥每日活跃: 已上报，连登读数稍后刷新")
+            log("    🔥每日活跃: 已上报，连登读数稍后刷新")
         else:
-            log("   🔥每日活跃: 已点亮，连登 %s 天" % days)
+            log("    🔥每日活跃: 已点亮，连登 %s 天" % days)
     except Exception:
-        log("   🔥每日活跃: 已上报")
+        log("    🔥每日活跃: 已上报")
 
 
 # ============================================================================ #
@@ -2141,7 +2141,7 @@ def t_accept_all(s, uid, nick, log):
     try:
         rows = growth_task_rows(s)
     except (SafeError, requests.RequestException):
-        log("   📋批量接受读取任务失败，本轮跳过登记")
+        log("    📋批量接受读取任务失败，本轮跳过登记")
         return
     todo = list(dict.fromkeys(t.get("task_code") for t in rows
             if t.get("task_code") and t.get("accept_status") == "not_accepted"
@@ -2162,7 +2162,7 @@ def t_accept_all(s, uid, nick, log):
         ok = [c for c in todo if _accept_response_settled(*resp.get(c, ("", "")))]
         bad = [(c, resp[c][0], resp[c][1]) for c in todo if c in resp and not _accept_response_settled(*resp[c])]
         nolog = [c for c in todo if c not in resp]
-        log("   📋批量接受 %d 项 → 已结算 %d / 待回读 %d%s" % (
+        log("    📋批量接受 %d 项 → 已结算 %d / 待回读 %d%s" % (
             len(todo), len(ok), len(bad) + len(nolog),
             ("（%d 项无返回）" % len(nolog)) if nolog else ""))
         for c, st, m in bad[:6]:
@@ -2170,14 +2170,14 @@ def t_accept_all(s, uid, nick, log):
         if len(bad) > 6:
             log("      ...另 %d 项" % (len(bad) - 6))
     except Exception as e:
-        log("   📋批量接受异常: %s" % type(e).__name__)
+        log("    📋批量接受异常: %s" % type(e).__name__)
     need = {}
     for c, st, m in bad:
         if "prerequisite not met:" in m:
             pcode = m.split("prerequisite not met:", 1)[1].strip().split(" ")[0].strip("()[]")
             need.setdefault(pcode, []).append(c)
     for pcode, ptasks in need.items():
-        log("   🧩 %d 项待前置「%s」满足: %s" % (len(ptasks), pcode, ",".join(ptasks[:6])))
+        log("    🧩 %d 项待前置「%s」满足: %s" % (len(ptasks), pcode, ",".join(ptasks[:6])))
         if pcode == "first_buddy":
             if ensure_first_buddy(s, uid, nick, log):
                 log("      ✅ Buddy 已就绪，进入重试登记")
@@ -2197,9 +2197,9 @@ def t_accept_all(s, uid, nick, log):
         if not pending:
             break
     if not pending:
-        log("   ✅ 全部登记生效（%d 项）" % len(todo))
+        log("    ✅ 全部登记生效（%d 项）" % len(todo))
         return
-    log("   🔁 %d 项未落账，逐个重试..." % len(pending))
+    log("    🔁 %d 项未落账，逐个重试..." % len(pending))
     still = []
     for c in pending:
         try:
@@ -2211,10 +2211,10 @@ def t_accept_all(s, uid, nick, log):
             still.append(c)
         time.sleep(1.0)
     if still:
-        log("   ⚠️ 仍无法登记 %d 项: %s" % (len(still), ",".join(still[:10])))
+        log("    ⚠️ 仍无法登记 %d 项: %s" % (len(still), ",".join(still[:10])))
         log("      （这些任务的上报可能不被计数，请把本段日志反馈给作者）")
     else:
-        log("   ✅ 重试后全部登记生效")
+        log("    ✅ 重试后全部登记生效")
 
 
 def t_team_3(s, uid, nick, log):
@@ -2222,7 +2222,7 @@ def t_team_3(s, uid, nick, log):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     st, cur, tgt = prog(s, "Expert_team_use_3")
     if st is None:
-        log("   Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
+        log("    Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
         return
     teams = get_team_experts(10)
     if not teams:
@@ -2230,7 +2230,7 @@ def t_team_3(s, uid, nick, log):
     for rd in range(3):
         st, cur, tgt = prog(s, "Expert_team_use_3")
         if st is None:
-            log("   Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
+            log("    Expert_team_use_3: 当前任务列表未下发（可能已下线），跳过")
             break
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or 3):
             break
@@ -2258,7 +2258,7 @@ def t_team_3(s, uid, nick, log):
                                "messageId": msg_id, "requestModelId": "glm-5.2", "requestModelName": "GLM-5.2"}])
         time.sleep(5)
     st, cur, tgt = prog(s, "Expert_team_use_3")
-    log("   召唤3次专家团: %s %s/%s" % (st, cur, tgt))
+    log("    召唤3次专家团: %s %s/%s" % (st, cur, tgt))
 
 
 def t_buddy_apps(s, uid, nick, log):
@@ -2267,7 +2267,7 @@ def t_buddy_apps(s, uid, nick, log):
         st, cur, tgt = prog(s, task)
         if st is None:
             # 未下发（如 Buddy_App_QQ 已下线）→ 不发 buddyapp 五连
-            log("   %s: 当前任务列表未下发（可能已下线），跳过" % task)
+            log("    %s: 当前任务列表未下发（可能已下线），跳过" % task)
             continue
         if st in ("completed", "claimed"):
             continue
@@ -2277,18 +2277,18 @@ def t_buddy_apps(s, uid, nick, log):
         try:
             report_status = report_desktop_events(s, uid, nick, evs)
             if report_status < 200 or report_status >= 300:
-                log("   %s: buddyapp 五连上报失败 HTTP %s" % (
+                log("    %s: buddyapp 五连上报失败 HTTP %s" % (
                     task, report_status))
                 continue
             time.sleep(4)
             st2, cur2, tgt2 = prog(s, task)
-            log("   %s: buddyapp 五连已受理，回读 %s %s/%s" % (
+            log("    %s: buddyapp 五连已受理，回读 %s %s/%s" % (
                 task, st2, cur2, tgt2))
             if st2 == "completed":
                 claim(s, task, log)
         except Exception as e:
-            log("   %s: buddyapp failed %s" % (task, str(e)[:60]))
-    log("   发现应用/企鹅教师助手: %s / %s" % (prog(s, "Buddy_App")[0], prog(s, "Buddy_App_QQ")[0]))
+            log("    %s: buddyapp failed %s" % (task, str(e)[:60]))
+    log("    发现应用/企鹅教师助手: %s / %s" % (prog(s, "Buddy_App")[0], prog(s, "Buddy_App_QQ")[0]))
 
 
 def _fetch_hp_theme(s):
@@ -2310,10 +2310,10 @@ def _fetch_hp_theme(s):
 def t_theme(s, uid, nick, log):
     st, cur, tgt = prog(s, "Hp_Appearance")
     if st is None:
-        log("   和平精英主题: 不在任务列表，跳过")
+        log("    和平精英主题: 不在任务列表，跳过")
         return
     if st in ("completed", "claimed"):
-        log("   和平精英主题: 已 %s" % st)
+        log("    和平精英主题: 已 %s" % st)
         return
     key, meta = _fetch_hp_theme(s)
     r = s.post(BASE + "/portal/user-asset/appearance/set", json={"kind": "theme", "resource_key": key},
@@ -2325,16 +2325,16 @@ def t_theme(s, uid, nick, log):
                                "vipLevel": meta["vipLevel"], "series": meta["series"],
                                "type": "personal"}])
         time.sleep(6)
-    log("   和平精英主题: %s" % prog(s, "Hp_Appearance")[0])
+    log("    和平精英主题: %s" % prog(s, "Hp_Appearance")[0])
 
 
 def t_library(s, uid, nick, log):
     st, cur, tgt = prog(s, "Library_read")
     if st is None:
-        log("   体验资料库: 不在任务列表，跳过")
+        log("    体验资料库: 不在任务列表，跳过")
         return
     if st in ("completed", "claimed"):
-        log("   体验资料库: 已 %s" % st)
+        log("    体验资料库: 已 %s" % st)
         return
     response = report_web_event(
         s, uid, nick, "web_element_click", LIB_DOC_URL,
@@ -2347,7 +2347,7 @@ def t_library(s, uid, nick, log):
         payload = {}
     if status_code < 200 or status_code >= 300 or not _api_code_ok(
             payload.get("code")):
-        log("   体验资料库: 上报失败 HTTP %s code=%s %s" % (
+        log("    体验资料库: 上报失败 HTTP %s code=%s %s" % (
             status_code,
             payload.get("code", "?"),
             str(payload.get("msg") or "")[:60],
@@ -2355,7 +2355,7 @@ def t_library(s, uid, nick, log):
         return
     time.sleep(6)
     status, current, target = prog(s, "Library_read")
-    log("   体验资料库: %s %s/%s" % (status, current, target))
+    log("    体验资料库: %s %s/%s" % (status, current, target))
     if status == "completed":
         claim(s, "Library_read", log)
 
@@ -2366,11 +2366,11 @@ def t_chat_n(s, uid, nick, log, code, n, prompts):
             rows = growth_task_rows(s)
         except (SafeError, requests.RequestException) as exc:
             reason = str(exc) if isinstance(exc, SafeError) else type(exc).__name__
-            log("   %s: %s，停止追加对话" % (code, reason))
+            log("    %s: %s，停止追加对话" % (code, reason))
             return
         row = next((t for t in rows if t.get("task_code") == code), None)
         if row is None:
-            log("   %s: 当前任务未下发，停止追加对话" % code)
+            log("    %s: 当前任务未下发，停止追加对话" % code)
             return
         progress = row.get("progress") or {}
         st, cur, tgt = row.get("accept_status"), progress.get("current"), progress.get("target")
@@ -2382,19 +2382,19 @@ def t_chat_n(s, uid, nick, log, code, n, prompts):
             report(s, uid, nick, evs)
         time.sleep(4)
     st, cur, tgt = prog(s, code)
-    log("   %s: %s %s/%s" % (code, st, cur, tgt))
+    log("    %s: %s %s/%s" % (code, st, cur, tgt))
 
 
 def t_black_cat(s, uid, nick, log):
     st, cur, tgt = prog(s, "black_cat")
     if st is None:
-        log("   夜猫子: 当前任务列表未下发 black_cat（可能已下线），跳过")
+        log("    夜猫子: 当前任务列表未下发 black_cat（可能已下线），跳过")
         return
     if st in ("completed", "claimed"):
-        log("   夜猫子: 已 %s %s/%s" % (st, cur, tgt))
+        log("    夜猫子: 已 %s %s/%s" % (st, cur, tgt))
         return
     if not within_night_window():
-        log("   夜猫子: 仅23:00-08:00计数（CST），当前北京时间%d点，跳过" % beijing_now().hour)
+        log("    夜猫子: 仅23:00-08:00计数（CST），当前北京时间%d点，跳过" % beijing_now().hour)
         return
     prompts = ["今天天气怎么样？", "1+1等于几？", "讲个笑话"]
     for attempt in range(3):
@@ -2402,13 +2402,13 @@ def t_black_cat(s, uid, nick, log):
         if txt:
             evs, _ = chat_request_events(uid, nick, conv_id, "聊天", txt, mode="night")
             report(s, uid, nick, evs)
-            log("   夜猫子: 第%d次对话 ✅（回复%d字）——当日计数完成" % (attempt + 1, len(txt)))
+            log("    夜猫子: 第%d次对话 ✅（回复%d字）——当日计数完成" % (attempt + 1, len(txt)))
             break
-        log("   夜猫子: 第%d次对话 ❌（无回复，%s）" % (
+        log("    夜猫子: 第%d次对话 ❌（无回复，%s）" % (
             attempt + 1, "将重试" if attempt < 2 else "已达重试上限"))
         time.sleep(5)
     st, cur, tgt = prog(s, "black_cat")
-    log("   夜猫子: %s %s/%s（每日1次×累计3天）" % (st, cur, tgt))
+    log("    夜猫子: %s %s/%s（每日1次×累计3天）" % (st, cur, tgt))
 
 
 def t_expert_5(s, uid, nick, log):
@@ -2416,7 +2416,7 @@ def t_expert_5(s, uid, nick, log):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     st0, cur0, tgt0 = prog(s, "expert_5")
     if st0 is None:
-        log("   expert_5: 当前任务列表未下发（可能已下线），跳过")
+        log("    expert_5: 当前任务列表未下发（可能已下线），跳过")
         return
     experts = get_normal_experts(20)
     need = max(0, (tgt0 or 5) - (cur0 or 0))
@@ -2438,7 +2438,7 @@ def t_expert_5(s, uid, nick, log):
              "requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash"}])
         time.sleep(3)
     st, cur, tgt = prog(s, "expert_5")
-    log("   召唤5次专家: %s %s/%s" % (st, cur, tgt))
+    log("    召唤5次专家: %s %s/%s" % (st, cur, tgt))
 
 
 def _fetch_scenes(s):
@@ -2462,13 +2462,13 @@ def t_template_5(s, uid, nick, log):
     """
     initial_state = prog(s, "template_5")
     if initial_state[0] is None:
-        log("   template_5: 当前任务列表未下发（可能已下线），跳过")
+        log("    template_5: 当前任务列表未下发（可能已下线），跳过")
         return
     scenes = _fetch_scenes(s)[:5]
     for tid, tname in scenes:
         st, cur, tgt = prog(s, "template_5")
         if st is None:
-            log("   template_5: 当前任务列表未下发（可能已下线），跳过")
+            log("    template_5: 当前任务列表未下发（可能已下线），跳过")
             break
         if st in ("completed", "claimed") or (cur or 0) >= (tgt or 5):
             break
@@ -2488,7 +2488,7 @@ def t_template_5(s, uid, nick, log):
              "source": "growth-center"}])
         time.sleep(2)
     st, cur, tgt = prog(s, "template_5")
-    log("   使用5个模板: %s %s/%s" % (st, cur, tgt))
+    log("    使用5个模板: %s %s/%s" % (st, cur, tgt))
 
 
 def _desktop_run(s, uid, nick, conv_name, prompt, extra_events):
@@ -2508,7 +2508,7 @@ def _desktop_run(s, uid, nick, conv_name, prompt, extra_events):
 def t_canvas_automation(s, uid, nick, log):
     canvas_st = prog(s, "create_canvas")[0]
     if canvas_st is None:
-        log("   设计创意画布: 当前任务列表未下发（可能已下线），跳过")
+        log("    设计创意画布: 当前任务列表未下发（可能已下线），跳过")
     elif canvas_st not in ("completed", "claimed"):
         def _canvas_evs(cid, mid):
             return [{"eventCode": "wbx_design_canvas_task_create", "conversationId": cid, "requestId": mid,
@@ -2525,7 +2525,7 @@ def t_canvas_automation(s, uid, nick, log):
             time.sleep(3)
     st, cur, tgt = prog(s, "automation_1")
     if st is None:
-        log("   自动化任务: 当前任务列表未下发（可能已下线），跳过")
+        log("    自动化任务: 当前任务列表未下发（可能已下线），跳过")
     elif st not in ("completed", "claimed"):
         report(s, uid, nick, [{"eventCode": "agent_task_created", "source": "CLOUD", "name": "", "mode": "craft",
                                "requestModelId": "default", "task_mode": "automation",
@@ -2544,7 +2544,7 @@ def t_canvas_automation(s, uid, nick, log):
         time.sleep(3)
     playbook_st = prog(s, "playbook_prompt")[0]
     if playbook_st is None:
-        log("   优秀灵感: 当前任务列表未下发（可能已下线），跳过")
+        log("    优秀灵感: 当前任务列表未下发（可能已下线），跳过")
     elif playbook_st not in ("completed", "claimed"):
         def _pb_evs(cid, mid):
             payload = {"id": PLAYBOOK_CASE["id"], "name": PLAYBOOK_CASE["name"],
@@ -2569,7 +2569,7 @@ def t_canvas_automation(s, uid, nick, log):
                                    "type": "other", "promptLength": 30, "isOfficial": 1,
                                    "source": "growth-center"}])
             time.sleep(3)
-    log("   设计/自动化/灵感: %s / %s / %s" % (prog(s, "create_canvas")[0], prog(s, "automation_1")[0],
+    log("    设计/自动化/灵感: %s / %s / %s" % (prog(s, "create_canvas")[0], prog(s, "automation_1")[0],
                                              prog(s, "playbook_prompt")[0]))
 
 
@@ -2592,7 +2592,7 @@ def t_lottery(s, uid, nick, log):
             except Exception:
                 chances = 0
         if not chances or chances <= 0:
-            log("   🎰抽奖: 无次数")
+            log("    🎰抽奖: 无次数")
             return
         won = []
         for i in range(int(chances)):
@@ -2607,11 +2607,11 @@ def t_lottery(s, uid, nick, log):
                     prize += "（实物奖，需在成长中心填写收货地址）"
                 won.append(prize)
             else:
-                log("   🎰抽奖失败: %s" % str(rr.get("msg", ""))[:40])
+                log("    🎰抽奖失败: %s" % str(rr.get("msg", ""))[:40])
                 break
-        log("   🎰抽奖: %s" % ("、".join(won) if won else "无结果"))
+        log("    🎰抽奖: %s" % ("、".join(won) if won else "无结果"))
     except Exception as e:
-        log("   🎰抽奖异常: %s" % str(e)[:50])
+        log("    🎰抽奖异常: %s" % str(e)[:50])
 
 
 def t_blindbox(s, uid, nick, log):
@@ -2627,13 +2627,13 @@ def t_blindbox(s, uid, nick, log):
         if affordable < 0 or affordable != affordable.to_integral_value():
             raise ValueError()
     except Exception as exc:
-        log("   📦盲盒查询失败（%s），本次不开启" % type(exc).__name__)
+        log("    📦盲盒查询失败（%s），本次不开启" % type(exc).__name__)
         return
     if affordable == 0:
         if balance < 10:
-            log("   📦盲盒: 能量不足 (%s/10)" % _format_credit(balance))
+            log("    📦盲盒: 能量不足 (%s/10)" % _format_credit(balance))
         else:
-            log("   📦盲盒: 当前无可开启次数（能量 %s）" % _format_credit(balance))
+            log("    📦盲盒: 当前无可开启次数（能量 %s）" % _format_credit(balance))
         return
     try:
         got = []
@@ -2648,9 +2648,9 @@ def t_blindbox(s, uid, nick, log):
             else:
                 break
             time.sleep(1.5)
-        log("   📦盲盒: %s" % ("、".join(got) if got else "开启失败"))
+        log("    📦盲盒: %s" % ("、".join(got) if got else "开启失败"))
     except Exception as exc:
-        log("   📦盲盒异常（%s）" % type(exc).__name__)
+        log("    📦盲盒异常（%s）" % type(exc).__name__)
 
 
 def t_buddy_info(s, uid, nick, log):
@@ -2658,7 +2658,7 @@ def t_buddy_info(s, uid, nick, log):
         r = s.get(BASE + "/v2/activity/growth/buddy/info", timeout=20, verify=False).json()
         if r.get("code") == 0:
             b = r.get("data", {}).get("buddy", r.get("data", {}))
-            log("   🐱Buddy: %s (%s)%s" % (b.get("name", "?"), b.get("rarity", ""),
+            log("    🐱Buddy: %s (%s)%s" % (b.get("name", "?"), b.get("rarity", ""),
                                            ", " + b.get("personality") if b.get("personality") else ""))
     except Exception:
         pass
@@ -2681,17 +2681,17 @@ def _travel_prepare(s, log, claim_arrived):
         if vis.get("code") == 0:
             vd = vis.get("data", {})
             if not vd.get("buddy_visible", True) or not vd.get("has_buddy", True):
-                log("   🐾旅行: 无Buddy，跳过")
+                log("    🐾旅行: 无Buddy，跳过")
                 return
         sd = _travel_status(s)
         state = sd["state"]
         if state == "arrived":
             if not claim_arrived:
-                log("   🐾旅行: 已到达，旅行关闭，本轮不领礼也不开盲盒")
+                log("    🐾旅行: 已到达，旅行关闭，本轮不领礼也不开盲盒")
                 return
             record_id = sd.get("record_id")
             if record_id in (None, "", 0):
-                log("   🐾旅行: 已到达但状态缺少 record_id，本轮不领奖也不重新派出")
+                log("    🐾旅行: 已到达但状态缺少 record_id，本轮不领奖也不重新派出")
                 return
             claim_response = s.post(
                 BASE + "/v2/activity/growth/buddy/travel/claim",
@@ -2704,46 +2704,46 @@ def _travel_prepare(s, log, claim_arrived):
             if (200 <= claim_response.status_code < 300
                     and _api_code_ok(rr.get("code"))
                     and reward is not None):
-                log("   🐾旅行: 🎉领取礼物 +%s积分" % reward)
+                log("    🐾旅行: 🎉领取礼物 +%s积分" % reward)
             else:
-                log("   🐾旅行: 领取未确认 %s" % str(
+                log("    🐾旅行: 领取未确认 %s" % str(
                     rr.get("msg") or "HTTP %s" % claim_response.status_code)[:60])
                 return
             sd = _travel_status(s)
             if sd["state"] != "idle":
-                log("   🐾旅行: 领礼后尚未回到空闲，本轮跳过盲盒与派出")
+                log("    🐾旅行: 领礼后尚未回到空闲，本轮跳过盲盒与派出")
                 return
             return sd
         if state == "traveling":
             remain = max(0, (sd.get("arrive_at", 0) - sd.get("server_now", 0)) // 60)
-            log("   🐾旅行: 旅行中，约%s分钟后到达" % remain)
+            log("    🐾旅行: 旅行中，约%s分钟后到达" % remain)
             return
         return sd
     except SafeError as exc:
-        log("   🐾" + str(exc))
+        log("    🐾" + str(exc))
     except Exception as exc:
-        log("   🐾旅行状态查询失败（%s），跳过盲盒与派出" % type(exc).__name__)
+        log("    🐾旅行状态查询失败（%s），跳过盲盒与派出" % type(exc).__name__)
 
 
 def _travel_depart(s, log, state):
     if state.get("daily_limit_reached"):
-        log("   🐾旅行: 今日次数已用尽")
+        log("    🐾旅行: 今日次数已用尽")
         return
     try:
         cfg = s.get(BASE + "/v2/activity/growth/buddy/travel/config", timeout=20, verify=False).json()
         locs = cfg.get("data", {}).get("locations", [])
         if not locs:
-            log("   🐾旅行: 无目的地")
+            log("    🐾旅行: 无目的地")
             return
         rr = s.post(BASE + "/v2/activity/growth/buddy/travel/depart",
                     json={"location_id": locs[0].get("id")}, timeout=20, verify=False).json()
         if rr.get("code") == 0:
             remain = max(0, (rr.get("data", {}).get("arrive_at", 0) - rr.get("data", {}).get("server_now", 0)) // 3600)
-            log("   🐾旅行: ✅已出发，约%s小时后到达（下次运行自动领取）" % remain)
+            log("    🐾旅行: ✅已出发，约%s小时后到达（下次运行自动领取）" % remain)
         else:
-            log("   🐾旅行: 出发失败 %s" % str(rr.get("msg", ""))[:40])
+            log("    🐾旅行: 出发失败 %s" % str(rr.get("msg", ""))[:40])
     except Exception as e:
-        log("   🐾旅行异常: %s" % str(e)[:50])
+        log("    🐾旅行异常: %s" % str(e)[:50])
 
 
 def _travel_blindbox_cycle(s, uid, nick, log):
@@ -2781,7 +2781,7 @@ def t_redeem(s, uid, nick, log, streak_days=None):
     for tier, need, label in tiers:
         tst = status.get(tier, "")
         if tst == "claimed":
-            log("   🎁兑换%s档: 已兑换过" % label)
+            log("    🎁兑换%s档: 已兑换过" % label)
             continue
         if tst == "locked" or (streak_days is not None and streak_days < need):
             continue
@@ -2792,11 +2792,11 @@ def t_redeem(s, uid, nick, log, streak_days=None):
         if code == 0:
             d = rr.get("data", {})
             extra = " +%s补签卡" % d["cards_granted"] if d.get("cards_granted") else ""
-            log("   🎁兑换%s档: +%s积分 +%s能量 +%s抽奖%s" % (label, d.get("credit_granted", 0),
+            log("    🎁兑换%s档: +%s积分 +%s能量 +%s抽奖%s" % (label, d.get("credit_granted", 0),
                                                         d.get("energy_granted", 0),
                                                         d.get("chances_granted", 0), extra))
         elif code == 409:
-            log("   🎁兑换%s档: 已兑换过" % label)
+            log("    🎁兑换%s档: 已兑换过" % label)
 
 
 def t_badges(s, uid, nick, log):
@@ -2804,7 +2804,7 @@ def t_badges(s, uid, nick, log):
         r = s.get(BASE + "/v2/activity/growth/badges", timeout=20, verify=False).json()
         badges = r.get("data", {}).get("badges", r.get("data", {}).get("list", []))
         earned = sum(1 for b in badges if isinstance(b, dict) and b.get("earned"))
-        log("   🏅徽章: %s个" % earned)
+        log("    🏅徽章: %s个" % earned)
     except Exception:
         pass
 
@@ -2896,15 +2896,15 @@ def t_compensation(s, uid, log):
     try:
         current = _benefit_status(s, "/billing/meter/compensation-status")
     except PermissionError:
-        log("   🏢补偿: 企业版账号不支持")
+        log("    🏢补偿: 企业版账号不支持")
         return
     except Exception as exc:
-        log("   ⚠️补偿状态查询失败: %s" % str(exc)[:80])
+        log("    ⚠️补偿状态查询失败: %s" % str(exc)[:80])
         return
     if not current.get("active"):
         return
     if current.get("claimed"):
-        log("   🎊补偿积分: 已领取")
+        log("    🎊补偿积分: 已领取")
         return
 
     credit_num = _as_int(current.get("credit_num"))
@@ -2913,15 +2913,15 @@ def t_compensation(s, uid, log):
     deadline = str(current.get("end_time") or "")
     handled = _benefit_guard_get("compensation", uid, deadline)
     if handled:
-        log("   🎊补偿: 本期已处理，跳过重复领取（本地防重）")
+        log("    🎊补偿: 本期已处理，跳过重复领取（本地防重）")
         return
-    log("   🎊补偿待领取: %s积分%s" % (
+    log("    🎊补偿待领取: %s积分%s" % (
         credit_num, "（截止%s）" % deadline if deadline else ""))
     try:
         status_code, result = _benefit_claim(
             s, "/billing/meter/claim-compensation")
     except Exception as exc:
-        log("   ⚠️补偿领取请求失败: %s（下轮重试）" % str(exc)[:80])
+        log("    ⚠️补偿领取请求失败: %s（下轮重试）" % str(exc)[:80])
         return
 
     business_code = result.get("code")
@@ -2931,37 +2931,37 @@ def t_compensation(s, uid, log):
             _benefit_guard_mark(
                 "compensation", uid, deadline, "processed", actual_credit)
         except Exception as exc:
-            log("   ⚠️补偿本地防重状态保存失败: %s" % str(exc)[:60])
+            log("    ⚠️补偿本地防重状态保存失败: %s" % str(exc)[:60])
         if actual_credit is not None and _as_int(actual_credit) > 0:
-            log("   ✅补偿领取成功: +%s积分" % actual_credit)
+            log("    ✅补偿领取成功: +%s积分" % actual_credit)
         elif isinstance(result.get("data"), dict) and result["data"].get("already_claimed"):
-            log("   🎊补偿: 已领取")
+            log("    🎊补偿: 已领取")
         else:
-            log("   ℹ️补偿本期已处理；本次回执未提供实际到账额")
+            log("    ℹ️补偿本期已处理；本次回执未提供实际到账额")
         return
 
     message = str(result.get("msg") or "HTTP %s" % status_code)
     if is_enterprise_denial(status_code, result):
-        log("   🏢补偿: 企业版账号不支持")
+        log("    🏢补偿: 企业版账号不支持")
     elif any(marker in message.lower() for marker in ("already", "已领取")):
         try:
             _benefit_guard_mark(
                 "compensation", uid, deadline, "already_claimed", 0)
         except Exception:
             pass
-        log("   🎊补偿: 已领取")
+        log("    🎊补偿: 已领取")
     else:
-        log("   ⚠️补偿领取未确认: %s（下轮重试）" % message[:80])
+        log("    ⚠️补偿领取未确认: %s（下轮重试）" % message[:80])
 
 
 def _claim_gift(s, uid, log):
     try:
         current = _benefit_status(s, "/billing/meter/check-gift-claimed")
     except PermissionError:
-        log("   🎁新手礼包: 企业版账号不支持")
+        log("    🎁新手礼包: 企业版账号不支持")
         return
     except Exception as exc:
-        log("   ⚠️礼包状态查询失败: %s" % str(exc)[:80])
+        log("    ⚠️礼包状态查询失败: %s" % str(exc)[:80])
         return
     if not current.get("active") or current.get("claimed"):
         return
@@ -2970,12 +2970,12 @@ def _claim_gift(s, uid, log):
         return
     deadline = str(current.get("end_time") or "")
     if _benefit_guard_get("gift", uid, deadline):
-        log("   🎁新手礼包: 本期已处理，跳过重复领取（本地防重）")
+        log("    🎁新手礼包: 本期已处理，跳过重复领取（本地防重）")
         return
     try:
         status_code, result = _benefit_claim(s, "/billing/meter/claim-gift")
     except Exception as exc:
-        log("   ⚠️新手礼包领取请求失败: %s（下轮重试）" % str(exc)[:80])
+        log("    ⚠️新手礼包领取请求失败: %s（下轮重试）" % str(exc)[:80])
         return
     business_code = result.get("code")
     actual_credit = _benefit_actual_credit(result)
@@ -2983,13 +2983,13 @@ def _claim_gift(s, uid, log):
         try:
             _benefit_guard_mark("gift", uid, deadline, "processed", actual_credit)
         except Exception as exc:
-            log("   ⚠️礼包本地防重状态保存失败: %s" % str(exc)[:60])
+            log("    ⚠️礼包本地防重状态保存失败: %s" % str(exc)[:60])
         if actual_credit is not None and _as_int(actual_credit) > 0:
-            log("   🎊新手礼包: +%s积分" % actual_credit)
+            log("    🎊新手礼包: +%s积分" % actual_credit)
         elif isinstance(result.get("data"), dict) and result["data"].get("already_claimed"):
-            log("   🎁新手礼包: 已领取")
+            log("    🎁新手礼包: 已领取")
         else:
-            log("   ℹ️新手礼包本期已处理；本次回执未提供实际到账额")
+            log("    ℹ️新手礼包本期已处理；本次回执未提供实际到账额")
         return
     message = str(result.get("msg") or "HTTP %s" % status_code)
     if any(marker in message.lower() for marker in ("already", "已领取")):
@@ -2997,9 +2997,9 @@ def _claim_gift(s, uid, log):
             _benefit_guard_mark("gift", uid, deadline, "already_claimed", 0)
         except Exception:
             pass
-        log("   🎁新手礼包: 已领取")
+        log("    🎁新手礼包: 已领取")
     else:
-        log("   ⚠️新手礼包领取未确认: %s（下轮重试）" % message[:80])
+        log("    ⚠️新手礼包领取未确认: %s（下轮重试）" % message[:80])
 
 
 def t_gift_compensation(s, uid, nick, log):
@@ -3076,10 +3076,10 @@ def t_makeup(s, uid, nick, log):
 
         candidates = _makeup_candidates(streak_body, heatmap_body)
         if not candidates:
-            log("   🩹无漏签，无需补签")
+            log("    🩹无漏签，无需补签")
             return current_days
         if balance <= 0:
-            log("   🩹发现%s个可补日期，但无补签卡" % len(candidates))
+            log("    🩹发现%s个可补日期，但无补签卡" % len(candidates))
             return current_days
 
         max_per_run = min(10, max(1, _as_int(
@@ -3098,7 +3098,7 @@ def t_makeup(s, uid, nick, log):
                     and _api_code_ok(payload.get("code"))):
                 repaired.append(target_date)
             else:
-                log("   🩹补签%s失败: %s" % (
+                log("    🩹补签%s失败: %s" % (
                     target_date, str(payload.get("msg") or "HTTP %s"
                                       % response.status_code)[:60]))
                 break
@@ -3109,11 +3109,11 @@ def t_makeup(s, uid, nick, log):
             fresh_streak = _dig(fresh, "streak")
             current_days = (fresh_streak.get("days")
                             if isinstance(fresh_streak, dict) else current_days)
-            log("   🩹补签成功: %s（活跃连签%s天）" % (
+            log("    🩹补签成功: %s（活跃连签%s天）" % (
                 "、".join(repaired), current_days if current_days is not None else "待刷新"))
         return current_days
     except Exception as exc:
-        log("   🩹补签检查异常: %s" % str(exc)[:60])
+        log("    🩹补签检查异常: %s" % str(exc)[:60])
         return None
 
 
@@ -3141,12 +3141,12 @@ def ensure_first_buddy(s, uid, nick, log):
         r = s.post(BASE + "/v2/activity/growth/buddy/first", json={}, timeout=20, verify=False).json()
         credit = (r.get("data") or {}).get("credit", 0)
         energy = (r.get("data") or {}).get("energy", 0)
-        log("   🐱首只Buddy: %s (credit=+%s energy=+%s)" % (
+        log("    🐱首只Buddy: %s (credit=+%s energy=+%s)" % (
             "领养成功" if r.get("code") == 0 else str(r.get("msg", ""))[:40], credit, energy))
         time.sleep(2)
         return has_buddy(s) is True
     except Exception as e:
-        log("   🐱首只Buddy异常: %s" % str(e)[:40])
+        log("    🐱首只Buddy异常: %s" % str(e)[:40])
         return False
 
 
@@ -3154,20 +3154,20 @@ def t_first_buddy(s, uid, nick, log):
     st, cur, tgt = prog(s, "first_buddy")
     have = has_buddy(s)
     if st in ("completed", "claimed") and have is not False:
-        log("   🐱首只Buddy: 已 %s %s/%s" % (st, cur, tgt))
+        log("    🐱首只Buddy: 已 %s %s/%s" % (st, cur, tgt))
         return
     if have is False and st in ("completed", "claimed"):
-        log("   🐱首只Buddy: 任务已 %s，但服务端无 Buddy 实例 → 尝试补建" % st)
+        log("    🐱首只Buddy: 任务已 %s，但服务端无 Buddy 实例 → 尝试补建" % st)
     ensure_first_buddy(s, uid, nick, log)
 
 
 def t_lighthouse(s, uid, nick, log):
     st, cur, tgt = prog(s, "Expert_lighthouse")
     if st is None:
-        log("   腾讯轻量云专家: 不在当前任务列表，跳过")
+        log("    腾讯轻量云专家: 不在当前任务列表，跳过")
         return
     if st in ("completed", "claimed"):
-        log("   腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
+        log("    腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
         return
     lh = dict(LIGHTHOUSE_EXPERT)
     try:
@@ -3196,7 +3196,7 @@ def t_lighthouse(s, uid, nick, log):
                                  "tags": ["expert:" + lh["id"]]}}
         conv_id, _txt, mid = webchat2(s, "lh", prompt, meta)
     except Exception as e:
-        log("   腾讯轻量云专家: 对话异常 %s" % str(e)[:50])
+        log("    腾讯轻量云专家: 对话异常 %s" % str(e)[:50])
     if conv_id and mid:
         summon = [
             {"eventCode": "expert_summon_click", "id": lh["id"], "name": lh["name"],
@@ -3219,11 +3219,11 @@ def t_lighthouse(s, uid, nick, log):
         try:
             report_desktop_events(s, uid, nick, summon + chain)
         except Exception as e:
-            log("   腾讯轻量云专家: 桌面链上报失败 %s" % str(e)[:50])
+            log("    腾讯轻量云专家: 桌面链上报失败 %s" % str(e)[:50])
         time.sleep(4)
         if prog(s, "Expert_lighthouse")[0] in ("completed", "claimed"):
             st, cur, tgt = prog(s, "Expert_lighthouse")
-            log("   腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
+            log("    腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
             return
     try:
         rid = mid or str(uuid.uuid4())
@@ -3240,9 +3240,9 @@ def t_lighthouse(s, uid, nick, log):
              "userId": uid}])
         time.sleep(3)
     except Exception as e:
-        log("   腾讯轻量云专家: 失败 %s" % str(e)[:60])
+        log("    腾讯轻量云专家: 失败 %s" % str(e)[:60])
     st, cur, tgt = prog(s, "Expert_lighthouse")
-    log("   腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
+    log("    腾讯轻量云专家: %s %s/%s" % (st, cur, tgt))
 
 
 VALORANT_EXPERT = {"id": "ex_xQHHD1u5Jkua", "name": "无畏契约拼豆专家", "version": "1.2.1"}
@@ -3253,31 +3253,31 @@ def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expe
     label = expert.get("profession") or expert.get("name") or task_code
     _source, row, _sources = _expert_context(s, task_code)
     if row is not None and _expert_unavailable(row):
-        log("   %s: %s，跳过" % (label, _expert_unavailable(row)))
+        log("    %s: %s，跳过" % (label, _expert_unavailable(row)))
         return
     progress = (row or {}).get("progress") or {}
     st, cur, tgt = ((row or {}).get("accept_status") if row is not None else None,
                     progress.get("current"), progress.get("target"))
     if st is None:
-        log("   %s: 不在当前任务列表，跳过" % label)
+        log("    %s: 不在当前任务列表，跳过" % label)
         return
     if st in ("completed", "claimed"):
-        log("   %s: %s %s/%s" % (label, st, cur, tgt))
+        log("    %s: %s %s/%s" % (label, st, cur, tgt))
         return
     if st in ("", "not_accepted"):
         if not _accept_expert_task(s, task_code, log):
-            log("   %s: 接受任务失败，停止本任务" % label)
+            log("    %s: 接受任务失败，停止本任务" % label)
             return
         st, cur, tgt = _expert_prog(s, task_code)
         if st in ("completed", "claimed"):
-            log("   %s: %s %s/%s" % (label, st, cur, tgt))
+            log("    %s: %s %s/%s" % (label, st, cur, tgt))
             return
         if st != "accepted":
-            log("   %s: 接受后状态未确认，停止本任务" % label)
+            log("    %s: 接受后状态未确认，停止本任务" % label)
             return
     expert = dict(expert)
     if expert.get("id") and not _EXPERT_ID_RE.fullmatch(str(expert.get("id") or "")):
-        log("   %s: 专家 ID 格式无效，跳过" % label)
+        log("    %s: 专家 ID 格式无效，跳过" % label)
         return
     profession = expert.get("profession") or expert.get("name") or task_code
     try:
@@ -3296,7 +3296,7 @@ def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expe
     except Exception:
         pass
     if not _EXPERT_ID_RE.fullmatch(str(expert.get("id") or "")):
-        log("   %s: 专家市场返回了无效 ID，跳过" % label)
+        log("    %s: 专家市场返回了无效 ID，跳过" % label)
         return
     display_name = expert.get("name") or expert["id"]
     expert_title = expert.get("profession") or profession
@@ -3323,9 +3323,9 @@ def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expe
         }}
         conv_id, _txt, mid = webchat2(s, conv_name, prompt, meta)
     except Exception as exc:
-        log("   %s: 对话异常 %s" % (label, str(exc)[:50]))
+        log("    %s: 对话异常 %s" % (label, str(exc)[:50]))
     if not conv_id or not mid:
-        log("   %s: 真实对话结果未确认（缺少会话或消息 ID），停止上报" % label)
+        log("    %s: 真实对话结果未确认（缺少会话或消息 ID），停止上报" % label)
         return
     if conv_id and mid:
         summon = [
@@ -3352,12 +3352,12 @@ def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expe
         try:
             report_desktop_events(s, uid, nick, summon + chain)
         except Exception as exc:
-            log("   %s: 桌面链上报失败 %s" % (label, str(exc)[:50]))
+            log("    %s: 桌面链上报失败 %s" % (label, str(exc)[:50]))
         time.sleep(4)
         status = _expert_prog(s, task_code)[0]
         if status in ("completed", "claimed"):
             st, cur, tgt = _expert_prog(s, task_code)
-            log("   %s: %s %s/%s" % (label, st, cur, tgt))
+            log("    %s: %s %s/%s" % (label, st, cur, tgt))
             return
     try:
         request_id = mid
@@ -3377,11 +3377,11 @@ def _run_local_expert_task(s, uid, nick, log, task_code, expert, conv_name="expe
         ])
         time.sleep(3)
     except Exception as exc:
-        log("   %s: 失败 %s" % (label, str(exc)[:60]))
+        log("    %s: 失败 %s" % (label, str(exc)[:60]))
     st, cur, tgt = _expert_prog(s, task_code)
-    log("   %s: %s %s/%s" % (label, st, cur, tgt))
+    log("    %s: %s %s/%s" % (label, st, cur, tgt))
     if st not in ("completed", "claimed"):
-        log("   %s: 服务端进度未确认完成，本轮不报成功" % label)
+        log("    %s: 服务端进度未确认完成，本轮不报成功" % label)
 
 
 def t_valorant(s, uid, nick, log):
@@ -3395,7 +3395,7 @@ def t_expert_use_task(s, uid, nick, log, task_code):
     """新增 expert_use 任务：内置 ID 兜底，任务 jump_url 可安全覆盖专家 ID。"""
     expert = _expert_spec_for_task(s, task_code)
     if not expert:
-        log("   %s: 缺少专家任务配置，跳过" % task_code)
+        log("    %s: 缺少专家任务配置，跳过" % task_code)
         return
     _run_local_expert_task(
         s, uid, nick, log, task_code, expert,
@@ -3557,7 +3557,7 @@ def _mp_accept(s, code, log=None):
     return ok
 
 
-def _mp_locked_hint(log, label, msg, indent="   "):
+def _mp_locked_hint(log, label, msg, indent="    "):
     m = re.search(r"locked until (\d{4}-\d{2}-\d{2})", msg or "")
     if not m:
         return False
@@ -3588,7 +3588,7 @@ def _wait_mp_target(s, code, label, log):
             return status, current, target
         if target is not None and target > 0:
             return status, current, target
-    log("   %s: target 仍未下发，留待下一轮，不按 1 冒领" % label)
+    log("    %s: target 仍未下发，留待下一轮，不按 1 冒领" % label)
     return None
 
 
@@ -3604,10 +3604,10 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
     """
     row = _mp_task_row(s, code)
     if row is None:
-        log("   %s: mp 口径未下发该任务，跳过" % label)
+        log("    %s: mp 口径未下发该任务，跳过" % label)
         return
     if row.get("locked"):
-        log("   %s: 未到上线时间（解锁 %s），跳过" % (label, str(row.get("valid_start") or "见任务页")[:10]))
+        log("    %s: 未到上线时间（解锁 %s），跳过" % (label, str(row.get("valid_start") or "见任务页")[:10]))
         return
     st = row.get("accept_status", "")
     _pr = row.get("progress") or {}
@@ -3616,14 +3616,14 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
         if st == "completed":
             _mp_claim(s, code, log)
         else:
-            log("   %s: 已领取，跳过" % label)
+            log("    %s: 已领取，跳过" % label)
         return
     if st == "not_accepted":
         ok, a_status, a_msg = _mp_accept_res(s, code)
         if not ok:
             log("      ✗ accept %s: %s %s" % (code, a_status or "无返回", a_msg[:50]))
             if not _mp_locked_hint(log, label, a_msg):
-                log("   %s: accept 失败，跳过" % label)
+                log("    %s: accept 失败，跳过" % label)
             return
         time.sleep(WRITE_GAP)
         # accept 后回读真实进度：accept 前 progress 为 null（target 下发 0），仅用
@@ -3633,7 +3633,7 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
             if st == "completed":
                 _mp_claim(s, code, log)
             else:
-                log("   %s: 已领取，跳过" % label)
+                log("    %s: 已领取，跳过" % label)
             return
     # target<=0 = 进度尚未下发，不能按 1 猜；有界回读后仍为空则留到下一轮。
     if tgt is None or tgt <= 0:
@@ -3645,12 +3645,12 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
             if st == "completed":
                 _mp_claim(s, code, log)
             else:
-                log("   %s: 已领取，跳过" % label)
+                log("    %s: 已领取，跳过" % label)
             return
     # 缺口计算：cur 可能为 None（未激活时 progress 全空）
     cur = cur or 0
     if tgt is None or tgt <= 0:
-        log("   %s: target 无效，跳过" % label)
+        log("    %s: target 无效，跳过" % label)
         return
     need = max(1, tgt - cur)
     try:
@@ -3665,17 +3665,17 @@ def _mp_do_task(s, uid, nick, code, log, events_fn, label, target=1, pace=False)
             sent += len(evs)
             if i < need - 1 and not pace:
                 time.sleep(WRITE_GAP)
-        log("   %s: 判据已上报（%d 次 / %d 个事件，目标 %s）" % (label, need, sent, tgt))
+        log("    %s: 判据已上报（%d 次 / %d 个事件，目标 %s）" % (label, need, sent, tgt))
         time.sleep(2.5)
         st2, cur2, tgt2 = _mp_prog(s, code)
         if st2 in ("completed", "claimed"):
-            log("   %s: ✅ 已完成 %s/%s" % (label, cur2, tgt2))
+            log("    %s: ✅ 已完成 %s/%s" % (label, cur2, tgt2))
             if st2 == "completed":
                 _mp_claim(s, code, log)
         else:
-            log("   %s: %s %s/%s（服务端暂未关联）" % (label, st2, cur2, tgt2))
+            log("    %s: %s %s/%s（服务端暂未关联）" % (label, st2, cur2, tgt2))
     except Exception as e:
-        log("   %s: 失败 %s" % (label, str(e)[:60]))
+        log("    %s: 失败 %s" % (label, str(e)[:60]))
 
 
 def _mp_chat_evs(uid, nick, prefix, activity_id=None):
@@ -3753,11 +3753,11 @@ def t_sequential_tasks_4(s, uid, nick, log):
     except Exception:
         pass
     if st2 in ("completed", "claimed"):
-        log("   小程序定时任务: ✅ 已完成（桌面域回落） %s/%s" % (cur2, tgt2))
+        log("    小程序定时任务: ✅ 已完成（桌面域回落） %s/%s" % (cur2, tgt2))
         if st2 == "completed":
             _mp_claim(s, "Sequential_Tasks_4", log)
     else:
-        log("   小程序定时任务: %s %s/%s（服务端暂未关联）" % (st2, cur2, tgt2))
+        log("    小程序定时任务: %s %s/%s（服务端暂未关联）" % (st2, cur2, tgt2))
 
 
 def t_sequential_tasks_5(s, uid, nick, log):
@@ -3845,15 +3845,15 @@ def t_sequential_tasks_7(s, uid, nick, log):
     code = "Sequential_Tasks_7"
     row = _growth_task_row(s, code)
     if row is None:
-        log("   PC灵感功能: 桌面任务列表未下发，跳过")
+        log("    PC灵感功能: 桌面任务列表未下发，跳过")
         return
     if row.get("locked"):
-        log("   PC灵感功能: 未到上线时间（解锁 %s），跳过" % (
+        log("    PC灵感功能: 未到上线时间（解锁 %s），跳过" % (
             str(row.get("valid_start") or "见任务页")[:10]))
         return
     status = row.get("accept_status") or row.get("status") or ""
     if status == "claimed":
-        log("   PC灵感功能: 已领取，跳过")
+        log("    PC灵感功能: 已领取，跳过")
         return
     progress = row.get("progress") or {}
     current = _as_int(progress.get("current"))
@@ -3862,23 +3862,23 @@ def t_sequential_tasks_7(s, uid, nick, log):
         claim(s, code, log)
         return
     if status in ("", "not_accepted") and not _accept_with_verify(s, code, log):
-        log("   PC灵感功能: 接受任务失败，跳过")
+        log("    PC灵感功能: 接受任务失败，跳过")
         return
     try:
         events = desktop_playbook_events(uid, nick)
         report_desktop_events(s, uid, nick, events)
         time.sleep(4)
     except Exception as exc:
-        log("   PC灵感功能: 桌面事件上报失败 %s" % str(exc)[:60])
+        log("    PC灵感功能: 桌面事件上报失败 %s" % str(exc)[:60])
         return
     status, current, target = prog(s, code)
     if status not in ("completed", "claimed"):
-        log("   PC灵感功能: 已上报但进度未点亮 %s/%s，不领奖" % (
+        log("    PC灵感功能: 已上报但进度未点亮 %s/%s，不领奖" % (
             current, target))
         return
     if status == "completed":
         claim(s, code, log)
-    log("   PC灵感功能: %s %s/%s" % (status, current, target))
+    log("    PC灵感功能: %s %s/%s" % (status, current, target))
 
 SKILL_SHARE_CHANNEL_URL = "https://open.workbuddy.cn/api/v2/open-platform/asset-shares/c2c/channels"
 
@@ -4054,29 +4054,29 @@ def t_skill_share(s, uid, nick, log):
     code = "skill_share"
     row = _growth_task_row(s, code)
     if row is None:
-        log("   分享技能给好友：当前未下发，跳过")
+        log("    分享技能给好友：当前未下发，跳过")
         return
     if row.get("locked") or _row_claimed(row):
-        log("   分享技能给好友：未解锁或已领取，跳过")
+        log("    分享技能给好友：未解锁或已领取，跳过")
         return
     if not _skill_share_complete(row):
         status = row.get("accept_status") or row.get("status")
         if status in (None, "", "not_accepted") and not _accept_with_verify(s, code, log):
-            log("   分享技能给好友：任务登记失败")
+            log("    分享技能给好友：任务登记失败")
             return
         skill = _skill_share_market_skill(s)
         if skill is None:
-            log("   分享技能给好友：未取得有效市场技能，本轮跳过")
+            log("    分享技能给好友：未取得有效市场技能，本轮跳过")
             return
         channel = _create_skill_share_channel(s, uid, skill)
         if not channel.get("success"):
-            log("   分享技能给好友：创建渠道失败（HTTP %s，业务码 %s）" % (
+            log("    分享技能给好友：创建渠道失败（HTTP %s，业务码 %s）" % (
                 channel.get("http", "?"), channel.get("code", "?")))
             return
         events = _skill_share_channel_events(skill["id"], skill["name"], channel["shareCode"])
         report_status = report_desktop_events(s, uid, nick, events)
         if not 200 <= report_status < 300:
-            log("   分享技能给好友：事件上报失败（HTTP %s）" % report_status)
+            log("    分享技能给好友：事件上报失败（HTTP %s）" % report_status)
             return
         for attempt in range(5):
             row = _growth_task_row(s, code)
@@ -4085,22 +4085,22 @@ def t_skill_share(s, uid, nick, log):
             if attempt < 4:
                 time.sleep(3)
         else:
-            log("   分享技能给好友：渠道已创建，进度未确认，本轮不领奖")
+            log("    分享技能给好友：渠道已创建，进度未确认，本轮不领奖")
             return
     if _row_claimed(row):
-        log("   分享技能给好友：服务端已确认领取")
+        log("    分享技能给好友：服务端已确认领取")
         return
     if not claim(s, code, log):
-        log("   分享技能给好友：领奖未确认")
+        log("    分享技能给好友：领奖未确认")
         return
     for attempt in range(3):
         fresh = _growth_task_row(s, code)
         if fresh and _row_claimed(fresh):
-            log("   分享技能给好友：已回读 claimed")
+            log("    分享技能给好友：已回读 claimed")
             return
         if attempt < 2:
             time.sleep(2)
-    log("   分享技能给好友：奖励回执已确认，任务状态尚待刷新")
+    log("    分享技能给好友：奖励回执已确认，任务状态尚待刷新")
 
 
 CAMPAIGN_BASE = "https://www.codebuddy.cn"
@@ -4514,13 +4514,13 @@ def campaign_tasks(s, uid, camp, log):
         s, uid, "GET", "/portal/activity/tasks?" + urlencode({"activity_code": camp}))
     data = payload.get("data")
     if not _campaign_ok(status, payload) or not isinstance(data, dict):
-        log("   ⚠️活动任务读取失败[%s]（HTTP %s）" % (camp, status))
+        log("    ⚠️活动任务读取失败[%s]（HTTP %s）" % (camp, status))
         return None
     tasks = data.get("tasks")
     progress = data.get("progress") or []
     if (not isinstance(tasks, list) or not isinstance(progress, list)
             or any(not isinstance(row, dict) for row in tasks + progress)):
-        log("   ⚠️活动任务读取失败[%s]（结构无效）" % camp)
+        log("    ⚠️活动任务读取失败[%s]（结构无效）" % camp)
         return None
     by_code = {row.get("task_code"): row for row in progress}
     result = {}
@@ -4535,7 +4535,7 @@ def campaign_tasks(s, uid, camp, log):
             if target == 0:
                 raise ValueError()
         except (ValueError, ArithmeticError):
-            log("   ⚠️活动任务结构无效[%s/%s]" % (camp, code))
+            log("    ⚠️活动任务结构无效[%s/%s]" % (camp, code))
             continue
         try:
             credit = _credit_decimal(task.get("reward_credit"))
@@ -4577,7 +4577,7 @@ def _campaign_claim(s, uid, camp, code, log):
     path = "/portal/activity/tasks/%s/claim?%s" % (code, urlencode({"activity_code": camp}))
     status, payload = _campaign_call(s, uid, "POST", path, {})
     if not _campaign_ok(status, payload):
-        log("   ⚠️活动领奖失败[%s/%s]（HTTP %s）" % (camp, code, status))
+        log("    ⚠️活动领奖失败[%s/%s]（HTTP %s）" % (camp, code, status))
         return None
     for attempt in range(5):
         if attempt:
@@ -4587,9 +4587,9 @@ def _campaign_claim(s, uid, camp, code, log):
         if row and row["claimed_at"]:
             value = row["credit"]
             reward = "奖励金额未提供" if value is None else "+%s 积分" % _format_credit(value)
-            log("   🎁活动领奖[%s/%s]: %s（claimed_at 已回读）" % (camp, code, reward))
+            log("    🎁活动领奖[%s/%s]: %s（claimed_at 已回读）" % (camp, code, reward))
             return row
-    log("   ⚠️活动领奖[%s/%s]: 已提交但未确认 claimed_at，留待下轮回读" % (camp, code))
+    log("    ⚠️活动领奖[%s/%s]: 已提交但未确认 claimed_at，留待下轮回读" % (camp, code))
     return None
 
 
@@ -4602,7 +4602,7 @@ def _run_campaign(s, uid, nick, spec, log):
         return result
     result["loaded"] = True
     if not rows:
-        log("   🎪%s：当前未下发活动任务" % spec["label"])
+        log("    🎪%s：当前未下发活动任务" % spec["label"])
         return result
     gained = Decimal(0)
     unknown_credit = False
@@ -4610,7 +4610,7 @@ def _run_campaign(s, uid, nick, spec, log):
         code = task["task"]
         row = rows.get(code)
         if row is None:
-            log("   🎪%s/%s：未下发，跳过" % (spec["label"], task["label"]))
+            log("    🎪%s/%s：未下发，跳过" % (spec["label"], task["label"]))
             continue
         if row["claimed_at"]:
             result["preclaimed"] += 1
@@ -4621,7 +4621,7 @@ def _run_campaign(s, uid, nick, spec, log):
                 status, payload = _campaign_call(s, uid, "POST",
                     "/portal/activity/tasks/%s/viewed?%s" % (code, urlencode({"activity_code": camp})), {})
                 if not _campaign_ok(status, payload):
-                    log("   ⚠️活动查看登记失败[%s/%s]（HTTP %s）" % (camp, code, status))
+                    log("    ⚠️活动查看登记失败[%s/%s]（HTTP %s）" % (camp, code, status))
                     result["pending"].append(task["label"])
                     continue
             remaining = target - row["progress"]
@@ -4629,7 +4629,7 @@ def _run_campaign(s, uid, nick, spec, log):
                 remaining = min(remaining, 1)
             for _ in range(remaining):
                 if not _campaign_fire(s, uid, nick, spec, task, log):
-                    log("   ⚠️活动事件上报失败[%s/%s]" % (camp, code))
+                    log("    ⚠️活动事件上报失败[%s/%s]" % (camp, code))
                     break
                 row = _campaign_poll(s, uid, camp, code, target, log)
                 if row is None or row["claimed_at"] or row["completed_at"] or row["progress"] >= target:
@@ -4638,7 +4638,7 @@ def _run_campaign(s, uid, nick, spec, log):
                 row = _campaign_poll(s, uid, camp, code, target, log, tries=6, gap=10)
             if not row or (not row["claimed_at"] and not row["completed_at"] and row["progress"] < target):
                 result["pending"].append(task["label"])
-                log("   🎪%s：判据延迟未落库，留待下轮回读" % task["label"])
+                log("    🎪%s：判据延迟未落库，留待下轮回读" % task["label"])
                 continue
         if row["claimed_at"]:
             continue
@@ -4652,7 +4652,7 @@ def _run_campaign(s, uid, nick, spec, log):
         else:
             result["pending"].append(task["label"])
     if "invite" in rows:
-        log("   🎪%s：邀请项仅展示状态，沿用现有邀请机制" % spec["label"])
+        log("    🎪%s：邀请项仅展示状态，沿用现有邀请机制" % spec["label"])
     result["new_credit"] = None if unknown_credit else _format_credit(gained)
     return result
 
@@ -4665,7 +4665,7 @@ def t_campaigns(s, uid, nick, log):
         try:
             results.append(_run_campaign(s, uid, nick, spec, log))
         except Exception as exc:
-            log("   ⚠️活动处理异常[%s]（%s）" % (spec["code"], type(exc).__name__))
+            log("    ⚠️活动处理异常[%s]（%s）" % (spec["code"], type(exc).__name__))
     return results
 
 
@@ -4708,10 +4708,10 @@ def t_unknown_tasks(s, uid, nick, log):
                 item["_source"] = label
                 rows_by_code[code] = item
     if errors:
-        log("   ⚠️任务发现部分口径失败: %s" % "；".join(errors))
+        log("    ⚠️任务发现部分口径失败: %s" % "；".join(errors))
     rows = list(rows_by_code.values())
     if not rows:
-        log("   ⚠️任务发现未取得任何任务行")
+        log("    ⚠️任务发现未取得任何任务行")
         return
     for t in rows:
         if not isinstance(t, dict):
@@ -4724,15 +4724,15 @@ def t_unknown_tasks(s, uid, nick, log):
         desc = str(t.get("task_desc") or t.get("description") or "")[:50]
         if code in LEVEL_TASK_CODES:
             if code == "wechat_linked":
-                log("   ⚠️等级任务需客户端: %s %s — 需在官方客户端绑定微信" % (code, title))
+                log("    ⚠️等级任务需客户端: %s %s — 需在官方客户端绑定微信" % (code, title))
             else:
-                log("   ℹ️等级任务(只发现): %s %s %s" % (code, title, st))
+                log("    ℹ️等级任务(只发现): %s %s %s" % (code, title, st))
         elif "subscribe" in code.lower() or "公众号" in (title + desc):
-            log("   ⚠️新任务需手动: %s %s (%s) — 需微信扫码关注公众号" % (code, title, desc))
+            log("    ⚠️新任务需手动: %s %s (%s) — 需微信扫码关注公众号" % (code, title, desc))
         elif "donat" in code.lower() or "捐款" in desc or "公益" in title:
-            log("   ⚠️新任务需手动: %s %s (%s) — 涉及真实捐款" % (code, title, desc))
+            log("    ⚠️新任务需手动: %s %s (%s) — 涉及真实捐款" % (code, title, desc))
         else:
-            log("   ⚠️未覆盖新任务: %s %s (%s) — 请反馈更新脚本" % (code, title, desc))
+            log("    ⚠️未覆盖新任务: %s %s (%s) — 请反馈更新脚本" % (code, title, desc))
     # 有效期预警：未完成但即将过期（或已过期）的任务
     today = beijing_today()
     soon = []
@@ -4752,7 +4752,7 @@ def t_unknown_tasks(s, uid, nick, log):
         elif left <= 7:
             soon.append((t.get("task_code") or t.get("code") or "", ve, "%d 天后到期" % left))
     if soon:
-        log("   ⏰ 任务有效期提醒（未完成）:")
+        log("    ⏰ 任务有效期提醒（未完成）:")
         for code, ve, when in soon[:6]:
             log("      · %s %s（%s）" % (code, ve, when))
 
@@ -5071,7 +5071,7 @@ def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
 
     if is_win:
         # ===== Windows：真实桌面换血流程 =====
-        log("   🖥️ 桌面换血流程启动（结束后自动还原认证并重启桌面端）...")
+        log("    🖥️ 桌面换血流程启动（结束后自动还原认证并重启桌面端）...")
         if need_skill:
             try:
                 src_ = s.get(BASE + "/console/as/marketplace/sources", timeout=20, verify=False).json()
@@ -5085,22 +5085,22 @@ def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
                 pass
         ensure_local_skill()
         if not swap_info(tok):
-            log("   ⚠️ 未找到可用的桌面端认证文件，降级为指纹上报...")
+            log("    ⚠️ 未找到可用的桌面端认证文件，降级为指纹上报...")
             _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
             return
         try:
             url = restart_desktop()
             if not url:
-                log("   ⚠️ 桌面端守护进程未就绪，降级为指纹上报...")
+                log("    ⚠️ 桌面端守护进程未就绪，降级为指纹上报...")
                 _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
                 return
             time.sleep(8)
             if need_rich:
                 txt = daemon_chat("你好，请用一句话介绍你自己")
                 if not txt:
-                    log("   守护进程会话未就绪，改用 CDP UI 发送...")
+                    log("    守护进程会话未就绪，改用 CDP UI 发送...")
                     cdp_ui_send("你好，请用一句话介绍你自己")
-                log("   桌面对话: %s字" % len(txt))
+                log("    桌面对话: %s字" % len(txt))
                 time.sleep(8)
             if need_skill:
                 blocks = [{"type": "resource_link", "uri": "skill://" + SKILL_NAME, "title": SKILL_NAME,
@@ -5108,9 +5108,9 @@ def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
                           {"type": "text", "text": "你必须通过技能系统正式加载（load）该技能，加载成功后回答：技能已加载"}]
                 txt = daemon_chat("", blocks=blocks)
                 if not txt:
-                    log("   守护进程不可用，改用 CDP UI 技能调用...")
+                    log("    守护进程不可用，改用 CDP UI 技能调用...")
                     cdp_ui_send("/" + SKILL_NAME + " 请按技能说明回答OK")
-                log("   技能加载: %s" % ("成功" if "加载" in txt else "回复%d字" % len(txt)))
+                log("    技能加载: %s" % ("成功" if "加载" in txt else "回复%d字" % len(txt)))
                 time.sleep(8)
         finally:
             # 认证还原必须覆盖异常与超时路径，不能把桌面端留在脚本账号。
@@ -5120,21 +5120,21 @@ def t_desktop_tasks(s, uid, nick, tok, log, need_rich, need_skill):
                 subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
                 time.sleep(5)
             else:
-                log("   ❌ 桌面认证还原失败，保留当前桌面进程并停止自动重启")
+                log("    ❌ 桌面认证还原失败，保留当前桌面进程并停止自动重启")
     else:
         # ===== 非 Windows：指纹上报降级 =====
-        log("   🖥️ 非 Windows 环境，使用指纹上报模式...")
+        log("    🖥️ 非 Windows 环境，使用指纹上报模式...")
         _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill)
         return
 
     if need_rich:
         st, cur, tgt = prog(s, "RichMeow_Chat")
-        log("   桌面端对话1次: %s %s/%s" % (st, cur, tgt))
+        log("    桌面端对话1次: %s %s/%s" % (st, cur, tgt))
         if st == "completed":
             claim(s, "RichMeow_Chat", log)
     if need_skill:
         st, cur, tgt = prog(s, "skill_1")
-        log("   尝鲜热门技能: %s %s/%s" % (st, cur, tgt))
+        log("    尝鲜热门技能: %s %s/%s" % (st, cur, tgt))
         if st == "completed":
             claim(s, "skill_1", log)
 
@@ -5147,10 +5147,10 @@ def _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill):
         try:
             evs = desktop_chat_sequence(uid, nick, conv, req, msg)
             report_desktop_events(s, uid, nick, evs)
-            log("   桌面对话(指纹): ✅ 6连事件已上报")
+            log("    桌面对话(指纹): ✅ 6连事件已上报")
             time.sleep(WRITE_GAP)
         except Exception as e:
-            log("   桌面对话(指纹): 失败 %s" % str(e)[:60])
+            log("    桌面对话(指纹): 失败 %s" % str(e)[:60])
     if need_skill:
         try:
             src_ = s.get(BASE + "/console/as/marketplace/sources", timeout=20, verify=False).json()
@@ -5189,13 +5189,13 @@ def _desktop_fingerprint_fallback(s, uid, nick, log, need_rich, need_skill):
                         "requestId": smid, "messageId": smid, "traceId": smid,
                         "requestModelId": "fast-model", "requestModelName": "fast-model"})
             report_desktop_events(s, uid, nick, evs)
-            log("   尝鲜热门技能(指纹): ✅ 真实对话 + skill_info 已上报")
+            log("    尝鲜热门技能(指纹): ✅ 真实对话 + skill_info 已上报")
             time.sleep(WRITE_GAP)
         except Exception as e:
-            log("   尝鲜热门技能(指纹): 失败 %s" % str(e)[:60])
+            log("    尝鲜热门技能(指纹): 失败 %s" % str(e)[:60])
     for code in (["RichMeow_Chat"] if need_rich else []) + (["skill_1"] if need_skill else []):
         st, cur, tgt = prog(s, code)
-        log("   %s: %s %s/%s" % (code, st, cur, tgt))
+        log("    %s: %s %s/%s" % (code, st, cur, tgt))
         if st == "completed":
             claim(s, code, log)
 
@@ -5206,24 +5206,24 @@ def t_workstation(s, uid, nick, log, tok):
     if st in ("completed", "claimed") or st is None:
         return
     if sys.platform != "win32":
-        log("   工作台搭建师: 非Windows，跳过桌面流程")
+        log("    工作台搭建师: 非Windows，跳过桌面流程")
         return
-    log("   检测到工作台搭建师任务，尝试桌面换血对话...")
+    log("    检测到工作台搭建师任务，尝试桌面换血对话...")
     # 桌面换血对话（复用 desktop 流程）
     if not swap_info(tok):
-        log("   工作台搭建师: 未找到可用的桌面端认证文件，跳过")
+        log("    工作台搭建师: 未找到可用的桌面端认证文件，跳过")
         return
     try:
         url = restart_desktop()
         if not url:
-            log("   工作台搭建师: 桌面端守护进程未就绪，跳过")
+            log("    工作台搭建师: 桌面端守护进程未就绪，跳过")
             return
         time.sleep(8)
         blocks = [{"type": "resource_link", "uri": "expert://WorkspaceBuilder", "title": "工作台搭建师",
                    "name": "工作台搭建师", "_meta": {"mentionType": "expert", "expertId": "WorkspaceBuilder"}},
                   {"type": "text", "text": "你好，请介绍你能帮我搭建什么工作台，回答OK即可"}]
         txt = daemon_chat("", blocks=blocks)
-        log("   工作台搭建师对话: %s字" % len(txt))
+        log("    工作台搭建师对话: %s字" % len(txt))
     finally:
         if restore_info():
             subprocess.run(["taskkill", "/F", "/IM", "WorkBuddy.exe"], capture_output=True)
@@ -5231,8 +5231,8 @@ def t_workstation(s, uid, nick, log, tok):
             subprocess.Popen(["cmd", "/c", "start", "", r"C:\Program Files\WorkBuddy\WorkBuddy.exe"])
             time.sleep(5)
         else:
-            log("   工作台搭建师: 桌面认证还原失败，保留当前桌面进程并停止自动重启")
-    log("   工作台搭建师: %s %s/%s" % prog(s, "workstation_expert"))
+            log("    工作台搭建师: 桌面认证还原失败，保留当前桌面进程并停止自动重启")
+    log("    工作台搭建师: %s %s/%s" % prog(s, "workstation_expert"))
 
 
 # ---------- 稳定指纹 & 事件构建 ----------
@@ -5417,7 +5417,7 @@ def claim_ready_tasks(s, log):
     by_code = {}
     for source, result in sources.items():
         if not result["ok"]:
-            log("   ⚠️领奖扫描失败（%s），该来源未确认" % source)
+            log("    ⚠️领奖扫描失败（%s），该来源未确认" % source)
         for row in result["rows"]:
             code = str(row.get("task_code") or row.get("code") or "").strip()
             if code:
@@ -5427,7 +5427,7 @@ def claim_ready_tasks(s, log):
         if any(_row_claimed(row) for row in rows.values()):
             if attempts.get(code) is False:
                 attempts[code] = True
-                log("   🎁领奖[%s]: 已由实时任务状态确认" % code)
+                log("    🎁领奖[%s]: 已由实时任务状态确认" % code)
             continue
         if code in attempts:
             continue
@@ -5440,7 +5440,7 @@ def claim_ready_tasks(s, log):
             source = "mp"
         elif is_expert:
             if not sources["desktop"]["ok"]:
-                log("   ⚠️专家领奖来源未确认，暂缓 %s" % code)
+                log("    ⚠️专家领奖来源未确认，暂缓 %s" % code)
                 continue
             source = "desktop" if "desktop" in rows else "mp"
             if len(rows) == 2 and _task_claimable(rows["desktop"]) != _task_claimable(rows["mp"]):
@@ -5449,10 +5449,10 @@ def claim_ready_tasks(s, log):
                     _primary, _row, refreshed = _expert_context(s, code)
                     a, b = refreshed["desktop"]["row"], refreshed["mp"]["row"]
                 except SafeError:
-                    log("   ⚠️专家任务进度回读失败，暂缓 %s" % code)
+                    log("    ⚠️专家任务进度回读失败，暂缓 %s" % code)
                     continue
                 if a is None or b is None or _task_claimable(a) != _task_claimable(b):
-                    log("   ⚠️专家任务进度未确认（两侧不一致），暂缓 %s" % code)
+                    log("    ⚠️专家任务进度未确认（两侧不一致），暂缓 %s" % code)
                     continue
                 rows = {"desktop": a, "mp": b}
         elif code in DESKTOP_ONLY_TASK_CODES:
@@ -5465,11 +5465,11 @@ def claim_ready_tasks(s, log):
             ok = _mp_claim(s, code, log) if source == "mp" else claim(s, code, log)
         except Exception as exc:
             ok = False
-            log("   ⚠️领奖[%s]异常（%s）" % (code, type(exc).__name__))
+            log("    ⚠️领奖[%s]异常（%s）" % (code, type(exc).__name__))
         if ok:
             claimed += 1
         time.sleep(1)
-    log("   🎁 达标补领完成: %d 项" % claimed if claimed else "   无达标未领奖励")
+    log("    🎁 达标补领完成: %d 项" % claimed if claimed else "   无达标未领奖励")
 
 
 def is_account_restricted(status_code, payload):
@@ -5645,7 +5645,7 @@ def run_account(idx, client, account, do_desktop):
         return msgs, summary
     if kind == "enterprise":
         log("  🏢 企业版账号：无个人成长体系（上游对签到/成长端点一律拒绝，实测口径）")
-        log("     已跳过签到与全部成长/互动任务；积分额度请在企业后台或企业接口查询")
+        log("    已跳过签到与全部成长/互动任务；积分额度请在企业后台或企业接口查询")
         summary["enterprise"] = True
         summary["rest"] = ["企业版账号（无个人成长体系）"]
         return msgs, summary
@@ -5655,7 +5655,7 @@ def run_account(idx, client, account, do_desktop):
         # 签到（YYB 回读确认流程）
         try:
             checkin_line, checkin_ok = client.run_checkin()
-            log("   %s" % checkin_line)
+            log("    %s" % checkin_line)
             summary["checked"] = checkin_ok
             summary["checked_in"] = bool(checkin_ok)
             summary["checkin"] = checkin_line
@@ -5663,11 +5663,11 @@ def run_account(idx, client, account, do_desktop):
                 st_data = client.status()
                 warn = _checkin_activity_warn(st_data)
                 if warn:
-                    log("   %s" % warn)
+                    log("    %s" % warn)
             except Exception:
                 pass
         except SafeError as e:
-            log("   ❌ 签到失败：%s" % e)
+            log("    ❌ 签到失败：%s" % e)
             summary["error"] = str(e)
 
         # 在产生新任务行为之前先补领已达标奖励；原签到/准备位置保持不变。
@@ -5675,13 +5675,13 @@ def run_account(idx, client, account, do_desktop):
         try:
             claim_ready_tasks(s, log)
         except Exception as exc:
-            log("   ⚠️领奖预扫异常（%s）" % type(exc).__name__)
+            log("    ⚠️领奖预扫异常（%s）" % type(exc).__name__)
 
         # 每日活跃上报（成长中心热力墙口径，只认 /v2/report 的 chat_request_send）
         try:
             t_daily_activity(s, uid, nick, log)
         except Exception as exc:
-            log("   ⚠️每日活跃异常（%s）" % type(exc).__name__)
+            log("    ⚠️每日活跃异常（%s）" % type(exc).__name__)
 
         # 查询
         credits = summary.get("credits", "暂无数据")
@@ -5748,7 +5748,7 @@ def run_account(idx, client, account, do_desktop):
         # 云端任务
         log("  ☁️ ── 云端任务 ──")
         if TASK_ONLY or TASK_SKIP:
-            log("   ⚙️ 任务过滤生效：%s%s" % (
+            log("    ⚙️ 任务过滤生效：%s%s" % (
                 ("仅执行 " + ",".join(sorted(TASK_ONLY))) if TASK_ONLY else "",
                 (("；跳过 " + ",".join(sorted(TASK_SKIP))) if TASK_SKIP else "")))
             # 「使用类」任务才会给成长中心记活跃（热力墙）。全被过滤掉时明确提醒：
@@ -5760,36 +5760,36 @@ def run_account(idx, client, account, do_desktop):
                       "automation_1", "library_read", "hp_appearance", "buddy_app", "buddy_app_qq"}
             _kept = {t for t in (TASK_ONLY or _usage) if t not in TASK_SKIP}
             if not (_kept & _usage):
-                log("   ⚠️ 未包含任何「使用类」任务 → 成长中心的今日活跃（热力墙）不会点亮")
+                log("    ⚠️ 未包含任何「使用类」任务 → 成长中心的今日活跃（热力墙）不会点亮")
                 log("      （签到/积分不受影响；想同时点亮热力墙建议保留一个对话类任务：WORKBUDDY_TASKS=checkin,travel,chat_5）")
 
         def _run(label, codes, fn, *, growth=False):
             """子任务调度：按 TASK_ONLY / TASK_SKIP 决定是否执行，单项异常不拖垮整轮。"""
             if not want(*codes):
-                log("   ⏭️ %s: 按配置跳过" % label)
+                log("    ⏭️ %s: 按配置跳过" % label)
                 return None
             if growth:
                 reasons = [_snapshot_skip_reason(task_snapshot, code) for code in codes]
                 if all(reasons):
-                    log("   ⏭️ %s: %s" % (label, "；".join(dict.fromkeys(reasons))))
+                    log("    ⏭️ %s: %s" % (label, "；".join(dict.fromkeys(reasons))))
                     return None
             try:
                 return fn()
             except Exception as e:
-                log("   ⚠️ %s 异常: %s" % (label, str(e)[:80]))
+                log("    ⚠️ %s 异常: %s" % (label, str(e)[:80]))
                 return None
 
         # 前置：无 Buddy 实例时，其余任务 accept 会被服务端拒绝（prerequisite not met: first_buddy）
         try:
             t_first_buddy(s, uid, nick, log)
         except Exception as exc:
-            log("   ⚠️领取Buddy异常（%s）" % type(exc).__name__)
+            log("    ⚠️领取Buddy异常（%s）" % type(exc).__name__)
         try:
             t_accept_all(s, uid, nick, log)
         except Exception as exc:
-            log("   ⚠️批量接受异常（%s），后续任务继续" % type(exc).__name__)
+            log("    ⚠️批量接受异常（%s），后续任务继续" % type(exc).__name__)
         task_snapshot = _build_task_snapshot(s)
-        log("   📋任务快照: %d 项%s" % (len(task_snapshot[0]),
+        log("    📋任务快照: %d 项%s" % (len(task_snapshot[0]),
                                         "" if task_snapshot[1] else "（部分来源不可用，沿用实时回读）"))
         _run("分享技能给好友", ["skill_share"], lambda: t_skill_share(s, uid, nick, log), growth=True)
         _run("召唤3次专家团", ["Expert_team_use_3"], lambda: t_team_3(s, uid, nick, log), growth=True)
@@ -5838,23 +5838,23 @@ def run_account(idx, client, account, do_desktop):
         try:
             t_unknown_tasks(s, uid, nick, log)   # 未覆盖任务检测不受过滤影响
         except Exception as exc:
-            log("   ⚠️任务发现异常（%s）" % type(exc).__name__)
+            log("    ⚠️任务发现异常（%s）" % type(exc).__name__)
 
         # 领奖：按进度补领，不依赖 accept_status 的瞬时状态
         log("  🎁 ── 领奖 ──")
         try:
             claim_ready_tasks(s, log)
         except Exception as exc:
-            log("   ⚠️领奖末扫异常（%s）" % type(exc).__name__)
+            log("    ⚠️领奖末扫异常（%s）" % type(exc).__name__)
         for code, confirmed in _claim_attempts(s).items():
             if not confirmed:
-                log("   ⚠️领奖[%s]: 本轮未确认到账" % code)
+                log("    ⚠️领奖[%s]: 本轮未确认到账" % code)
 
         # 终态：读取失败不能折算成 0/0 全部完成。
         try:
             st_all = growth_task_rows(s)
         except (SafeError, requests.RequestException):
-            log("   ⚠️任务终态读取失败，完成数量未确认")
+            log("    ⚠️任务终态读取失败，完成数量未确认")
             return msgs, summary
         summary["tasks_loaded"] = True
         done = sum(1 for t in st_all if isinstance(t, dict) and t.get("accept_status") in ("claimed", "completed"))
@@ -5868,7 +5868,7 @@ def run_account(idx, client, account, do_desktop):
         return msgs, summary
     except Exception as exc:
         summary["error"] = str(exc) if isinstance(exc, SafeError) else "账号流程异常（%s）" % type(exc).__name__
-        log("   ❌ " + summary["error"])
+        log("    ❌ " + summary["error"])
         return msgs, summary
     finally:
         _finish_credit_sample(s, summary, log)
@@ -5923,47 +5923,47 @@ def build_summary(summaries):
         rest_cn = [task_cn(r) for r in rest]
         lines.append("👤 账号%d  %s" % (idx, note))
         if error:
-            lines.append("   ❌ %s" % error)
+            lines.append("    ❌ %s" % error)
             if "credits_before" in sm or "credits_after" in sm:
                 lines.extend(_credit_lines(sm))
             lines.append("")
             continue
         if checkin:
             icon = "✅" if sm.get("checked_in") else ("ℹ️" if sm.get("query") else "⚠️")
-            lines.append("   %s %s" % (icon, checkin))
+            lines.append("    %s %s" % (icon, checkin))
         lines.extend(_credit_lines(sm))
         for campaign in sm.get("campaigns") or []:
             if not campaign["loaded"]:
-                lines.append("   ⚠️ %s：活动读取失败" % campaign["label"])
+                lines.append("    ⚠️ %s：活动读取失败" % campaign["label"])
                 continue
             reward = ("奖励金额待确认" if campaign["new_credit"] is None
                       else "+%s 积分" % campaign["new_credit"])
-            lines.append("   🎪 %s：本轮确认领取 %d 项，%s" % (
+            lines.append("    🎪 %s：本轮确认领取 %d 项，%s" % (
                 campaign["label"], len(campaign["confirmed"]), reward))
             if campaign["manual"]:
                 lines.append("      📱需手机端完成：%s" % "、".join(campaign["manual"]))
             if campaign["pending"]:
                 lines.append("      ⏳待回读：%s" % "、".join(campaign["pending"]))
-        lines.append("   📊 %s" % (usage if usage else "暂无数据"))
-        lines.append("   🌱 等级%s | 签到连签%s天 | 活跃连签%s天 | 能量%s"
+        lines.append("    📊 %s" % (usage if usage else "暂无数据"))
+        lines.append("    🌱 等级%s | 签到连签%s天 | 活跃连签%s天 | 能量%s"
                      % (level, sm.get("checkin_streak", "?"), streak, energy))
         if str(streak).strip() in ("0", "0.0"):
             lines.append("      ℹ️ 活跃连签=0 属正常：它由成长中心「使用事件（热力墙）」驱动，与积分签到无关")
         if sm.get("query"):
-            lines.append("   ℹ️ 仅查询状态，未执行任务")
+            lines.append("    ℹ️ 仅查询状态，未执行任务")
         elif sm.get("enterprise"):
-            lines.append("   ℹ️ 企业版账号，无个人成长任务")
+            lines.append("    ℹ️ 企业版账号，无个人成长任务")
         elif not sm.get("tasks_loaded"):
-            lines.append("   ⚠️ 任务结果未确认")
+            lines.append("    ⚠️ 任务结果未确认")
         elif total == 0:
-            lines.append("   ℹ️ 当前任务列表为空")
+            lines.append("    ℹ️ 当前任务列表为空")
         elif rest_cn:
-            lines.append("   ⏳ 未完成: %s" % "、".join(rest_cn))
+            lines.append("    ⏳ 未完成: %s" % "、".join(rest_cn))
         else:
-            lines.append("   ✅ 当前任务列表全部完成（%s/%s）" % (done, total))
+            lines.append("    ✅ 当前任务列表全部完成（%s/%s）" % (done, total))
         issues = sm.get("task_errors") or []
         if issues:
-            lines.append("   ⚠️ 本轮任务/查询异常 %d 项（见运行日志）" % len(issues))
+            lines.append("    ⚠️ 本轮任务/查询异常 %d 项（见运行日志）" % len(issues))
             lines.extend("      · " + issue for issue in issues[:3])
         lines.append("")
     lines.append("📊 ══ 总计 ══")
@@ -5976,7 +5976,7 @@ def build_summary(summaries):
     if all_rest:
         lines.append("")
         for cn, cnt in sorted(all_rest.items(), key=lambda x: -x[1]):
-            lines.append("   · %s（%d个账号待完成）" % (cn, cnt))
+            lines.append("    · %s（%d个账号待完成）" % (cn, cnt))
     lines.append("")
     lines.append("🕐 %s" % time.strftime("%Y-%m-%d %H:%M"))
     lines.append(SUMMARY_SEP)
