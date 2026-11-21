@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  微信笔笔省
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 1 10 * * *
 # =========================================================
 #
@@ -46,7 +46,7 @@ def now_text() -> str:
     # 兼容两种导入: from datetime import datetime / import datetime
     _dt = datetime.now() if hasattr(datetime, "now") else datetime.datetime.now()
     return _dt.strftime("%Y-%m-%d %H:%M:%S")
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -319,6 +319,7 @@ class AutoTask:
         :param script_name: 脚本名称，用于日志显示
         """
         self.script_name = script_name
+        self.exit_code = 0  # 0=全部成功，1=有账号失败/执行异常（供 __main__ 决定退出码）
         self.proxy_url = os.getenv("PROXY_API_URL") # 代理api，返回一条txt文本，内容为代理ip:端口
         self.wx_appid = "wxdb3c0e388702f785" # 微信小程序id
         self.wechat_code_adapter = YYBGoEnhancedAdapter(self.wx_appid)
@@ -633,9 +634,13 @@ class AutoTask:
                 "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 %d" % (total_accounts, ok_cnt, fail_cnt, skip_cnt),
                 logger=self.log,
             )
+            # 退出码语义：有真实失败账号（非跳过）才算失败
+            self.exit_code = 0 if fail_cnt == 0 else 1
         except Exception as e:
             self.log(f"💥 【{self.script_name}】执行过程中发生错误: {str(e)}\n{traceback.format_exc()}", level="error")
+            self.exit_code = 1
 
 if __name__ == "__main__":
     auto_task = AutoTask("微信支付提现笔笔省")
     auto_task.run()
+    _sys.exit(auto_task.exit_code)

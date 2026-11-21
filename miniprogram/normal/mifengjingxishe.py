@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  蜜蜂惊喜社
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 30 5,15 * * *
 # 积分有效期：当前获取的积分将在后年1月1日过期【1+1】
 # 即将过期检查方式：年底前 7 天检查即将过期积分（上年+今年）
@@ -73,12 +73,40 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
 # ========== 统一日志：[LEVEL] [MFJXS] message ==========
+# 详细日志缓冲：过程细节先进缓冲不直接打印；每个账号结束时，只有该账号出现过
+# WARN/ERROR 才把细节整段展开，平时（成功账号）直接丢弃 → 平时简略、出错详细。
+_detail_buf: list = []
+_detail_had_issue = False
+
+
+def logDetail(msg):
+    _detail_buf.append("[INFO] %s" % str(msg).lstrip(" \u3000\t"))
+
+
+def resetDetail():
+    global _detail_buf, _detail_had_issue
+    _detail_buf = []
+    _detail_had_issue = False
+
+
+def flushDetail():
+    global _detail_buf
+    if _detail_had_issue and _detail_buf:
+        print("[INFO] ── 详细过程（本账号有异常，展开） ──", flush=True)
+        for _line in _detail_buf:
+            print(_line, flush=True)
+    resetDetail()
+
+
 def _emit(level, msg):
+    global _detail_had_issue
+    if level in ("WARN", "ERROR"):
+        _detail_had_issue = True
     line = "[%s] %s" % (level, msg)
     print(line, flush=True)
 
@@ -331,7 +359,7 @@ def build_proxy_dict(proxy_info: Dict[str, Any] | None) -> Dict[str, str] | None
     scheme = "socks5" if PROXY_TYPE == "socks5" else "http"
     proxy_url = f"{scheme}://{auth}{host}:{port}"
 
-    log(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
+    logDetail(f"🛠️ [代理] 生成 {scheme.upper()} 代理 {host}:{port}")
 
     return {
         "http": proxy_url,
@@ -350,20 +378,20 @@ def validate_proxy(proxies: Dict[str, str] | None) -> Tuple[bool, str]:
                 ip = response.json().get("origin", "未知")
             except Exception:
                 ip = "未知"
-            log(f"✅ [代理] 验证通过，出口 IP: {ip}")
+            logDetail(f"✅ [代理] 验证通过，出口 IP: {ip}")
             return True, ip
     except Exception as exc:
-        warn(f"⚠️ [代理] 验证失败: {exc}")
+        logDetail(f"⚠️ [代理] 验证失败: {exc}")
 
     return False, ""
 
 
 def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
     if not PROXY_API:
-        warn(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
+        logDetail(f"⚠️ [代理] {account_name} 未配置 PROXY_API，使用直连")
         return None, ""
 
-    log(f"🌐 [代理] {account_name} 正在获取品赞代理...")
+    logDetail(f"🌐 [代理] {account_name} 正在获取品赞代理...")
 
     for index in range(1, PROXY_RETRY_TIMES + 1):
         try:
@@ -371,24 +399,24 @@ def get_valid_proxy(account_name: str) -> Tuple[Dict[str, str] | None, str]:
             proxy_info = parse_proxy_response(response.text)
 
             if not proxy_info:
-                warn(f"⚠️ [代理] 第 {index} 次代理解析失败")
+                logDetail(f"⚠️ [代理] 第 {index} 次代理解析失败")
                 continue
 
-            log(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
+            logDetail(f"✅ [代理] 提取到 {proxy_info['host']}:{proxy_info['port']}")
             proxies = build_proxy_dict(proxy_info)
 
             ok, ip = validate_proxy(proxies)
             if ok:
                 return proxies, ip
 
-            warn(f"⚠️ [代理] 第 {index} 次代理不可用")
+            logDetail(f"⚠️ [代理] 第 {index} 次代理不可用")
         except Exception as exc:
-            warn(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
+            logDetail(f"⚠️ [代理] 第 {index} 次获取代理异常: {exc}")
 
         if index < PROXY_RETRY_TIMES:
             sleep(2)
 
-    warn("⚠️ [代理] 获取失败，使用直连")
+    logDetail("⚠️ [代理] 获取失败，使用直连")
     return None, ""
 
 
@@ -406,10 +434,10 @@ def request_with_proxy(
         try:
             return requests.request(method, url, proxies=proxies, **kwargs)
         except Exception as exc:
-            warn(f"⚠️ [代理] {server} 代理请求失败: {exc}")
+            logDetail(f"⚠️ [代理] {server} 代理请求失败: {exc}")
             if not ENABLE_DIRECT_FALLBACK:
                 raise
-            warn("🔁 [兜底] 切换直连重试")
+            logDetail("🔁 [兜底] 切换直连重试")
 
     session = direct_session()
     return session.request(method, url, **kwargs)
@@ -460,7 +488,7 @@ def send_pushplus(title: str, content: str) -> list:
 
 def get_code(server: str) -> str | None:
     url = f"http://{server}/login"
-    log(f"🔐 [授权] 请求本地 code 服务: {url}")
+    logDetail(f"🔐 [授权] 请求本地 code 服务: {url}")
 
     try:
         response = direct_session().get(
@@ -474,7 +502,7 @@ def get_code(server: str) -> str | None:
             err(f"❌ [授权] code 获取失败: {json_preview(data)}")
             return None
 
-        log("✅ [授权] code 获取成功")
+        logDetail("✅ [授权] code 获取成功")
         return data["code"]
     except Exception as exc:
         err(f"❌ [授权] code 获取异常: {exc}")
@@ -576,7 +604,7 @@ def build_url(api_path: str, token: str, query: Dict[str, Any] | None = None) ->
 
 def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tuple[str | None, str | None, Dict[str, Any] | None]:
     try:
-        log("🔐 [登录] 使用 code 换 accessToken")
+        logDetail("🔐 [登录] 使用 code 换 accessToken")
         response = request_with_proxy(
             "POST",
             build_url("wscshop/weapp/authorize.json", ""),
@@ -600,11 +628,11 @@ def login_by_code(server: str, code: str, proxies: Dict[str, str] | None) -> Tup
         token = extract_token(data)
         session_id = extract_session_id(data)
         if token and to_float(data.get("code")) == 0:
-            log(f"✅ [登录] accessToken 获取成功: {mask(token)}")
+            logDetail(f"✅ [登录] accessToken 获取成功: {mask(token)}")
             if session_id:
-                log(f"✅ [登录] sessionId 获取成功: {mask(session_id)}")
+                logDetail(f"✅ [登录] sessionId 获取成功: {mask(session_id)}")
             else:
-                warn("⚠️ [登录] 未取到 sessionId，业务请求将不带 Extra-Data")
+                logDetail("⚠️ [登录] 未取到 sessionId，业务请求将不带 Extra-Data")
             return token, session_id, data
 
         msg = data.get("msg") or data.get("message") or json_preview(data)
@@ -640,7 +668,7 @@ def load_token_cache() -> Dict[str, Any]:
             with open(COOKIE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as exc:
-        warn(f"⚠️ [缓存] 读取失败: {exc}")
+        logDetail(f"⚠️ [缓存] 读取失败: {exc}")
     return {}
 
 
@@ -648,7 +676,7 @@ def save_token_cache(cache: Dict[str, Any]) -> None:
     try:
         with open(COOKIE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
-        log("✅ [缓存] Token保存成功")
+        logDetail("✅ [缓存] Token保存成功")
     except Exception as exc:
         err(f"❌ [缓存] 保存失败: {exc}")
 
@@ -668,7 +696,7 @@ def load_daily_done() -> Dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except Exception as exc:
-        warn(f"⚠️ [打标] 读取失败: {exc}")
+        logDetail(f"⚠️ [打标] 读取失败: {exc}")
     return {}
 
 
@@ -720,7 +748,7 @@ def mark_done_today(server: str, note: str = "",
         entry["totalPoints"] = to_float(total_points)
     cache[server] = entry
     save_daily_done(cache)
-    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+    logDetail(f"✅ [打标] 今日任务已完成，已记录（{today}）")
 
 
 def total_points_from_done(server: str) -> Optional[float]:
@@ -757,7 +785,7 @@ def load_points_history() -> Dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except Exception as exc:
-        warn(f"⚠️ [积分] 历史读取失败: {exc}")
+        logDetail(f"⚠️ [积分] 历史读取失败: {exc}")
     return {}
 
 
@@ -806,10 +834,10 @@ def get_cached_token(server: str) -> str | None:
         try:
             expire = datetime.fromisoformat(data["expireTime"]).timestamp() * 1000
             if time.time() * 1000 < expire - 3600 * 1000:
-                log(f"✅ [缓存] 使用 {server} token")
+                logDetail(f"✅ [缓存] 使用 {server} token")
                 return data["token"]
         except Exception as exc:
-            warn(f"⚠️ [缓存] 过期时间解析异常: {exc}")
+            logDetail(f"⚠️ [缓存] 过期时间解析异常: {exc}")
     return None
 
 
@@ -871,7 +899,7 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
     resp = api_get(server, build_url("wscump/integral/user_points.json", token), token, proxies, session_id)
     if to_float(resp.get("code")) != 0:
         msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
-        warn(f"⚠️ [积分] {label}获取失败: {msg}")
+        logDetail(f"⚠️ [积分] {label}获取失败: {msg}")
         return f"获取失败: {msg}", None
     data = safe_data(resp)
     points = data.get("current_points") if data.get("current_points") is not None else (
@@ -879,7 +907,7 @@ def get_points(server: str, token: str, proxies: Dict[str, str] | None, label: s
             data.get("total_points") if data.get("total_points") is not None else "未知"
         )
     )
-    log(f"✅ [积分] {label}: {points}")
+    logDetail(f"✅ [积分] {label}: {points}")
     value = None
     try:
         value = float(points)
@@ -934,7 +962,7 @@ def pointstore_get(server: str, path: str, token: str, proxies: Dict[str, str] |
         resp = request_with_proxy("GET", url, headers=headers, proxies=proxies, server=server)
         return resp.json()
     except Exception as exc:
-        warn(f"⚠️ [积分过期] {path} 请求异常: {exc}")
+        logDetail(f"⚠️ [积分过期] {path} 请求异常: {exc}")
         return {"code": -1, "msg": str(exc)}
 
 
@@ -950,7 +978,7 @@ def fetch_point_records(server: str, token: str, proxies: Dict[str, str] | None,
                                "timeStart": ts_start, "timeEnd": ts_end,
                                "type": 0, "needGoodsDetail": 1})
         if to_float(resp.get("code")) != 0:
-            warn(f"⚠️ [积分过期] 积分明细查询失败: {resp.get('msg') or json_preview(resp, 200)}")
+            logDetail(f"⚠️ [积分过期] 积分明细查询失败: {resp.get('msg') or json_preview(resp, 200)}")
             break
         data = safe_data(resp)
         items = data.get("logContentList") or []
@@ -961,7 +989,7 @@ def fetch_point_records(server: str, token: str, proxies: Dict[str, str] | None,
             break
         page += 1
     if total and len(records) < total:
-        warn(f"⚠️ [积分过期] 积分明细可能被截断：已取 {len(records)}/{total} 条")
+        logDetail(f"⚠️ [积分过期] 积分明细可能被截断：已取 {len(records)}/{total} 条")
     return records
 
 
@@ -1053,7 +1081,7 @@ def check_expire_remind(rows: List[Dict[str, Any]]) -> None:
     try:
         send_pushplus("🐝 蜜蜂惊喜社积分即将过期提醒", content)
     except Exception as exc:
-        warn(f"⚠️ [积分过期] 通知推送异常: {exc}")
+        logDetail(f"⚠️ [积分过期] 通知推送异常: {exc}")
 
 
 # ====================== ISV 体系（2026-11-17a） ======================
@@ -1094,7 +1122,7 @@ def get_yz_open_id(server: str, token: str, session_id: str | None,
     """获取 ISV 的 yz_open_id（= userOpenId）。缓存优先，其次 getUserOpenInfo.json；失败返回 None。"""
     cached_open = get_cached_field(server, "userOpenId")
     if cached_open:
-        log(f"🔑 [ISV] 使用缓存 userOpenId: {mask(cached_open)}")
+        logDetail(f"🔑 [ISV] 使用缓存 userOpenId: {mask(cached_open)}")
         return cached_open
 
     buyer_id = get_cached_field(server, "buyerId") or extract_buyer_id(raw_login)
@@ -1105,16 +1133,16 @@ def get_yz_open_id(server: str, token: str, session_id: str | None,
     resp = api_get(server, url, token, proxies, session_id)
     if to_float(resp.get("code")) != 0:
         msg = resp.get("msg") or resp.get("message") or json_preview(resp, 200)
-        warn(f"⚠️ [ISV] 获取 userOpenId 失败: {msg}（本次降级原签到）")
+        logDetail(f"⚠️ [ISV] 获取 userOpenId 失败: {msg}（本次降级原签到）")
         return None
     data = safe_data(resp)
     open_id = data.get("userOpenId") or data.get("yzOpenId") or data.get("openId")
     if not open_id:
-        warn("⚠️ [ISV] getUserOpenInfo 未返回 userOpenId（本次降级原签到）")
+        logDetail("⚠️ [ISV] getUserOpenInfo 未返回 userOpenId（本次降级原签到）")
         return None
     open_id = str(open_id)
     set_cached_fields(server, userOpenId=open_id, buyerId=buyer_id)
-    log(f"🔑 [ISV] userOpenId 获取成功: {mask(open_id)}")
+    logDetail(f"🔑 [ISV] userOpenId 获取成功: {mask(open_id)}")
     return open_id
 
 
@@ -1130,15 +1158,15 @@ def query_isv_task_state(server: str, yz_open_id: str,
         )
         data = resp.json()
     except Exception as exc:
-        warn(f"⚠️ [ISV] 任务状态查询异常: {exc}")
+        logDetail(f"⚠️ [ISV] 任务状态查询异常: {exc}")
         return None
     if str(data.get("flag")) != "200" and to_float(data.get("flagIntValue")) != 200:
         msg = data.get("message") or json_preview(data, 200)
-        warn(f"⚠️ [ISV] 任务状态查询失败: {msg}")
+        logDetail(f"⚠️ [ISV] 任务状态查询失败: {msg}")
         return None
     state = safe_data(data)
     if not isinstance(state, dict) or not state:
-        warn("⚠️ [ISV] 任务状态为空（本次降级原签到）")
+        logDetail("⚠️ [ISV] 任务状态为空（本次降级原签到）")
         return None
     return state
 
@@ -1154,7 +1182,7 @@ def isv_sign(server: str, yz_open_id: str, proxies: Dict[str, str] | None) -> st
         )
         data = resp.json()
     except Exception as exc:
-        warn(f"⚠️ [ISV] 签到异常: {exc}")
+        logDetail(f"⚠️ [ISV] 签到异常: {exc}")
         return None
     flag = str(data.get("flag"))
     if flag == "200" or to_float(data.get("flagIntValue")) == 200:
@@ -1166,7 +1194,7 @@ def isv_sign(server: str, yz_open_id: str, proxies: Dict[str, str] | None) -> st
         log(f"✅ [ISV] 签到成功: {msg}")
         return "签到成功"
     msg = data.get("message") or json_preview(data, 200)
-    warn(f"⚠️ [ISV] 签到失败: {msg}（本次降级原签到）")
+    logDetail(f"⚠️ [ISV] 签到失败: {msg}（本次降级原签到）")
     return None
 
 
@@ -1183,15 +1211,15 @@ def get_article_view_live_id(server: str, proxies: Dict[str, str] | None) -> str
         )
         data = resp.json()
     except Exception as exc:
-        warn(f"⚠️ [预告] 查询直播活动异常: {exc}")
+        logDetail(f"⚠️ [预告] 查询直播活动异常: {exc}")
         return None
     if str(data.get("flag")) != "200" and to_float(data.get("flagIntValue")) != 200:
-        warn(f"⚠️ [预告] 查询直播活动失败: {data.get('message') or json_preview(data, 200)}")
+        logDetail(f"⚠️ [预告] 查询直播活动失败: {data.get('message') or json_preview(data, 200)}")
         return None
     info = safe_data(data)
     live_id = info.get("id") or info.get("live_id")
     if not live_id:
-        warn("⚠️ [预告] 活动未返回 live_id")
+        logDetail("⚠️ [预告] 活动未返回 live_id")
         return None
     return str(live_id)
 
@@ -1212,11 +1240,11 @@ def do_article_view_task(server: str, yz_open_id: str,
     if state is None:
         state = query_isv_task_state(server, yz_open_id, proxies)
     if state is None:
-        warn("⚠️ [预告] 任务状态查询失败，跳过领奖写请求")
+        logDetail("⚠️ [预告] 任务状态查询失败，跳过领奖写请求")
         return "状态查询失败，已跳过"
 
     if bool(state.get("pagesview")):
-        log("✅ [预告] 今日浏览任务已完成（pagesview=true，未发送领奖请求）")
+        logDetail("✅ [预告] 今日浏览任务已完成（pagesview=true，未发送领奖请求）")
         return "今日已完成"
 
     live_id = get_article_view_live_id(server, proxies)
@@ -1224,7 +1252,7 @@ def do_article_view_task(server: str, yz_open_id: str,
         return "未获取到活动 live_id，已跳过"
 
     wait_time = random.randint(2, 5)
-    log(f"⏳ [预告] 领奖前等待 {wait_time}s（live_id={live_id}）")
+    logDetail(f"⏳ [预告] 领奖前等待 {wait_time}s（live_id={live_id}）")
     sleep(wait_time)
 
     try:
@@ -1242,18 +1270,18 @@ def do_article_view_task(server: str, yz_open_id: str,
         )
         data = resp.json()
     except Exception as exc:
-        warn(f"⚠️ [预告] 领奖请求异常: {exc}")
+        logDetail(f"⚠️ [预告] 领奖请求异常: {exc}")
         return f"领奖异常: {exc}"
 
     if str(data.get("flag")) == "200" or to_float(data.get("flagIntValue")) == 200:
         msg = str(data.get("data") or data.get("message") or "")
-        log(f"✅ [预告] 领奖成功: {msg}")
+        logDetail(f"✅ [预告] 领奖成功: {msg}")
         return f"领奖成功: {msg}"
     msg = data.get("message") or json_preview(data, 200)
     if any(kw in str(msg) for kw in ("已领", "重复", "已完成", "已参与")):
-        log(f"✅ [预告] 今日已领取: {msg}")
+        logDetail(f"✅ [预告] 今日已领取: {msg}")
         return "今日已领取"
-    warn(f"⚠️ [预告] 领奖失败: {msg}")
+    logDetail(f"⚠️ [预告] 领奖失败: {msg}")
     return f"领奖失败: {msg}"
 
 
@@ -1262,15 +1290,15 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
     cache_token = get_cached_token(server)
     if cache_token:
         cache_sid = get_cached_session_id(server)
-        log("🔍 [缓存] 验证 token")
+        logDetail("🔍 [缓存] 验证 token")
         try:
             resp = api_get(server, build_url("wscump/integral/user_points.json", cache_token), cache_token, proxies, cache_sid)
             if to_float(resp.get("code")) == 0:
-                log("✅ [缓存] token 有效")
+                logDetail("✅ [缓存] token 有效")
                 return cache_token, cache_sid, None
         except Exception as exc:
-            warn(f"⚠️ [缓存] 验证异常: {exc}")
-        warn("⚠️ [缓存] token 已失效，重新登录")
+            logDetail(f"⚠️ [缓存] 验证异常: {exc}")
+        logDetail("⚠️ [缓存] token 已失效，重新登录")
 
     code = get_code(server)
     if not code:
@@ -1297,7 +1325,7 @@ def login_with_cache(server: str, proxies: Dict[str, str] | None) -> Tuple[str |
     buyer_id = extract_buyer_id(raw_login)
     if buyer_id:
         set_cached_fields(server, buyerId=buyer_id)
-        log(f"🔑 [ISV] 买家标识 buyerId 已缓存: {buyer_id}")
+        logDetail(f"🔑 [ISV] 买家标识 buyerId 已缓存: {buyer_id}")
     return token, session_id, raw_login
 
 
@@ -1307,20 +1335,20 @@ def do_checkin(server: str, token: str, proxies: Dict[str, str] | None,
     page_resp = api_get(server, build_url("wscump/checkin/show_checkin_page_v2.json", token), token, proxies, session_id)
     if to_float(page_resp.get("code")) != 0:
         msg = page_resp.get("msg") or page_resp.get("message") or json_preview(page_resp, 200)
-        warn(f"⚠️ [签到] 获取签到活动失败: {msg}")
+        logDetail(f"⚠️ [签到] 获取签到活动失败: {msg}")
         return f"获取签到活动失败: {msg}"
 
     data = safe_data(page_resp)
     checkin_id = data.get("checkinId") or data.get("checkin_id") or ""
     is_show = data.get("isShow") if data.get("isShow") is not None else data.get("is_show")
-    log(f"✅ [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
+    logDetail(f"✅ [签到] 签到活动: checkinId={checkin_id or '未获取'} isShow={is_show}")
 
     if not checkin_id:
-        warn("⚠️ [签到] 未获取到签到活动，跳过")
+        logDetail("⚠️ [签到] 未获取到签到活动，跳过")
         return "未获取到签到活动，跳过"
 
     wait_time = random.randint(2, 5)
-    log(f"⏳ [签到] 提交前等待 {wait_time}s")
+    logDetail(f"⏳ [签到] 提交前等待 {wait_time}s")
     sleep(wait_time)
 
     sign_resp = api_get(server, build_url("wscump/checkin/checkinV2.json", token, {"checkinId": checkin_id}), token, proxies, session_id)
@@ -1371,7 +1399,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
     sleep(PROXY_FETCH_INTERVAL)
 
     delay = random.randint(2, 6)
-    log(f"⏳ [延迟] 启动延迟 {delay}s")
+    logDetail(f"⏳ [延迟] 启动延迟 {delay}s")
     sleep(delay)
 
     token, session_id, raw_login = login_with_cache(server, proxies)
@@ -1394,7 +1422,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
             state = query_isv_task_state(server, yz_open_id, proxies)
             if state is not None:
                 checkin_done = bool(state.get("checkin"))
-                log(f"📋 [ISV] 任务状态: checkin={checkin_done} "
+                logDetail(f"📋 [ISV] 任务状态: checkin={checkin_done} "
                     f"pagesview={bool(state.get('pagesview'))} subscribe={bool(state.get('subscribe'))}")
                 if checkin_done:
                     log("✅ [签到] 今日已签到（ISV 状态预检确认，未发送签到请求）")
@@ -1407,7 +1435,7 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
                         signed_by_isv = True
 
         if not signed_by_isv:
-            log("🔁 [签到] ISV 路径未生效，降级原 checkinV2 签到")
+            logDetail("🔁 [签到] ISV 路径未生效，降级原 checkinV2 签到")
             result["signMsg"] = do_checkin(server, token, proxies, session_id)
 
         # 签到后积分
@@ -1422,14 +1450,14 @@ def run_account(index: int, total: int, server: str) -> Dict[str, Any]:
                 result["articleMsg"] = do_article_view_task(server, yz_open_id, proxies, state)
             else:
                 result["articleMsg"] = "无 userOpenId，已跳过"
-                warn("⚠️ [预告] 未获取到 userOpenId，跳过领奖任务")
+                logDetail("⚠️ [预告] 未获取到 userOpenId，跳过领奖任务")
 
         # 积分过期数据（仅年底前 7 天查询，平时完全不发请求；失败不影响主流程）
         if ENABLE_EXPIRE_REMIND and in_expire_window():
             try:
                 result["expire"] = query_expire_summary(server, token, proxies, session_id)
             except Exception as exc:
-                warn(f"⚠️ [积分过期] 查询异常: {exc}")
+                logDetail(f"⚠️ [积分过期] 查询异常: {exc}")
                 result["expire"] = None
 
         result["success"] = True
@@ -1501,9 +1529,12 @@ def main() -> None:
     points_rows: List[tuple] = []
 
     for index, server in enumerate(SERVERS, 1):
+        resetDetail()  # 每个账号独立收集过程细节
         result: Optional[Dict[str, Any]] = None
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(server):
+            # 跳过账号也要有标头（模板规范：账号标题无条件打印）
+            log_account_header(index, len(SERVERS), server)
             log(f"⏭️ [打标] 账号 {index}/{len(SERVERS)} 今日任务已完成，跳过")
             skipped.append({"server": server, "idx": index})
             # 从打标缓存读回当天查到的过期数据，保证下午 cron 跳过时汇总仍能提醒
@@ -1555,8 +1586,20 @@ def main() -> None:
         if total_points is not None:
             points_rows.append((index, total_points))
 
+        # 成功账号只保留一行压缩结果；有 WARN/ERROR 时 flushDetail 才展开细节
+        if isinstance(result, dict) and result.get("success"):
+            _sign = str(result.get("signMsg") or "-")
+            _pts = str(result.get("pointsMsg") or "-")
+            _extra = []
+            _art = str(result.get("articleMsg") or "")
+            if _art and _art != "-":
+                _extra.append("预告:" + _art)
+            log(f"✅ 账号 {index}：签到 {_sign} ｜ 积分 {_pts}"
+                + (" ｜ " + " ｜ ".join(_extra) if _extra else ""))
+        flushDetail()
+
         if index < len(SERVERS):
-            log("⏳ [间隔] 等待 2s 后处理下一个账号")
+            logDetail("⏳ [间隔] 等待 2s 后处理下一个账号")
             sleep(2)
 
     success_count = sum(1 for item in results if item["success"])
@@ -1602,7 +1645,7 @@ def main() -> None:
         try:
             check_expire_remind(expire_rows)
         except Exception as exc:
-            warn(f"⚠️ [积分过期] 提醒处理异常: {exc}")
+            logDetail(f"⚠️ [积分过期] 提醒处理异常: {exc}")
     log(SUMMARY_SEP)
 
     _channels = send_pushplus("🐝 蜜蜂惊喜社任务完成", build_notify(results, skipped))
@@ -1723,7 +1766,7 @@ def _yyb_json_request(server, path, appid, payload=None):
             # 网络层异常（连接被拒/读取超时等）同样属于可重试的连接层故障
             if attempt >= YYB_RETRY_TIMES:
                 raise _YybError("YYB 请求异常：%s" % exc, "上游连接超时") from None
-            log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+            logDetail("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
                 % (path, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
             time.sleep(YYB_RETRY_DELAY)
             continue
@@ -1741,7 +1784,7 @@ def _yyb_json_request(server, path, appid, payload=None):
                     % (path, response.status_code,
                        ("（%s）" % detail) if detail else ""),
                     detail)
-            log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+            logDetail("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
                 % (path, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
             time.sleep(YYB_RETRY_DELAY)
             continue
@@ -1790,7 +1833,7 @@ if YYB_ONLY_REFS:
     _wanted = {int(r) for r in YYB_ONLY_REFS}
     SERVERS = [s for i, s in enumerate(SERVERS, 1) if i in _wanted]
     if not SERVERS:
-        warn(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_yyb_accounts())} 个）")
+        logDetail(f"⚠️ [账号] YYB_ONLY_REFS={YYB_ONLY_REFS} 未匹配到任何账号（YYB_SERVER 共 {len(_yyb_accounts())} 个）")
 
 
 _yyb_original_get_code = get_code

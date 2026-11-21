@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  回收猿旧衣服回收
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 6 5,15 * * *
 # 奖励金说明：提现型奖励金，永久有效、不过期（满 1 元可提现）
 # 提现提醒：每年 6/30 与 12/31 汇总打印并通知用户手动提现
@@ -240,7 +240,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -748,7 +748,9 @@ def run_one(index, server, ref, context):
     except Exception as exc:
         ok, errmsg = False, str(exc)
         result.append(f"失败：{exc}")
-    print(" | ".join(result))
+    # 走统一 log 出口（带 [INFO] 前缀），账号标识已在标头打印，这里用 result[1:] 避免重复；
+    # 返回的 result 保持完整，main 里 _lines[2] 的签到判断不受影响。
+    log(" | ".join(result[1:]))
     return result, ok, errmsg, withdrawable, balance
 
 
@@ -771,6 +773,10 @@ def main():
     skipped = 0
     withdraw_results = []  # 供半年一次提现提醒使用：{"label", "withdrawable"}
     for index, (server, ref) in enumerate(accounts, 1):
+        # 账号标头按模板规范：每个账号（含打标跳过）统一用 = 分隔线 + 👤 标题
+        log(_ACC_RULE)
+        log(f"👤 账号 {index}/{total} ｜ 来源 {server}@{ref}")
+        log(_ACC_RULE)
         label = f"账号 {index}（YYB {ref}）"
         # 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
         key = done_key(server, ref)

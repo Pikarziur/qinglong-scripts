@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  联通任务
-# version: 2026-10-29a
+# version: 2026-11-20a
 # cron: 12 7,20 * * *
 # 积分有效期：
 # =========================================================
@@ -148,7 +148,7 @@ from requests.packages.urllib3.util.retry import Retry
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
 from Crypto.Util.Padding import pad, unpad
-SCRIPT_VERSION = "2026-10-29a"
+SCRIPT_VERSION = "2026-11-20a"
 # ========================================
 # 全局配置 (globalConfig)
 # true=开启, false=关闭
@@ -7423,7 +7423,7 @@ def main():
             finally:
                 user.session.close()
         _print_unicom_summary(_ok_n, _fail_n, _skip_n)
-        return
+        return 0 if _fail_n == 0 else 1
     if query_only:
         warn("[Test Mode] 仅查询模式，跳过任务执行")
     sc = globalConfig.get("sign_config", {})
@@ -7528,7 +7528,7 @@ def main():
                     _grab_fail.append(u)
         _print_unicom_summary(len(_grab_ok), len(_grab_fail), _skip_n)
         do_notify(users)
-        return
+        return 0 if len(_grab_fail) == 0 else 1
     log("🚀 开始串行执行日常任务...")
     log("")
     for u in users:
@@ -7550,5 +7550,8 @@ def main():
     if not query_only:
         cross_view_security_share_keys(users)
         do_notify(users)
+    # 退出码语义：有真实失败账号才算失败；全成功/全跳过为 0
+    return 0 if _fail_n == 0 else 1
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

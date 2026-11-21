@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  中免会员
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 6 4,14 * * *
 # 积分有效期：积分到账后36个自然月有效（到期日 = 到账日 + 3 年同月同日）【1+2】
 # 检测过期积分：到期日前 7 天起每天检测、到期日前一天停（当天不提醒），提醒量=账户现有总积分；整池三年清空一次，检测年份按 2028 → 2031 → 2034 → 2037 → 2040 … 递推（每轮窗口固定 12-25 ~ 12-31）
@@ -244,7 +244,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -835,13 +835,15 @@ def main():
 
     if not entries:
         err("🚫 没有可执行账号（青龙环境变量 YYB_SERVER 空，或被 YYB_ONLY_REFS 过滤空）")
-        return
+        return 1
 
     success = 0
     skipped = 0
     expire_alerts = []   # [(账号序号, 最近一笔预过期积分信息)]
     points_rows = []     # [(账号序号, 总积分)]
     for i, (server, ref, _) in enumerate(entries, start=1):
+        # 账号标头无条件打印：与影视飓风模板一致，打标跳过的账号也要有标题块
+        acc_banner(i, total, "标识：" + str(ref))
         # 今日已成功签到的账号直接跳过，不再消耗 YYB 取码配额
         key = "%s@%s" % (server, ref)
         if is_done_today(key):
@@ -856,7 +858,6 @@ def main():
             if isinstance(pinfo, dict) and pinfo:
                 points_rows.append((i, float(pinfo.get("balance") or 0), key))
             continue
-        acc_banner(i, total, "标识：" + str(ref))
         try:
             ok, line, status, expire_info, points_info = run_account(server, ref)
             if ok:
@@ -916,6 +917,8 @@ def main():
         notify_summary += "\n" + "\n".join(
             expire_alert_line(info, idx) for idx, info in expire_alerts)
     flush_notify("中免会员", notify_summary, logger=log, force=bool(expire_alerts))
+    # 退出码语义：有真实失败账号才算失败；全成功或全跳过为 0（与同批脚本一致）
+    return 0 if fail == 0 else 1
 
 if __name__ == "__main__":
-    main()
+    _sys.exit(main())

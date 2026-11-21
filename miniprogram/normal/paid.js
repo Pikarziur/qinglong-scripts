@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  平安i动
-# version: 2026-11-18a
+# version: 2026-11-20b
 # cron: 42 5,15 * * *
 # 积分有效期：无明确说明
 # 检测过期积分：按惯例每年12/25~12/31连续检测并提醒；过期积分=现有余额积分
@@ -360,7 +360,7 @@ const PAID_DEBUG  = (process.env.PAID_DEBUG || '').trim() === '1'; // 仅 DEBUG=
 const ACCOUNT_DELAY = process.env.PAID_ACCOUNT_DELAY;
 
 const APPID = 'wx340f915763f3ed2b';
-const SCRIPT_VER = '2026-11-18a';   // 更新脚本此值
+const SCRIPT_VER = '2026-11-20b';   // 更新脚本此值
 // 签到前健康币流水状态预检（2026-11-17）：getFlow 当天有「签到」入账则跳过签到写请求。
 // 已签跳过写请求避免二次执行数据；查询失败/查不到照常签到，不漏签。
 const ENABLE_SIGN_STATE_CHECK = true;
@@ -988,7 +988,7 @@ async function finishSummary(total, okCount, skipped = 0, expireRows = []){
 
 async function main(){
   logInfo(ACC_RULE);
-  _title = `📃 脚本名称：平安i动`;
+  let _title = `📃 脚本名称：平安i动`;
   if (APPID) _title += ` ｜${APPID}`;
   logInfo(_title);
   logInfo(`📌 脚本版本: ${SCRIPT_VER}`);
@@ -1022,6 +1022,12 @@ async function main(){
   for (let idx = 0; idx < accounts.length; idx++){
     const account = accounts[idx];
     // 今天已经跑完的账号直接跳过，不再发起 YYB 取码/登录请求（取码本身无次数配额上限）
+    // 账号块标题：无条件打印，放在整个账号流程最前面（登录/跳过之前）。
+    // 打标跳过的账号也要有标题块，不能只剩一行 ⏭️；失败账号同样有标题。
+    logInfo(ACC_RULE);
+    logInfo(`👤 账号 ${idx + 1}/${total}${account.note ? ' ｜ 备注：' + account.note : ''}`);
+    logInfo(ACC_RULE);
+
     // key 与 PAID_cookies.json 缓存口径一致（openid = account.ref）
     const doneKey = account.ref;
     const label = `账号 ${idx + 1}` + (account.note ? `（${account.note}）` : '');
@@ -1032,9 +1038,6 @@ async function main(){
       expireRows.push({ label, balance: balance_from_done(doneKey), key: doneKey });
       continue;
     }
-    logInfo(ACC_RULE);
-    logInfo(`👤 账号 ${idx + 1}/${total}${account.note ? ' ｜ 备注：' + account.note : ''}`);
-    logInfo(ACC_RULE);
     const r = await runOne(account, cache, tkmap);
     r.line.forEach(logLine);
     expireRows.push({ label, balance: r.balance, key: doneKey });

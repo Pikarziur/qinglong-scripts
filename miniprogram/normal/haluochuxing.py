@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  哈啰出行
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 48 4,14 * * *
 # 积分有效期：获得起3个月内
 # 检测过期积分：每3个月月底前七天 检查并连续提醒；过期积分=现有积分
@@ -169,6 +169,8 @@ sys.excepthook = _qn_excepthook
 
 
 def _emit(level, msg):
+    # 一律左对齐：剥离消息前导的半角/全角空格，杜绝用缩进做层级排版
+    msg = str(msg).lstrip(" \u3000\t")
     line = "[%s] %s" % (level, msg)
     print(line, flush=True)
     if level == "ERROR":
@@ -194,7 +196,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -577,7 +579,7 @@ def yyb_post(account: AccountTarget, path: str, payload: Dict[str, Any]) -> Dict
     resp.raise_for_status()
     body = resp.json()
     if DEBUG:
-        log(f"    · [YYB] {path} → {preview(body, 400)}")
+        log(f"· [YYB] {path} → {preview(body, 400)}")
     if isinstance(body, dict) and body.get("code") not in (0, None):
         raise RuntimeError(f"YYB {path} 返回错误：{body.get('msg') or preview(body)}")
     return body
@@ -644,7 +646,7 @@ class HlClient:
         except Exception:
             raise RuntimeError(f"{action} 返回非 JSON（HTTP {resp.status_code}）：{resp.text[:200]}")
         if DEBUG:
-            log(f"    · [{action}] {preview(data, 500)}")
+            log(f"· [{action}] {preview(data, 500)}")
         return data
 
     # ---------------- 登录 ----------------
@@ -690,7 +692,7 @@ class HlClient:
                 raise
             except Exception as exc:
                 last = exc
-                warn(f"    ⚠️ 第 {attempt}/{LOGIN_RETRY} 次登录失败：{preview(exc, 160)}")
+                warn(f"⚠️ 第 {attempt}/{LOGIN_RETRY} 次登录失败：{preview(exc, 160)}")
                 if attempt < LOGIN_RETRY:
                     time.sleep(random.uniform(1.5, 3.0))
         raise last if last else RuntimeError("登录失败")
@@ -769,7 +771,7 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         "sign_source": "", "error": "",
     }
     log(_ACC_RULE)
-    log("▶️ [%d/%d] %s　←　%s" % (index, total, account.label, account.server))
+    log("▶️ [%d/%d] %s ← %s" % (index, total, account.label, account.server))
     log(_ACC_RULE)
 
     client = HlClient(account)
@@ -778,17 +780,17 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         result["label"] = account.label
         mobile = b32(user.get("mobile"))
         result["user"] = f"{mask_phone(mobile)}"
-        log(f"    ✅ 登录成功：{account.label}　手机号 {mask_phone(mobile)}　"
+        log(f"✅ 登录成功：{account.label}　手机号 {mask_phone(mobile)}　"
               f"userNewId={b32(user.get('userNewId'))}")
     except NotBoundError as exc:
         result["label"] = account.label
         result["skipped"] = True
         result["sign"] = f"该微信未绑定哈啰账号，已跳过（{exc}）"
-        log(f"    ⏭️ {account.label}：{exc}")
+        log(f"⏭️ {account.label}：{exc}")
         return result
     except Exception as exc:
         result["error"] = f"登录异常：{exc}"
-        err(f"    ❌ {account.label} 登录异常：{exc}")
+        err(f"❌ {account.label} 登录异常：{exc}")
         return result
 
     # ---- 初始奖励金 ----
@@ -797,12 +799,12 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         result["points_before"] = points_of(before)
         result["amount_before"] = amount_of(before)
         result["expiring"] = expiring_of(before)
-        log(f"    💰 签到前奖励金：{result['points_before']}　"
+        log(f"💰 签到前奖励金：{result['points_before']}　"
               f"≈{result['amount_before'] or '-'} 元")
         if result["expiring"] is not None:
-            log(f"    ⏳ 即将过期奖励金：{result['expiring']}")
+            log(f"⏳ 即将过期奖励金：{result['expiring']}")
     except Exception as exc:
-        warn(f"    ⚠️ 查询奖励金失败：{preview(exc, 160)}")
+        warn(f"⚠️ 查询奖励金失败：{preview(exc, 160)}")
 
     # ---- 签到状态 ----
     sign_state: Dict[str, Any] = {}
@@ -813,11 +815,11 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         result["extra"] = b32(sign_state.get("extraRewardBtnText"))
         day = day_index(sign_state.get("bonusList"))
         result["continuous"] = f"第 {day}/7 天" if day else "-"
-        log(f"    📋 签到状态：{'今日已签到' if sign_state.get('didSignToday') else '今日未签到'}"
+        log(f"📋 签到状态：{'今日已签到' if sign_state.get('didSignToday') else '今日未签到'}"
               f"　今日奖励金 {sign_state.get('bountyCountToday') or '-'}"
               f"　{result['continuous']}　{result['title']}")
     except Exception as exc:
-        warn(f"    ⚠️ 查询签到状态失败：{preview(exc, 160)}")
+        warn(f"⚠️ 查询签到状态失败：{preview(exc, 160)}")
 
     # ---- 签到 ----
     if DRY_RUN:
@@ -832,14 +834,14 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         # （宁可服务端返回"已签"，也不漏签）。
         result["sign"] = "今日已签到（签到前状态确认，跳过签到请求，不重复提交）"
         result["success"] = True
-        log(f"    🟡 {result['sign']}")
+        log(f"🟡 {result['sign']}")
     else:
         try:
             res = client.do_sign()
             data = res.get("data") or {}
             if res.get("code") != 0:
                 result["sign"] = f"签到接口返回异常：{res.get('code')} {res.get('msg') or ''}".strip()
-                err(f"    ❌ {result['sign']}")
+                err(f"❌ {result['sign']}")
             else:
                 did = bool(data.get("didSignToday"))
                 this_time = bool(data.get("doSignThisTime"))
@@ -862,11 +864,11 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
                     result["success"] = True
                 else:
                     result["sign"] = "签到未生效，请检查账号状态"
-                    warn(f"    ⚠️ 上游返回：{preview(data, 400)}")
-                log(f"    ✍️ {result['sign']}　{result['title']}")
+                    warn(f"⚠️ 上游返回：{preview(data, 400)}")
+                log(f"✍️ {result['sign']}　{result['title']}")
         except Exception as exc:
             result["sign"] = f"签到异常：{exc}"
-            err(f"    ❌ {result['sign']}")
+            err(f"❌ {result['sign']}")
 
     # ---- 最终奖励金 ----
     try:
@@ -880,10 +882,10 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         result["totalPoints"] = (result["points_after"]
                                  if result["points_after"] is not None
                                  else result["points_before"])
-        log(f"    💰 签到后奖励金：{result['points_after']}　"
+        log(f"💰 签到后奖励金：{result['points_after']}　"
               f"≈{result['amount_after'] or '-'} 元")
     except Exception as exc:
-        warn(f"    ⚠️ 查询最终奖励金失败：{preview(exc, 160)}")
+        warn(f"⚠️ 查询最终奖励金失败：{preview(exc, 160)}")
 
     # ---- 钱包余额（附赠信息）----
     try:
@@ -891,7 +893,7 @@ def run_account(index: int, total: int, account: AccountTarget) -> Dict[str, Any
         wd = w.get("data") or {}
         if wd.get("accountBalance") not in (None, ""):
             result["wallet"] = f"{wd.get('accountBalance')} 元"
-            log(f"    👛 钱包余额：{result['wallet']}")
+            log(f"👛 钱包余额：{result['wallet']}")
     except Exception:
         pass
 
@@ -951,7 +953,7 @@ def check_expire_remind(results: List[Dict[str, Any]]) -> None:
     log(_ACC_RULE)
     log("⏳ [积分过期提醒] 检测到现有积分将于本月底过期（过期积分=现有积分）：")
     for label, exp in hits:
-        log(f"   · {label}：{exp} 积分即将过期")
+        log(f"· {label}：{exp} 积分即将过期")
     log(_ACC_RULE)
     # 独立强推
     push_lines = ["检测到现有积分将于本月底过期（过期积分=现有积分）："]
@@ -1036,9 +1038,6 @@ def main() -> int:
                 return 1
 
     total = len(accounts)
-    log("✅ 共读取到 %d 个账号" % total)
-    for account in accounts:
-        log("   · %s　←　%s" % (account.label, account.server))
 
     results: List[Dict[str, Any]] = []
     for index, account in enumerate(accounts, 1):

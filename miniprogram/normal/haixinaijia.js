@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  海信爱家
-# version: 2026-11-18a
+# version: 2026-11-20c
 # cron: 42 4,14 * * *
 # 积分有效期：有效期至少为1年，即从获得开始至次年年底【1+1】
 # 检测过期积分：每年 12-31前七天（每年 12-25 ~ 12-31 检查并连续提醒）；过期积分=上年的获取积分-上年的消耗积分
@@ -162,9 +162,24 @@ process.on('uncaughtException', (e) => {
 });
 
 // ========== 统一日志：[LEVEL] [HXAJ] message ==========
+// 详细日志缓冲：过程细节默认不打印，只有本账号出现 WARN/ERROR 时才在账号末尾整段展开。
+// 所有日志一律左对齐（无前导缩进），detail 展开时也保持左对齐。
+let _detailBuf = [];
+let _detailHadIssue = false;
+function logDetail(msg) { _detailBuf.push(`[INFO] ${String(msg).replace(/^\s+/, '')}`); }
+function resetDetail() { _detailBuf = []; _detailHadIssue = false; }
+function flushDetail() {
+  if (_detailHadIssue && _detailBuf.length) {
+    console.log('[INFO] ── 详细过程（本账号有异常，展开） ──');
+    for (const _l of _detailBuf) console.log(_l);
+  }
+  resetDetail();
+}
+
 function emit(level, msg) {
-    const _line = `[${level}] ${msg}`;
+    const _line = `[${level}] ${String(msg).replace(/^\s+/, '')}`;
     console.log(_line);
+    if (level === 'WARN' || level === 'ERROR') _detailHadIssue = true;
     if (level === 'ERROR') collectError(_line);
 }
 
@@ -253,7 +268,7 @@ function logStartup(total) {
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-18a';
+const SCRIPT_VER = '2026-11-20c';
 const ACC_RULE = '='.repeat(70);
 const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
 
@@ -1733,13 +1748,13 @@ async function yybRequest(entry, endpoint, retry = YYB_RETRY - 1) {
       if (lastDetail !== '上游连接超时' || attempt >= attempts) break;
       // 4~7 秒随机：必须大于 YYB 取码最小间隔（3s），否则会被限速
       const waitMs = 4000 + Math.floor(Math.random() * 3001);
-      logWarn(`  - ${endpoint} 第${attempt}/${attempts}次失败（${lastDetail}），${(waitMs / 1000).toFixed(1)}s 后重试: ${String(err?.message || err).slice(0, 90)}`);
+      logWarn(`- ${endpoint} 第${attempt}/${attempts}次失败（${lastDetail}），${(waitMs / 1000).toFixed(1)}s 后重试: ${String(err?.message || err).slice(0, 90)}`);
       await sleep(waitMs);
     }
   }
   const tail = lastDetail ? `（${lastDetail}）` : '';
   // 报错不含 URL，避免把服务端地址写进日志
-  logInfo(`  - ${endpoint} 连续 ${attempts} 次失败${tail}: ${String(lastErr?.message || lastErr).slice(0, 90)}`);
+  logInfo(`- ${endpoint} 连续 ${attempts} 次失败${tail}: ${String(lastErr?.message || lastErr).slice(0, 90)}`);
   throw lastErr || new Error(`${endpoint}失败${tail}`);
 }
 
@@ -1747,7 +1762,7 @@ async function loginByYYB(entry) {
   const codeResult = await yybRequest(entry, '/wxapp/getCode');
   const loginCode = String(codeResult.code || '').trim();
   if (!loginCode) throw new Error('YYB-Go返回缺少微信code');
-  logInfo('  - YYB-Go获取微信code成功');
+  logDetail('- YYB-Go获取微信code成功');
 
   const phoneResult = await yybRequest(entry, '/wxapp/getPhoneNumber');
   const phoneCode = String(phoneResult.code || '').trim();
@@ -1756,7 +1771,7 @@ async function loginByYYB(entry) {
   if (!phoneCode || !encryptedData || !iv) {
     throw new Error('YYB-Go返回的手机号授权数据不完整');
   }
-  logInfo('  - YYB-Go获取手机号授权数据成功');
+  logDetail('- YYB-Go获取手机号授权数据成功');
 
   const unsignedBody = {
     sid: CONSTS.WX_MINI_ID,
@@ -1784,7 +1799,7 @@ async function loginByYYB(entry) {
     const detail = data?.errorDesc || data?.message || data?.msg || safeJsonPreview(data);
     throw new Error(`海信登录失败: code=${data?.resultCode ?? data?.errorCode ?? '-'} msg=${detail}`);
   }
-  logInfo('  - 海信业务登录成功');
+  logDetail('- 海信业务登录成功');
   return {
     token: String(data.token),
     refreshToken: String(data.refreshToken),
@@ -2087,7 +2102,7 @@ function refreshExpireMs(acc) {
 async function refreshTokenIfPossible(acc) {
   if (!acc.refreshToken) return { refreshed: false, account: acc };
   if (isRefreshTokenExpired(acc)) {
-    logInfo(`  - refreshToken 已临近过期，跳过刷新`);
+    logDetail(`- refreshToken 已临近过期，跳过刷新`);
     return { refreshed: false, account: acc };
   }
   const refreshAccessToken = String(acc.token || buildAccessTokenByRefreshToken(acc.refreshToken)).trim();
@@ -2339,14 +2354,14 @@ async function checkPointsExpire(acc, accountIndex) {
     const md = month * 100 + day;
     if (md < sm * 100 + sd || md > em * 100 + ed) {
       const pad = (n) => String(n).padStart(2, '0');
-      logInfo(`过期提醒: 未进入检查窗口（每年 ${pad(sm)}-${pad(sd)} ~ ${pad(em)}-${pad(ed)}），跳过`);
+      logDetail(`过期提醒: 未进入检查窗口（每年 ${pad(sm)}-${pad(sd)} ~ ${pad(em)}-${pad(ed)}），跳过`);
       return '';
     }
 
     const { gained, consumed } = await sumLastYearPoints(acc);
     const amount = gained - consumed;
     if (amount <= 0) {
-      logInfo(`过期提醒: 上年获取 ${gained} - 消耗 ${consumed} ≤ 0，无可过期积分（账号${accountIndex}）`);
+      logDetail(`过期提醒: 上年获取 ${gained} - 消耗 ${consumed} ≤ 0，无可过期积分（账号${accountIndex}）`);
       return '';
     }
 
@@ -2355,7 +2370,7 @@ async function checkPointsExpire(acc, accountIndex) {
     const remaining = Math.round((expireDay.getTime() - today0.getTime()) / 86400000);
     const text = `⏳ 积分(${amount.toFixed(2)})即将过期： ${fmtDate(expireDay)} 到期（还剩 ${remaining} 天），`
       + `请尽快使用（账号${accountIndex}）（上年获取${gained.toFixed(2)}-消耗${consumed.toFixed(2)}）`;
-    logInfo(`[过期] ${text}`);
+    logDetail(`[过期] ${text}`);
     return text;
   } catch (err) {
     logWarn(`过期提醒检查异常: ${err.message}`);
@@ -2425,7 +2440,7 @@ async function printSignRewardDetail(acc, { retry = 1, intervalMs = 1200 } = {})
       if (signRecords.length) {
         const x = signRecords[0];
         const s = Math.abs(recordScore(x));
-        logInfo(`签到积分明细: ${fmtTime(recordTimeMs(x))} ${recordDesc(x)} +${s}`);
+        logDetail(`签到积分明细: ${fmtTime(recordTimeMs(x))} ${recordDesc(x)} +${s}`);
         return true;
       }
     } catch (err) {
@@ -2436,7 +2451,7 @@ async function printSignRewardDetail(acc, { retry = 1, intervalMs = 1200 } = {})
     }
     if (i < retry) await sleep(intervalMs);
   }
-  logInfo('签到积分明细: 今日未查到签到奖励流水（可能是延迟或已过零点）');
+  logDetail('签到积分明细: 今日未查到签到奖励流水（可能是延迟或已过零点）');
   return false;
 }
 
@@ -2444,20 +2459,20 @@ async function printTodayPointRecords(acc) {
   try {
     const entities = await getTodayPointEntities(acc, 20);
     if (!entities.length) {
-      logInfo('今日积分流水: 无记录');
+      logDetail('今日积分流水: 无记录');
       return;
     }
     const gain = entities
       .filter((x) => Number(x?.type ?? 0) === 1)
       .reduce((s, x) => s + Math.abs(recordScore(x)), 0);
-    logInfo(`今日积分流水: 共${entities.length}条，收入合计 +${gain}`);
+    logDetail(`今日积分流水: 共${entities.length}条，收入合计 +${gain}`);
 
     const top = sortRecordsByTimeDesc(entities).slice(0, 5);
     top.forEach((x) => {
       const s = recordScore(x);
       const sign = s > 0 ? '+' : '';
       const tm = fmtTime(recordTimeMs(x));
-      logInfo(`  [流水] ${tm} ${recordDesc(x)} ${sign}${s}`);
+      logDetail(`[流水] ${tm} ${recordDesc(x)} ${sign}${s}`);
     });
   } catch (err) {
     logWarn(`积分流水诊断失败: ${err.message}`);
@@ -2773,17 +2788,17 @@ async function doLottery(acc, times = 1) {
   if (!ENABLE_LOTTERY || times <= 0) return;
   const activities = await getLotteryActivityList();
   if (!activities.length) {
-    logInfo('抽奖: 未获取到活动，跳过');
+    logDetail('抽奖: 未获取到活动，跳过');
     return;
   }
 
   const act = activities[0];
   const activityId = act?.activityId || act?.id;
   if (!activityId) {
-    logInfo('抽奖: 活动缺少 activityId，跳过');
+    logDetail('抽奖: 活动缺少 activityId，跳过');
     return;
   }
-  logInfo(`抽奖: 活动 ${act?.activityName || activityId}`);
+  logDetail(`抽奖: 活动 ${act?.activityName || activityId}`);
 
   const detail = await getLotteryDetail(acc, activityId);
   const sceneHit = await getSceneParamByCode('STATIC_AILIFE_POINTS_MALL', {
@@ -2795,10 +2810,10 @@ async function doLottery(acc, times = 1) {
     if (draw?.isSuccess) {
       const prizeName = draw?.data?.prizeName || draw?.prizeName || draw?.data?.displayName || '未知奖品';
       const prizeType = draw?.data?.prizeType || draw?.prizeType || '';
-      logInfo(`抽奖: 第${i + 1}次 -> ${prizeName}${prizeType ? ` (${prizeType})` : ''}`);
+      logDetail(`抽奖: 第${i + 1}次 -> ${prizeName}${prizeType ? ` (${prizeType})` : ''}`);
     } else {
       const msg = draw?.resultMsg || draw?.error || draw?.message || safeJsonPreview(draw);
-      logInfo(`抽奖: 第${i + 1}次 -> ${msg}`);
+      logDetail(`抽奖: 第${i + 1}次 -> ${msg}`);
       if (isLotteryChanceOver(msg)) break;
     }
     if (i < times - 1) await sleep(1600 + Math.floor(Math.random() * 700));
@@ -2876,9 +2891,9 @@ async function ensureAccountReady(acc) {
     refreshTried = true;
     if (refreshed.refreshed) {
       current = refreshed.account;
-      logInfo(`  - refreshToken续期成功`);
+      logDetail(`- refreshToken续期成功`);
     } else if (refreshed.error) {
-      logWarn(`  - refreshToken续期失败，先尝试旧token: ${refreshed.error.message}`);
+      logWarn(`- refreshToken续期失败，先尝试旧token: ${refreshed.error.message}`);
     }
   }
 
@@ -2886,7 +2901,7 @@ async function ensureAccountReady(acc) {
     const guessed = guessCustomerIdFromToken(current.token);
     if (guessed) {
       current.customerId = guessed;
-      logInfo(`  - 已从token解析customerId`);
+      logDetail(`- 已从token解析customerId`);
     }
   }
 
@@ -2898,10 +2913,10 @@ async function ensureAccountReady(acc) {
         if (!current.phone && info.phone) current.phone = info.phone;
         if (!current.phoneEncrypted && info.phoneEncrypted) current.phoneEncrypted = info.phoneEncrypted;
         if (!current.remark && info.nickName) current.remark = info.nickName;
-        logInfo(`  - 已通过accessToken自动获取customerId`);
+        logDetail(`- 已通过accessToken自动获取customerId`);
       }
     } catch (err) {
-      logWarn(`  - accessToken自动查询customerId失败: ${err.message}`);
+      logWarn(`- accessToken自动查询customerId失败: ${err.message}`);
     }
   }
 
@@ -2918,10 +2933,10 @@ async function ensureAccountReady(acc) {
       if (!current.phoneEncrypted && profile.phoneEncrypted) current.phoneEncrypted = profile.phoneEncrypted;
       if (!current.remark && profile.nickName) current.remark = profile.nickName;
       if (current.phone) {
-        logInfo(`  - 已通过用户资料接口补全手机号`);
+        logDetail(`- 已通过用户资料接口补全手机号`);
       }
     } catch (err) {
-      logWarn(`  - 用户资料补全手机号失败: ${err.message}`);
+      logWarn(`- 用户资料补全手机号失败: ${err.message}`);
     }
   }
 
@@ -2951,74 +2966,70 @@ async function ensureAccountReady(acc) {
 }
 
 async function runOneAccount(acc, idx, total) {
-  logInfo(ACC_RULE);
-  logInfo(`👤 账号 ${idx}/${total} ｜ ${acc.remark}`);
-  logInfo(ACC_RULE);
-
   const ready = await ensureAccountReady(acc);
   const account = ready.account;
   const pointsBefore = ready.pointsBefore;
   const pointsBeforeDetail = ready.pointsBeforeDetail;
 
-  logInfo(`账号: ${account.remark}`);
-  logInfo(`账号指纹: ${accountFingerprint(account)}`);
-  logInfo(`customerId: ${account.customerId}`);
+  logDetail(`账号: ${account.remark}`);
+  logDetail(`账号指纹: ${accountFingerprint(account)}`);
+  logDetail(`customerId: ${account.customerId}`);
   logInfo(`积分(执行前): ${pointsBefore}`);
-  logInfo(`积分字段(执行前): ${summarizePointFields(pointsBeforeDetail?.raw)}`);
-  logInfo(`任务手机号: ${getEncryptedTaskPhone(account) ? '已就绪' : '缺失'}`);
+  logDetail(`积分字段(执行前): ${summarizePointFields(pointsBeforeDetail?.raw)}`);
+  logDetail(`任务手机号: ${getEncryptedTaskPhone(account) ? '已就绪' : '缺失'}`);
 
   const tExp = tokenExpireMs(account);
   const rtExp = refreshExpireMs(account);
-  if (tExp) logInfo(`token到期: ${fmtTime(tExp)}`);
-  if (rtExp) logInfo(`refreshToken到期: ${fmtTime(rtExp)}`);
+  if (tExp) logDetail(`token到期: ${fmtTime(tExp)}`);
+  if (rtExp) logDetail(`refreshToken到期: ${fmtTime(rtExp)}`);
 
   let doneCount = 0;
   let behaviorCount = 0;
 
   try {
     const groups = await getTaskCenterTaskList(account);
-    logInfo(`任务分组: ${summarizeTaskGroups(groups)}`);
+    logDetail(`任务分组: ${summarizeTaskGroups(groups)}`);
     const allTasks = flattenTasks(groups);
     const pending = filterTasks(allTasks);
 
-    logInfo(`任务总数: ${allTasks.length}，待尝试: ${pending.length}`);
+    logDetail(`任务总数: ${allTasks.length}，待尝试: ${pending.length}`);
     if (pending.length) {
-      logInfo(`任务判定汇总: ${summarizeHintCounts(pending)}`);
+      logDetail(`任务判定汇总: ${summarizeHintCounts(pending)}`);
     }
 
     for (const task of pending) {
       const code = String(task.taskCode || '');
       const title = getTaskTitle(task);
       const hint = getTaskExecHint(task);
-      logInfo(`  [判定] ${title} (${code}) -> ${hint.tag}：${hint.reason}`);
+      logDetail(`[判定] ${title} (${code}) -> ${hint.tag}：${hint.reason}`);
 
       const taskDataId = pickTaskDataId(task);
       if (taskDataId) {
         try {
           await reportBehaviorCollect(account, task);
           behaviorCount += 1;
-          logInfo(`  [行为] ${title} (${code}) -> behaviorCollect 成功`);
+          logDetail(`[行为] ${title} (${code}) -> behaviorCollect 成功`);
         } catch (err) {
-          logWarn(`  [行为] ${title} (${code}) -> behaviorCollect 失败: ${err.message}`);
+          logWarn(`[行为] ${title} (${code}) -> behaviorCollect 失败: ${err.message}`);
         }
       } else {
-        logInfo(`  [行为] ${title} (${code}) -> 跳过: 任务缺少id`);
+        logDetail(`[行为] ${title} (${code}) -> 跳过: 任务缺少id`);
       }
 
       try {
         await completeTask(account, code);
         doneCount += 1;
-        logInfo(`  [任务] ${title} (${code}) -> 已上报`);
+        logDetail(`[任务] ${title} (${code}) -> 已上报`);
       } catch (err) {
-        logWarn(`  [任务] ${title} (${code}) -> 失败: ${err.message}`);
+        logWarn(`[任务] ${title} (${code}) -> 失败: ${err.message}`);
       }
 
       if (code === 'view_strategy') {
         try {
           const guide = await visitMiniUsageGuide(account);
-          logInfo(`  [动作] ${code} -> miniUsageGuide 已访问 (HTTP ${guide.status}, ${guide.bytes} bytes)`);
+          logDetail(`[动作] ${code} -> miniUsageGuide 已访问 (HTTP ${guide.status}, ${guide.bytes} bytes)`);
         } catch (err) {
-          logWarn(`  [动作] ${code} -> miniUsageGuide 访问失败: ${err.message}`);
+          logWarn(`[动作] ${code} -> miniUsageGuide 访问失败: ${err.message}`);
         }
       }
 
@@ -3026,22 +3037,22 @@ async function runOneAccount(acc, idx, total) {
         try {
           const delayMs = Number(TASK_REPORT_EXEC_DELAY_MS[code] || 0);
           if (delayMs > 0) {
-            logInfo(`  [上报] ${code} -> 等待 ${Math.floor(delayMs / 1000)}s 模拟停留后上报`);
+            logDetail(`[上报] ${code} -> 等待 ${Math.floor(delayMs / 1000)}s 模拟停留后上报`);
             await sleep(delayMs);
           }
           await reportTaskExecution(account, code);
-          logInfo(`  [上报] ${code} -> reportExecution 成功`);
+          logDetail(`[上报] ${code} -> reportExecution 成功`);
         } catch (err) {
-          logWarn(`  [上报] ${code} -> reportExecution 失败: ${err.message}`);
+          logWarn(`[上报] ${code} -> reportExecution 失败: ${err.message}`);
         }
       }
 
       if (code === 'share_activity') {
         try {
           await reportTaskNotice(account, code);
-          logInfo(`  [上报] ${code} -> taskNotice 成功`);
+          logDetail(`[上报] ${code} -> taskNotice 成功`);
         } catch (err) {
-          logWarn(`  [上报] ${code} -> taskNotice 失败: ${err.message}`);
+          logWarn(`[上报] ${code} -> taskNotice 失败: ${err.message}`);
         }
       }
 
@@ -3058,17 +3069,17 @@ async function runOneAccount(acc, idx, total) {
     const remaining = allAfter.filter((t) =>
       Number(t?.taskStatus ?? 0) !== 1 && t?.taskCode && ALLOWED_TASK_CODES.has(String(t.taskCode)));
     if (!remaining.length) {
-      logInfo('复核: 清单内任务均已完成（停用的任务不计入）');
+      logDetail('复核: 清单内任务均已完成（停用的任务不计入）');
     } else {
-      logInfo(`复核: 仍有 ${remaining.length} 个未完成任务`);
-      logInfo(`复核判定汇总: ${summarizeHintCounts(remaining)}`);
+      logDetail(`复核: 仍有 ${remaining.length} 个未完成任务`);
+      logDetail(`复核判定汇总: ${summarizeHintCounts(remaining)}`);
       remaining.forEach((t) => {
         const groupName = t.__groupName || '未分组';
         const title = getTaskTitle(t);
         const code = t.taskCode || '-';
         const status = t.taskStatus;
         const hint = getTaskExecHint(t);
-        logInfo(`  [未完成][${groupName}][${hint.tag}] ${title} (${code}) status=${status}`);
+        logDetail(`[未完成][${groupName}][${hint.tag}] ${title} (${code}) status=${status}`);
       });
     }
   } catch (err) {
@@ -3078,18 +3089,18 @@ async function runOneAccount(acc, idx, total) {
   try {
     const taskId = await getSceneSignTaskId();
     if (!taskId) {
-      logInfo('签到: 未获取到 taskId，跳过');
+      logDetail('签到: 未获取到 taskId，跳过');
     } else {
-      logInfo(`签到: 调用签到状态接口 ${API.SIGN_STATUS} (taskId=${taskId})`);
+      logDetail(`签到: 调用签到状态接口 ${API.SIGN_STATUS} (taskId=${taskId})`);
       const status = await getSignStatus(account, taskId);
-      logInfo(`签到: 状态返回 -> ${summarizeSignStatus(status)}`);
+      logDetail(`签到: 状态返回 -> ${summarizeSignStatus(status)}`);
       if (isSignedToday(status)) {
         logInfo('签到: 今日已签到（本次不会再加签到分）');
         await printSignRewardDetail(account, { retry: 2, intervalMs: 1500 });
       } else {
-        logInfo(`签到: 调用签到接口 ${API.SIGN_IN} (taskId=${taskId})`);
+        logDetail(`签到: 调用签到接口 ${API.SIGN_IN} (taskId=${taskId})`);
         const signRet = await doSignIn(account, taskId);
-        logInfo(`签到: 签到返回 -> ${summarizeSignStatus(signRet)}`);
+        logDetail(`签到: 签到返回 -> ${summarizeSignStatus(signRet)}`);
         logInfo('签到: 成功');
         await printSignRewardDetail(account, { retry: 4, intervalMs: 1800 });
       }
@@ -3119,11 +3130,11 @@ async function runOneAccount(acc, idx, total) {
   const delta = pointsAfter - pointsBefore;
 
   logInfo(`积分(执行后): ${pointsAfter}  (变化: ${delta >= 0 ? '+' : ''}${delta})`);
-  logInfo(`积分字段(执行后): ${summarizePointFields(pointsAfterDetail?.raw)}`);
+  logDetail(`积分字段(执行后): ${summarizePointFields(pointsAfterDetail?.raw)}`);
   await printTodayPointRecords(account);
   const expireAlert = await checkPointsExpire(account, idx);
-  logInfo(`行为上报次数: ${behaviorCount}`);
-  logInfo(`任务上报次数: ${doneCount}`);
+  logDetail(`行为上报次数: ${behaviorCount}`);
+  logDetail(`任务上报次数: ${doneCount}`);
 
   return {
     account,
@@ -3136,7 +3147,6 @@ async function runOneAccount(acc, idx, total) {
 }
 
 async function main() {
-  logStartup();
   if (!RAW_YYB_SERVER) {
     throw new Error('未设置变量 YYB_SERVER');
   }
@@ -3158,9 +3168,10 @@ async function main() {
     entries = filtered;
   }
 
+  logStartup(entries.length);
+
   const cache = loadCache();
-  logInfo(`${SCRIPT_NAME} 启动，YYB-Go账号数: ${entries.length}`);
-  logInfo(`抽奖: ${ENABLE_LOTTERY ? `开启(${LOTTERY_TIMES}次)` : '关闭'}`);
+  logDetail(`抽奖: ${ENABLE_LOTTERY ? `开启(${LOTTERY_TIMES}次)` : '关闭'}`);
 
   let ok = 0;
   let fail = 0;
@@ -3171,7 +3182,14 @@ async function main() {
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
+    resetDetail();  // 每个账号独立收集详细过程，出错才展开
     let merged = { remark: entry.remark, yybRef: entry.ref };
+
+    // 账号块标题：无条件打印，放在整个账号流程最前面（登录/跳过之前）。
+    // 打标跳过的账号也要有标题块，不能只剩一行 ⏭️；失败账号同样有标题。
+    logInfo(ACC_RULE);
+    logInfo(`👤 账号 ${i + 1}/${entries.length} ｜ ${entry.remark}`);
+    logInfo(ACC_RULE);
 
     // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额
     const doneKey = `${entry.server}@${entry.ref}`;
@@ -3194,6 +3212,8 @@ async function main() {
       merged = mergeWithCache(fresh, cache);
       const result = await runOneAccount(merged, i + 1, entries.length);
       ok += 1;
+      // 成功账号只打印一行压缩结果；详细过程无 WARN/ERROR 则不展开
+      logInfo(`✅ 账号 ${i + 1}：积分 ${result?.pointsBefore ?? '-'} → ${result?.pointsAfter ?? '-'}${result?.delta !== undefined ? ` (${result.delta >= 0 ? '+' : ''}${result.delta})` : ''}，上报 ${result?.doneCount ?? 0} 项`);
       if (result?.expireAlert) expireAlerts.push(result.expireAlert);
       // 账号流程完整走完（未抛异常）才算今日完成（同时缓存总积分与过期提醒，供跳过时读回）
       const totalPoints = (result && result.pointsAfter !== undefined && result.pointsAfter !== null)
@@ -3220,6 +3240,7 @@ async function main() {
       cache.accounts[getCacheKey(toSave)] = toSave;
       saveCache(cache);
     }
+    flushDetail();  // 本账号有 WARN/ERROR 时展开此前收集的详细过程
   }
 
   const tail = `账号 ${entries.length} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped}`;
@@ -3240,7 +3261,7 @@ async function main() {
   }
   if (_cells.length) logInfo('💰 总积分：' + _cells.join('  |  '));
   if (expireAlerts.length) {
-    logInfo('⏳  即将过期积分：');
+    logInfo('⏳ 即将过期积分：');
     expireAlerts.forEach((line, j) => {
       const _br = j === expireAlerts.length - 1 ? '└─' : '├─';
       logInfo(`${_br} ${line}`);

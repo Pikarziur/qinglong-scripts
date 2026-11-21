@@ -10,7 +10,7 @@ function logStartup(total) {
 const ACC_RULE = '='.repeat(70);
 /*=========================================================
 # name:  福利吧
-# version: 2026-11-17a
+# version: 2026-11-20a
 # cron: 10 0 * * *
 =========================================================*/
 
@@ -203,7 +203,7 @@ const { URL } = require('url');
 // ========== 配置 ==========
 // 版本标识：每次实质性改动 +1。启动日志会带上它，用来确认「容器里跑的到底是哪一版」
 // （踩过坑：本机改了、容器没同步，日志看着像"修复没生效"，实际是跑着旧文件）。
-const SCRIPT_VER = '2026-11-17a';
+const SCRIPT_VER = '2026-11-20a';
 // 站点地址：默认福利吧。WNFLB_SITE 仅用于本地 mock 回归测试（默认不影响线上行为）。
 const SITE = (process.env.WNFLB_SITE || 'https://www.wnflb2023.com').replace(/\/+$/, '');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -1146,6 +1146,7 @@ async function main() {
     await resolveCookie(USER, PASS);
     if (!isAuthValid(COOKIE)) {
         failLog(`❌ 无法获取 Cookie（按「缓存 → 账号密码登录 → WNFLB_COOKIE」三级都失败；请检查 WNFLB_ACCOUNT=账号#密码，或配一个 WNFLB_COOKIE 兜底；缓存路径: ${CACHE_FILE}）`);
+        process.exitCode = 1;
         return;
     }
 
@@ -1260,12 +1261,15 @@ async function main() {
         `账号 1 ｜ 成功 ${wnSucc} ｜ 失败 ${wnFail} ｜ 跳过 ${wnSkip} ｜ ${summary}`,
         log,
     );
+    // 退出码语义：签到失败才算失败；今日已签/成功为 0
+    if (wnFail > 0) process.exitCode = 1;
 }
 
 if (require.main === module) {
     main().catch(e => {
         err(`💥 脚本异常: ${e.message}`);
         dumpErr('脚本异常', e);
+        process.exitCode = 1;
     });
 }
 

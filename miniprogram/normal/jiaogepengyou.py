@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  交个朋友会员商城
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 18 5,15 * * *
 # 积分有效期：按年尾统一过期（每年 12 月 31 日），年尾前 7 天开始提醒，总积分计入即将过期【1】
 # 过期提醒：每年 12/25~12/31 检查即将过期积分，汇总打印 + 强推通知（详见下方 EXPIRE_* 配置）
@@ -191,7 +191,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -793,20 +793,8 @@ def main() -> int:
     success = sum(1 for r in results if r["ok"])
     signed = sum(1 for r in results if r["signed"])
     fail_count = len(results) - success - signed
-    for _i, r in enumerate(results, 1):
-        _acct = f"[{r['remark']}]"
-        detail = ""
-        if r["total"] is not None:
-            detail = f"总积分{r['total']}"
-            if (r.get("reward") or 0) > 0:
-                detail += f"(+{r['reward']})"
-        if r["ok"]:
-            extra = f"（连续{r['series']}天）" if r.get("series") is not None else ""
-            log(f"✅ {_acct} 签到成功{extra} {detail}".rstrip())
-        elif r["signed"]:
-            log(f"🟡 {_acct} 今日已签 {detail}".rstrip())
-        else:
-            err(f"❌ {_acct} 签到失败：{r.get('msg') or ''}")
+    # 逐账号结果已在主循环的账号块内打印（773-778 行），汇总块也完整呈现，
+    # 这里不再重复打印逐账号明细（原 ✅/🟡/❌ [N] 签到成功 总积分… 属冗余）。
     _now = datetime.now()
     _week = "一二三四五六日"[_now.weekday()]
     log(SUMMARY_SEP)

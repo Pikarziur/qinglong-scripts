@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  漓泉啤酒生态营地
-# version: 2026-11-18a
+# version: 2026-11-20b
 # cron: 24 5,15 * * *
 # 积分有效期：未知
 # 每月最后一天统一检测「即将过期积分」(getExpirePoints)，有数据则连续提醒 3 天
@@ -184,7 +184,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20b"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -699,6 +699,24 @@ def resp_msg(resp):
     return ""
 
 
+# ===== 风控拦截识别（2026-11-20b）=====
+# 服务端要求"安全验证"= 人机/风控拦截。这类响应若伴随 401，旧逻辑会当成会话失效去
+# 强制重登重试，反而反复触发风控。命中关键词时：跳过重登重试、直接失败，并在日志
+# 明确标注，避免刷风控、也便于一眼区分是风控而非普通接口失败。
+_RISK_VERIFY_KEYS = ("安全验证", "安全校验", "人机验证", "滑块验证", "请完成验证")
+
+
+def is_risk_verify(resp):
+    """响应文案含风控验证关键词 → True（此类不重试）。"""
+    msg = resp_msg(resp)
+    return bool(msg) and any(k in msg for k in _RISK_VERIFY_KEYS)
+
+
+def risk_tag(resp):
+    """命中风控时给失败日志加的醒目标注，否则空串。"""
+    return "（风控拦截，已跳过重试避免刷风控）" if is_risk_verify(resp) else ""
+
+
 # ---------------------------------------------------------------------------
 # 登录 / 会话
 # ---------------------------------------------------------------------------
@@ -794,8 +812,9 @@ def run_account(openid, index):
     token, union_id = obtain_session(openid, index)
 
     # 读取签到状态 (首个鉴权调用); 会话失效则强制重登重试一次
+    # 风控拦截（安全验证等）即使带 401 也不重登 —— 重试只会刷风控，直接留给下游判失败
     state = sign_state(token)
-    if resp_code(state) == SESSION_INVALID_CODE:
+    if resp_code(state) == SESSION_INVALID_CODE and not is_risk_verify(state):
         log(f"🔁 账号 {index} 会话失效, 重新登录...")
         token, union_id = obtain_session(openid, index, force=True)
         state = sign_state(token)
@@ -810,7 +829,7 @@ def run_account(openid, index):
     scode = resp_code(state)
     if scode != SUCCESS_CODE:
         msg = resp_msg(state) or f"获取签到状态失败 code={scode}"
-        err(f"❌ 账号 {index} {msg}")
+        err(f"❌ 账号 {index} {msg}{risk_tag(state)}")
         return False, expire_val, None
 
     res = sign_res(state)
@@ -825,9 +844,10 @@ def run_account(openid, index):
         return True, expire_val, pts
 
     # 执行一次签到
+    # 风控拦截（安全验证等）即使带 401 也不重登重签 —— 重试只会刷风控，直接判失败
     result = do_sign(token)
     rcode = resp_code(result)
-    if rcode == SESSION_INVALID_CODE:
+    if rcode == SESSION_INVALID_CODE and not is_risk_verify(result):
         log(f"🔁 账号 {index} 会话失效, 重新登录后重试签到...")
         token, union_id = obtain_session(openid, index, force=True)
         result = do_sign(token)
@@ -835,7 +855,7 @@ def run_account(openid, index):
 
     if rcode != SUCCESS_CODE:
         msg = resp_msg(result) or f"签到失败 code={rcode}"
-        err(f"❌ 账号 {index} {msg}")
+        err(f"❌ 账号 {index} {msg}{risk_tag(result)}")
         return False, expire_val, None
 
     res = sign_res(result)
@@ -1018,7 +1038,7 @@ def main():
 
     if not entries:
         err("🚫 未从 yyb_go 获取到存活账号(可配置环境变量 lqpj 指定白名单), 退出。")
-        return
+        return 1
 
     log("🚀 漓泉啤酒 签到开始")
     ok_count = 0
@@ -1096,8 +1116,10 @@ def main():
         _notify_tail,
         logger=log,
     )
+    # 退出码语义：有真实失败账号（非跳过）才算失败；全成功/全跳过为 0
+    return 0 if fail_count == 0 else 1
 
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

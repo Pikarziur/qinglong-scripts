@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  小米社区
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 36 5,15 * * *
 # 积分有效期：无
 # =========================================================
@@ -164,11 +164,41 @@ def _qn_excepthook(exc_type, exc, tb):
 _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
+# 详细日志缓冲：过程细节先进缓冲不直接打印；每个账号结束时，只有该账号出现过
+# WARN/ERROR 才把细节整段展开，平时（成功账号）直接丢弃 → 平时简略、出错详细。
+# 统一左对齐：所有日志出口去掉前导空格。
+_detail_buf: list = []
+_detail_had_issue = False
+
+
+def logDetail(msg):
+    _detail_buf.append("[INFO] %s" % str(msg).lstrip(" \u3000\t"))
+
+
+def resetDetail():
+    global _detail_buf, _detail_had_issue
+    _detail_buf = []
+    _detail_had_issue = False
+
+
+def flushDetail():
+    global _detail_buf
+    if _detail_had_issue and _detail_buf:
+        print("[INFO] ── 详细过程（本账号有异常，展开） ──", flush=True)
+        for _line in _detail_buf:
+            print(_line, flush=True)
+    resetDetail()
+
+
 def _emit(level, msg):
-    line = f"[{level}] {msg}"
+    global _detail_had_issue
+    if level in ("WARN", "ERROR"):
+        _detail_had_issue = True
+    line = "[%s] %s" % (level, str(msg).lstrip(" \u3000\t"))
     print(line, flush=True)
     if level == "ERROR":
         collect_error(line)
+
 
 def log(msg):   _emit("INFO", msg)
 def warn(msg):  _emit("WARN", msg)
@@ -192,7 +222,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -247,11 +277,11 @@ YYB_RETRY_DELAY = int(os.getenv("MISHEQU_YYB_RETRY_DELAY", "4") or 4)  # 重试�
 
 
 def flow_start(step, message):
-    log(f"⏳ [{step}/{FLOW_STEPS}] {message}")
+    logDetail(f"⏳ [{step}/{FLOW_STEPS}] {message}")
 
 
 def flow_ok(message):
-    log(f"✅ {message}")
+    logDetail(f"✅ {message}")
 
 
 def load_cached_session(ref):
@@ -347,7 +377,7 @@ def mark_done_today(ref: str, note: str = "", level: str = "") -> None:
         "level": str(level or ""),
     }
     save_daily_done(cache)
-    log(f"✅ [打标] 今日任务已完成，已记录（{today}）")
+    logDetail(f"✅ [打标] 今日任务已完成，已记录（{today}）")
 
 
 def clear_daily_done(ref: str = "") -> None:
@@ -428,7 +458,7 @@ def _yyb_post(label: str, url: str, payload: Dict[str, Any], timeout: Any) -> Di
             # 网络层异常（连接被拒 / 读取超时等）同属连接层故障，可重试
             if attempt >= YYB_RETRY_TIMES:
                 raise RuntimeError(f"YYB {label} 请求异常：{exc}") from None
-            log("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
+            logDetail("⏳ [重试] %s 第%d/%d次失败（上游连接超时），%d秒后重试"
                 % (label, attempt + 1, YYB_RETRY_TIMES + 1, YYB_RETRY_DELAY))
             time.sleep(YYB_RETRY_DELAY)
             continue
@@ -443,7 +473,7 @@ def _yyb_post(label: str, url: str, payload: Dict[str, Any], timeout: Any) -> Di
             if detail != "上游连接超时" or attempt >= YYB_RETRY_TIMES:
                 raise RuntimeError(f"YYB {label} 失败：HTTP {response.status_code}"
                                    + (f"（{detail}）" if detail else ""))
-            log("⏳ [重试] %s 第%d/%d次失败（%s），%d秒后重试"
+            logDetail("⏳ [重试] %s 第%d/%d次失败（%s），%d秒后重试"
                 % (label, attempt + 1, YYB_RETRY_TIMES + 1, detail, YYB_RETRY_DELAY))
             time.sleep(YYB_RETRY_DELAY)
             continue
@@ -483,7 +513,7 @@ def get_code(server, ref):
         if user_body.get("code") != 0 or not isinstance(user_result, dict):
             raise RuntimeError(f"YYB 获取微信用户信息失败（响应码：{user_body.get('code')}）")
         if os.getenv("MI_COMMUNITY_DEBUG") == "1":
-            warn("调试：YYB用户信息字段=" + ",".join(
+            logDetail("调试：YYB用户信息字段=" + ",".join(
                 f"{key}:{type(value).__name__}:{len(value) if isinstance(value, (str, list, dict)) else '-'}"
                 for key, value in sorted(user_result.items())
             ))
@@ -520,7 +550,7 @@ def get_code(server, ref):
         }
         flow_ok("微信授权信息获取成功")
     except Exception as exc:
-        warn(f"⚠️ 微信授权信息获取失败（{exc}），降级为空 userInfo 继续登录；若后续登录异常再排查")
+        logDetail(f"⚠️ 微信授权信息获取失败（{exc}），降级为空 userInfo 继续登录；若后续登录异常再排查")
         user_result = {}
     flow_start(2, "从 YYB-Go 获取一次性微信 code")
     body = _yyb_post(
@@ -544,7 +574,7 @@ def fetch_show_level(session, headers, params) -> str:
         info = (resp.json().get("entity") or {}).get("userGrowLevelInfo") or {}
         return str(info.get("showLevel") or "")
     except Exception as exc:
-        warn(f"⚠️ 查询等级失败：{exc}")
+        logDetail(f"⚠️ 查询等级失败：{exc}")
         return ""
 
 
@@ -665,7 +695,7 @@ def login_and_sign(code, wx_user_info, ref):
     params = {"wx_vip_ph": ph}
     flow_start(7, "查询今日签到状态")
     level = fetch_show_level(session, headers, params)
-    log(f"🏅 当前等级：{level or '未知'}")
+    logDetail(f"🏅 当前等级：{level or '未知'}")
     status = session.get(f"{BASE}/mtop/planet/wechat/checkin/mypagedata", headers=headers, params=params, timeout=20)
     status.raise_for_status()
     status_body = status.json()
@@ -718,14 +748,17 @@ def main():
     failed = 0
     skipped = 0
     summary_rows = []  # (账号标识, 等级)：汇总区逐账号打印等级
-    log(f"🚀 {SCRIPT_NAME} 开始 · 共读取到 {len(accounts)} 个 YYB 账号")
     for index, (server, ref) in enumerate(accounts, 1):
+        resetDetail()  # 每个账号独立收集过程细节
         # 今天已经完整跑过的账号直接跳过，不再消耗 YYB 取码/取号配额
         if is_done_today(ref):
-            log(f"⏭️ [打标] 账号 {index}/{len(accounts)} 今日任务已完成，跳过（标识：{ref}）")
+            # 账号标题无条件打印（模板规范：打标跳过也要先打印标头）
+            acc_banner(index, len(accounts), "标识：" + str(ref))
+            log(f"⏭️ [打标] 账号 {index}/{len(accounts)} 今日已完成，跳过")
             skipped += 1
             # 跳过账号从打标缓存读回等级，保证汇总仍有数据
             summary_rows.append((str(ref), level_from_done(ref)))
+            acc_footer(index, len(accounts))
             continue
 
         acc_banner(index, len(accounts), "标识：" + str(ref))
@@ -733,16 +766,19 @@ def main():
         try:
             code, wx_user_info = get_code(server, ref)
             result, level = login_and_sign(code, wx_user_info, ref)
-            log(f"🏁 账号 {ref} 流程完成：{result}")
             done_note = str(result or "")
             summary_rows.append((str(ref), level))
+            # 成功账号压缩为一行，过程细节不打印
+            log(f"✅ 账号 {index}/{len(accounts)}：{result} ｜ 等级 {level or '未知'}")
         except Exception as exc:  # 单账号失败不影响其他账号
             failed += 1
-            err(f"🛑 账号 {ref} 流程终止：{exc}")
+            err(f"🛑 账号 {index}/{len(accounts)} 流程终止：{exc}")
             summary_rows.append((str(ref), ""))
         else:
             # 只有整个流程走完（未抛异常）才算今日完成
             mark_done_today(ref, done_note, level)
+        # 出错账号展开过程细节，成功账号直接丢弃
+        flushDetail()
         acc_footer(index, len(accounts))
 
     executed = len(accounts) - skipped
@@ -758,7 +794,7 @@ def main():
     if summary_rows:
         log("🏅 [等级汇总]")
         for ref, lv in summary_rows:
-            log(f"   · 账号 {ref}：等级 {lv or '未知'}")
+            log(f"· 账号 {ref}：等级 {lv or '未知'}")
     log(SUMMARY_SEP)
     # 错误日志推送：有错误才发；未配置通知渠道则只提示一行
     flush_notify(

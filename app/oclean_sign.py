@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  Oclean签到
-# version: 2026-10-29a
+# version: 2026-11-20a
 # cron: 5 7,16 * * *
 # 积分有效期：
 # =========================================================
@@ -180,7 +180,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-10-29a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 
 def acc_banner(idx, total, ident=""):
@@ -292,7 +292,7 @@ def main():
 
     if not cookies:
         err("🚫 青龙环境变量 OCLEAN_COOKIE 未设置（格式: 一行一个 Shop-Member 值）")
-        return
+        return 1
 
     ok_count = 0
     expired_count = 0
@@ -319,7 +319,9 @@ def main():
         "账号 %d ｜ 成功 %d ｜ 失败 %d ｜ 跳过 0" % (total, ok_count, total - ok_count),
         logger=log,
     )
+    # 退出码语义：有真实失败账号（非跳过）才算失败；全成功为 0
+    return 0 if total - ok_count == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    _sys.exit(main())

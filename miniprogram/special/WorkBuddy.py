@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  WorkBuddy 签到
-# version: 2026-11-19b
+# version: 2026-11-20a
 # cron: 31 7,12,23 * * *
 # =========================================================
 
@@ -1567,7 +1567,7 @@ def _claim_readback(s, code, log, headers):
         return False
     if any((row.get("task_code") or row.get("code")) == code and _row_claimed(row) for row in rows):
         _claim_attempts(s)[code] = True
-        log("    🎁领奖[%s]: 已由实时任务状态确认" % code)
+        log("🎁 [领奖] [%s]: 已由实时任务状态确认" % code)
         return True
     return False
 
@@ -1588,24 +1588,24 @@ def _claim_task(s, code, log, *, mp):
     except requests.RequestException:
         if _claim_readback(s, code, log, headers):
             return True
-        log("    🎁领奖[%s]: 请求中断，等待回读，本轮暂缓重复提交" % code)
+        log("🎁 [领奖] [%s]: 请求中断，等待回读，本轮暂缓重复提交" % code)
         return False
     payload = _json_or_empty(r)
     ok, data, already = _claim_response_ok(r, payload)
     attempts[code] = ok
     if already:
-        log("    🎁领奖[%s]: 已领过" % code)
+        log("🎁 [领奖] [%s]: 已领过" % code)
     elif ok:
         credit = data.get("credit", data.get("reward_credit"))
         energy = data.get("energy", data.get("reward_energy"))
         reward = "、".join("+%s%s" % (value, unit) for value, unit in (
             (credit, "积分"), (energy, "能量")) if value is not None)
-        log("    🎁领奖[%s]: %s" % (code, reward or "回执确认已领"))
+        log("🎁 [领奖] [%s]: %s" % (code, reward or "回执确认已领"))
     elif (200 <= r.status_code < 300 and (payload.get("code") is None or _api_code_ok(payload.get("code")))
           or r.status_code >= 500 or r.status_code in (408, 429)):
         if _claim_readback(s, code, log, headers):
             return True
-        log("    🎁领奖[%s]: 回执缺少到账凭据，等待实时回读" % code)
+        log("🎁 [领奖] [%s]: 回执缺少到账凭据，等待实时回读" % code)
     else:
         log("    领奖[%s]: 请求失败 HTTP %s" % (code, r.status_code))
         if 200 <= r.status_code < 500:
@@ -2018,7 +2018,7 @@ def t_daily_activity(s, uid, nick, log):
     except Exception:
         state = {}
     if state.get(uid) == today:
-        log("    🔥每日活跃: 今日已上报，跳过")
+        log("🔥 [活跃] 今日已上报，跳过")
         return
     now = int(time.time() * 1000)
     conv_id = _new_conversation_id()
@@ -2073,17 +2073,17 @@ def t_daily_activity(s, uid, nick, log):
         },
     )
     if status not in (200, 201):
-        log("    🔥每日活跃: 上报失败 HTTP %s" % status)
+        log("🔥 [活跃] 上报失败 HTTP %s" % status)
         return
 
     # HTTP 200 只代表事件已受理，必须由热力图 score 确认真正计分。
     score = _heatmap_today_score(s)
     if score is None:
-        log("    🔥每日活跃: 合成事件已发送，热力图回读失败（不写本地完成标记）")
+        log("🔥 [活跃] 合成事件已发送，热力图回读失败（不写本地完成标记）")
     elif score > 0:
-        log("    🔥每日活跃: 热力图已点亮 %s 分" % score)
+        log("🔥 [活跃] 热力图已点亮 %s 分" % score)
     elif _env_enabled("WORKBUDDY_ACTIVITY_CHAT_FALLBACK", True):
-        log("    🔥每日活跃: 合成事件未计分，尝试一次真实对话兜底")
+        log("🔥 [活跃] 合成事件未计分，尝试一次真实对话兜底")
         try:
             conv_id, _reply, _message_id = webchat2(
                 s, "activity", "你好，回答OK即可")
@@ -2091,14 +2091,14 @@ def t_daily_activity(s, uid, nick, log):
                 time.sleep(3)
                 score = _heatmap_today_score(s)
                 if score and score > 0:
-                    log("    🔥每日活跃: 真实对话兜底成功，热力图 %s 分" % score)
+                    log("🔥 [活跃] 真实对话兜底成功，热力图 %s 分" % score)
         except Exception as exc:
-            log("    🔥每日活跃: 真实对话兜底失败 %s" % str(exc)[:60])
+            log("🔥 [活跃] 真实对话兜底失败 %s" % str(exc)[:60])
     else:
-        log("    🔥每日活跃: 合成事件未计分，真实对话兜底已关闭")
+        log("🔥 [活跃] 合成事件未计分，真实对话兜底已关闭")
 
     if not score or score <= 0:
-        log("    🔥每日活跃: 今日计分仍未确认，下轮继续重试")
+        log("🔥 [活跃] 今日计分仍未确认，下轮继续重试")
         return
     try:
         state[uid] = today
@@ -2106,17 +2106,17 @@ def t_daily_activity(s, uid, nick, log):
             json.dump(state, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
     except Exception as exc:
-        log("    🔥每日活跃: 本地去重状态保存失败 %s" % str(exc)[:50])
+        log("🔥 [活跃] 本地去重状态保存失败 %s" % str(exc)[:50])
     try:
         data = (s.get("https://copilot.tencent.com/activity/growth/streak",
                       timeout=20, verify=False).json().get("data") or {})
         days = (data.get("streak") or {}).get("days")
         if days in (None, 0):
-            log("    🔥每日活跃: 已上报，连登读数稍后刷新")
+            log("🔥 [活跃] 已上报，连登读数稍后刷新")
         else:
-            log("    🔥每日活跃: 已点亮，连登 %s 天" % days)
+            log("🔥 [活跃] 已点亮，连登 %s 天" % days)
     except Exception:
-        log("    🔥每日活跃: 已上报")
+        log("🔥 [活跃] 已上报")
 
 
 # ============================================================================ #
@@ -2592,7 +2592,7 @@ def t_lottery(s, uid, nick, log):
             except Exception:
                 chances = 0
         if not chances or chances <= 0:
-            log("    🎰抽奖: 无次数")
+            log("🎰 [抽奖] 无次数")
             return
         won = []
         for i in range(int(chances)):
@@ -2609,7 +2609,7 @@ def t_lottery(s, uid, nick, log):
             else:
                 log("    🎰抽奖失败: %s" % str(rr.get("msg", ""))[:40])
                 break
-        log("    🎰抽奖: %s" % ("、".join(won) if won else "无结果"))
+        log("🎰 [抽奖] %s" % ("、".join(won) if won else "无结果"))
     except Exception as e:
         log("    🎰抽奖异常: %s" % str(e)[:50])
 
@@ -2631,9 +2631,9 @@ def t_blindbox(s, uid, nick, log):
         return
     if affordable == 0:
         if balance < 10:
-            log("    📦盲盒: 能量不足 (%s/10)" % _format_credit(balance))
+            log("📦 [盲盒] 能量不足 (%s/10)" % _format_credit(balance))
         else:
-            log("    📦盲盒: 当前无可开启次数（能量 %s）" % _format_credit(balance))
+            log("📦 [盲盒] 当前无可开启次数（能量 %s）" % _format_credit(balance))
         return
     try:
         got = []
@@ -2648,7 +2648,7 @@ def t_blindbox(s, uid, nick, log):
             else:
                 break
             time.sleep(1.5)
-        log("    📦盲盒: %s" % ("、".join(got) if got else "开启失败"))
+        log("📦 [盲盒] %s" % ("、".join(got) if got else "开启失败"))
     except Exception as exc:
         log("    📦盲盒异常（%s）" % type(exc).__name__)
 
@@ -2658,7 +2658,7 @@ def t_buddy_info(s, uid, nick, log):
         r = s.get(BASE + "/v2/activity/growth/buddy/info", timeout=20, verify=False).json()
         if r.get("code") == 0:
             b = r.get("data", {}).get("buddy", r.get("data", {}))
-            log("    🐱Buddy: %s (%s)%s" % (b.get("name", "?"), b.get("rarity", ""),
+            log("🐱 [伙伴] %s (%s)%s" % (b.get("name", "?"), b.get("rarity", ""),
                                            ", " + b.get("personality") if b.get("personality") else ""))
     except Exception:
         pass
@@ -2681,17 +2681,17 @@ def _travel_prepare(s, log, claim_arrived):
         if vis.get("code") == 0:
             vd = vis.get("data", {})
             if not vd.get("buddy_visible", True) or not vd.get("has_buddy", True):
-                log("    🐾旅行: 无Buddy，跳过")
+                log("🐾 [旅行] 无Buddy，跳过")
                 return
         sd = _travel_status(s)
         state = sd["state"]
         if state == "arrived":
             if not claim_arrived:
-                log("    🐾旅行: 已到达，旅行关闭，本轮不领礼也不开盲盒")
+                log("🐾 [旅行] 已到达，旅行关闭，本轮不领礼也不开盲盒")
                 return
             record_id = sd.get("record_id")
             if record_id in (None, "", 0):
-                log("    🐾旅行: 已到达但状态缺少 record_id，本轮不领奖也不重新派出")
+                log("🐾 [旅行] 已到达但状态缺少 record_id，本轮不领奖也不重新派出")
                 return
             claim_response = s.post(
                 BASE + "/v2/activity/growth/buddy/travel/claim",
@@ -2704,19 +2704,19 @@ def _travel_prepare(s, log, claim_arrived):
             if (200 <= claim_response.status_code < 300
                     and _api_code_ok(rr.get("code"))
                     and reward is not None):
-                log("    🐾旅行: 🎉领取礼物 +%s积分" % reward)
+                log("🐾 [旅行] 🎉领取礼物 +%s积分" % reward)
             else:
-                log("    🐾旅行: 领取未确认 %s" % str(
+                log("🐾 [旅行] 领取未确认 %s" % str(
                     rr.get("msg") or "HTTP %s" % claim_response.status_code)[:60])
                 return
             sd = _travel_status(s)
             if sd["state"] != "idle":
-                log("    🐾旅行: 领礼后尚未回到空闲，本轮跳过盲盒与派出")
+                log("🐾 [旅行] 领礼后尚未回到空闲，本轮跳过盲盒与派出")
                 return
             return sd
         if state == "traveling":
             remain = max(0, (sd.get("arrive_at", 0) - sd.get("server_now", 0)) // 60)
-            log("    🐾旅行: 旅行中，约%s分钟后到达" % remain)
+            log("🐾 [旅行] 旅行中，约%s分钟后到达" % remain)
             return
         return sd
     except SafeError as exc:
@@ -2727,21 +2727,21 @@ def _travel_prepare(s, log, claim_arrived):
 
 def _travel_depart(s, log, state):
     if state.get("daily_limit_reached"):
-        log("    🐾旅行: 今日次数已用尽")
+        log("🐾 [旅行] 今日次数已用尽")
         return
     try:
         cfg = s.get(BASE + "/v2/activity/growth/buddy/travel/config", timeout=20, verify=False).json()
         locs = cfg.get("data", {}).get("locations", [])
         if not locs:
-            log("    🐾旅行: 无目的地")
+            log("🐾 [旅行] 无目的地")
             return
         rr = s.post(BASE + "/v2/activity/growth/buddy/travel/depart",
                     json={"location_id": locs[0].get("id")}, timeout=20, verify=False).json()
         if rr.get("code") == 0:
             remain = max(0, (rr.get("data", {}).get("arrive_at", 0) - rr.get("data", {}).get("server_now", 0)) // 3600)
-            log("    🐾旅行: ✅已出发，约%s小时后到达（下次运行自动领取）" % remain)
+            log("🐾 [旅行] ✅已出发，约%s小时后到达（下次运行自动领取）" % remain)
         else:
-            log("    🐾旅行: 出发失败 %s" % str(rr.get("msg", ""))[:40])
+            log("🐾 [旅行] 出发失败 %s" % str(rr.get("msg", ""))[:40])
     except Exception as e:
         log("    🐾旅行异常: %s" % str(e)[:50])
 
@@ -2804,7 +2804,7 @@ def t_badges(s, uid, nick, log):
         r = s.get(BASE + "/v2/activity/growth/badges", timeout=20, verify=False).json()
         badges = r.get("data", {}).get("badges", r.get("data", {}).get("list", []))
         earned = sum(1 for b in badges if isinstance(b, dict) and b.get("earned"))
-        log("    🏅徽章: %s个" % earned)
+        log("🏅 [徽章] %s个" % earned)
     except Exception:
         pass
 
@@ -2896,7 +2896,7 @@ def t_compensation(s, uid, log):
     try:
         current = _benefit_status(s, "/billing/meter/compensation-status")
     except PermissionError:
-        log("    🏢补偿: 企业版账号不支持")
+        log("🏢 [补偿] 企业版账号不支持")
         return
     except Exception as exc:
         log("    ⚠️补偿状态查询失败: %s" % str(exc)[:80])
@@ -2913,7 +2913,7 @@ def t_compensation(s, uid, log):
     deadline = str(current.get("end_time") or "")
     handled = _benefit_guard_get("compensation", uid, deadline)
     if handled:
-        log("    🎊补偿: 本期已处理，跳过重复领取（本地防重）")
+        log("🎊 [补偿] 本期已处理，跳过重复领取（本地防重）")
         return
     log("    🎊补偿待领取: %s积分%s" % (
         credit_num, "（截止%s）" % deadline if deadline else ""))
@@ -2935,21 +2935,21 @@ def t_compensation(s, uid, log):
         if actual_credit is not None and _as_int(actual_credit) > 0:
             log("    ✅补偿领取成功: +%s积分" % actual_credit)
         elif isinstance(result.get("data"), dict) and result["data"].get("already_claimed"):
-            log("    🎊补偿: 已领取")
+            log("🎊 [补偿] 已领取")
         else:
             log("    ℹ️补偿本期已处理；本次回执未提供实际到账额")
         return
 
     message = str(result.get("msg") or "HTTP %s" % status_code)
     if is_enterprise_denial(status_code, result):
-        log("    🏢补偿: 企业版账号不支持")
+        log("🏢 [补偿] 企业版账号不支持")
     elif any(marker in message.lower() for marker in ("already", "已领取")):
         try:
             _benefit_guard_mark(
                 "compensation", uid, deadline, "already_claimed", 0)
         except Exception:
             pass
-        log("    🎊补偿: 已领取")
+        log("🎊 [补偿] 已领取")
     else:
         log("    ⚠️补偿领取未确认: %s（下轮重试）" % message[:80])
 
@@ -2958,7 +2958,7 @@ def _claim_gift(s, uid, log):
     try:
         current = _benefit_status(s, "/billing/meter/check-gift-claimed")
     except PermissionError:
-        log("    🎁新手礼包: 企业版账号不支持")
+        log("🎁 [礼包] 企业版账号不支持")
         return
     except Exception as exc:
         log("    ⚠️礼包状态查询失败: %s" % str(exc)[:80])
@@ -2970,7 +2970,7 @@ def _claim_gift(s, uid, log):
         return
     deadline = str(current.get("end_time") or "")
     if _benefit_guard_get("gift", uid, deadline):
-        log("    🎁新手礼包: 本期已处理，跳过重复领取（本地防重）")
+        log("🎁 [礼包] 本期已处理，跳过重复领取（本地防重）")
         return
     try:
         status_code, result = _benefit_claim(s, "/billing/meter/claim-gift")
@@ -2985,9 +2985,9 @@ def _claim_gift(s, uid, log):
         except Exception as exc:
             log("    ⚠️礼包本地防重状态保存失败: %s" % str(exc)[:60])
         if actual_credit is not None and _as_int(actual_credit) > 0:
-            log("    🎊新手礼包: +%s积分" % actual_credit)
+            log("🎊 [礼包] +%s积分" % actual_credit)
         elif isinstance(result.get("data"), dict) and result["data"].get("already_claimed"):
-            log("    🎁新手礼包: 已领取")
+            log("🎁 [礼包] 已领取")
         else:
             log("    ℹ️新手礼包本期已处理；本次回执未提供实际到账额")
         return
@@ -2997,7 +2997,7 @@ def _claim_gift(s, uid, log):
             _benefit_guard_mark("gift", uid, deadline, "already_claimed", 0)
         except Exception:
             pass
-        log("    🎁新手礼包: 已领取")
+        log("🎁 [礼包] 已领取")
     else:
         log("    ⚠️新手礼包领取未确认: %s（下轮重试）" % message[:80])
 
@@ -5427,7 +5427,7 @@ def claim_ready_tasks(s, log):
         if any(_row_claimed(row) for row in rows.values()):
             if attempts.get(code) is False:
                 attempts[code] = True
-                log("    🎁领奖[%s]: 已由实时任务状态确认" % code)
+                log("🎁 [领奖] [%s]: 已由实时任务状态确认" % code)
             continue
         if code in attempts:
             continue
@@ -5465,7 +5465,7 @@ def claim_ready_tasks(s, log):
             ok = _mp_claim(s, code, log) if source == "mp" else claim(s, code, log)
         except Exception as exc:
             ok = False
-            log("    ⚠️领奖[%s]异常（%s）" % (code, type(exc).__name__))
+            log("⚠️ [领奖] [%s]异常（%s）" % (code, type(exc).__name__))
         if ok:
             claimed += 1
         time.sleep(1)
@@ -5596,6 +5596,7 @@ def run_account(idx, client, account, do_desktop):
     tag = "账号%d" % idx
 
     def log(m, issue=True):
+        m = m.lstrip(" \u3000\t")  # 统一左对齐：去掉层级缩进的前导空格
         ts = time.strftime("%H:%M:%S")
         line = "[%s][%s] %s" % (ts, tag, m)
         print(line, flush=True)
@@ -5789,7 +5790,7 @@ def run_account(idx, client, account, do_desktop):
         except Exception as exc:
             log("    ⚠️批量接受异常（%s），后续任务继续" % type(exc).__name__)
         task_snapshot = _build_task_snapshot(s)
-        log("    📋任务快照: %d 项%s" % (len(task_snapshot[0]),
+        log("📋 [任务] %d 项%s" % (len(task_snapshot[0]),
                                         "" if task_snapshot[1] else "（部分来源不可用，沿用实时回读）"))
         _run("分享技能给好友", ["skill_share"], lambda: t_skill_share(s, uid, nick, log), growth=True)
         _run("召唤3次专家团", ["Expert_team_use_3"], lambda: t_team_3(s, uid, nick, log), growth=True)
@@ -5848,7 +5849,7 @@ def run_account(idx, client, account, do_desktop):
             log("    ⚠️领奖末扫异常（%s）" % type(exc).__name__)
         for code, confirmed in _claim_attempts(s).items():
             if not confirmed:
-                log("    ⚠️领奖[%s]: 本轮未确认到账" % code)
+                log("⚠️ [领奖] [%s]: 本轮未确认到账" % code)
 
         # 终态：读取失败不能折算成 0/0 全部完成。
         try:

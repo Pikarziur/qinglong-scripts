@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  丸丫甄选
-# version: 2026-11-18a
+# version: 2026-11-20b
 # cron: 24 6,16 * * *
 # 积分有效期：当前积分有效期为1年【1】
 # 检测过期积分：每年12/25~12/31检测提醒（即将过期积分=现有总积分）
@@ -136,11 +136,12 @@ function logStartup(total) {
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
   log(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-18a';
+const SCRIPT_VER = '2026-11-20b';
 const ACC_RULE = '='.repeat(70);
 const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
 
 // 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
+const path = require("path");
 const POINTS_HISTORY_FILE = path.join(__dirname, 'wanyazhenxuan_points_history.json');
 function load_points_history() {
   try {
@@ -148,7 +149,7 @@ function load_points_history() {
       const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
       if (d && typeof d === 'object' && !Array.isArray(d)) return d;
     }
-  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  } catch (e) { warn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
   return {};
 }
 function save_points_history(cache) {
@@ -156,7 +157,7 @@ function save_points_history(cache) {
     const tmp = `${POINTS_HISTORY_FILE}.tmp`;
     _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
     _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
-  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+  } catch (e) { warn(`⚠️ [积分] 历史保存失败: ${e.message || e}`); }
 }
 function record_points_snapshot(account, totalPoints) {
   if (totalPoints === null || totalPoints === undefined) return;
@@ -305,7 +306,6 @@ const axios = Object.assign(async function axios(config = {}) {
     post(url, data, config = {}) { return axios({ ...config, method: 'POST', url, data }); },
 });
 const fs = require("fs");
-const path = require("path");
 
 // ———————————— 错误通知（可选项，想用则用）————————————
 // 只推错误：本次运行出现 ERROR 日志才推送一次；正常跑完不打扰。
@@ -778,15 +778,10 @@ class Task {
                 this.todayEarned = parsePoints(todayReward);
             }
             const todayReward = (act?.dailyRewards || []).map(x => x?.desc).filter(Boolean).join("、");
-            const milestones = (act?.rewards || [])
-                .map(x => `${x?.duration || "?"}天/${x?.prize?.[0]?.desc?.middle ?? "?"}${x?.prize?.[0]?.desc?.right || ""}`)
-                .filter(Boolean)
-                .join("、");
             log(
                 `账号[${this.index}] 今日${this.signedBefore ? "已签" : "未签"}` +
                     (this.continuesDay ? ` 连续${this.continuesDay}天` : "") +
-                    (todayReward ? ` 今日奖励:${todayReward}` : "") +
-                    (milestones ? ` 连签奖励:${milestones}` : "")
+                    (todayReward ? ` 今日奖励:${todayReward}` : "")
             );
         } catch (e) {
             err(`账号[${this.index}] 获取签到状态失败: ${e.message || e}`);
@@ -956,6 +951,8 @@ async function printSummary(results, skipped = 0, expireRows = []) {
         `账号 ${total} ｜ 成功 ${ok} ｜ 失败 ${fail} ｜ 跳过 ${skipped} ｜ 已签 ${signed}`,
         log,
     );
+    // 退出码语义：有真实失败账号（非跳过/非今日已签）才算失败；全成功/全跳过为 0
+    if (fail > 0) process.exitCode = 1;
 }
 
 !(async () => {
@@ -990,4 +987,4 @@ async function printSummary(results, skipped = 0, expireRows = []) {
     }
     await printSummary(results, skipped, expireRows);
 })()
-    .catch((e) => err('💥 ' + (e.message || e)));
+    .catch((e) => { err('💥 ' + (e.message || e)); process.exitCode = 1; });

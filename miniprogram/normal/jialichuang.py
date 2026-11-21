@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # =========================================================
 # name:  嘉立创
-# version: 2026-11-18a
+# version: 2026-11-20a
 # cron: 12 5,15 * * *
 # 积分有效期：次年12月31日【1+1】
 # 过期提醒：每年 12/25~12/31 检查即将过期豆豆，汇总打印 + 强推通知（详见下方 EXPIRE_* 配置）
@@ -176,6 +176,8 @@ _qn_sys_excepthook = _sys.excepthook
 _sys.excepthook = _qn_excepthook
 
 def _emit(level, msg):
+    # 一律左对齐：剥离前导半角空格/全角空格/tab，任何 log 调用都不会有行首缩进
+    msg = str(msg).lstrip(" \u3000\t")
     line = f"[{level}] {msg}"
     print(line, flush=True)
     if level == "ERROR":
@@ -203,7 +205,7 @@ def log_startup(total: int = 0) -> None:
     if total:
         log("🔢 账号数量: %d" % total)
     log(_ACC_RULE)
-SCRIPT_VER = "2026-11-18a"
+SCRIPT_VER = "2026-11-20a"
 _ACC_RULE = "=" * 70
 SUMMARY_SEP = "▶︎ " + "━" * 50 + " ◀︎"
 
@@ -586,7 +588,7 @@ def get_wx_code(server, ref):
                     raise RuntimeError(
                         f"YYB请求失败（HTTP {response.status_code}）"
                         + (f"（{detail}）" if detail else ""))
-                err(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
+                err(f"⚠️ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
                     f"（{detail}），{YYB_RETRY_DELAY}秒后重试")
                 time.sleep(YYB_RETRY_DELAY)
                 continue
@@ -603,7 +605,7 @@ def get_wx_code(server, ref):
             # 网络层异常（连接被拒 / 读取超时等）同属连接层故障，可重试
             if attempt >= YYB_RETRY_TIMES:
                 raise RuntimeError(f"YYB请求异常：{exc}") from None
-            err(f"⏳ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
+            err(f"⚠️ [重试] getCode 第{attempt + 1}/{YYB_RETRY_TIMES + 1}次失败"
                 f"（上游连接超时），{YYB_RETRY_DELAY}秒后重试")
             time.sleep(YYB_RETRY_DELAY)
         except RuntimeError as exc:
@@ -998,7 +1000,7 @@ def calc_expire_by_detail(s, token, secret, check_year: int) -> Optional[Decimal
     exchanged = sum((abs(_record_amount(r)) for r in exchange_rows
                      if _record_year(r) in (prev_year, check_year)), Decimal("0"))
     result = prev_gain - exchanged
-    log(f"    🧮 [过期对照] {prev_year}年获取 {prev_gain:.2f} − "
+    log(f"🧮 [过期对照] {prev_year}年获取 {prev_gain:.2f} − "
         f"{prev_year}/{check_year}年已兑换 {exchanged:.2f} = {result:.2f} 豆豆")
     return result if result > 0 else Decimal("0")
 
@@ -1043,7 +1045,7 @@ def check_expire_remind(results: List[Dict[str, Any]]) -> None:
     log(_ACC_RULE)
     log("⏳ [豆豆过期提醒] 检测到即将过期的豆豆（获得起次年 12/31 到期，请尽快使用）：")
     for label, val, note in hits:
-        log(f"   · {label}：{val:.2f} 豆豆即将过期{note}")
+        log(f"· {label}：{val:.2f} 豆豆即将过期{note}")
     log(_ACC_RULE)
     push_lines = ["检测到即将过期的豆豆（获得起次年 12/31 到期，请尽快使用）："]
     push_lines += [f"{label}：{val:.2f} 豆豆即将过期{note}" for label, val, note in hits]
@@ -1151,7 +1153,7 @@ def run_one_account(idx: int, remark: str, token: str, secret: str) -> Tuple[boo
             extra = f"，有效期至：{expire_time}" if expire_time else ""
             log(f"💰 [{remark}] 当前豆豆总数：{total}{extra}")
             if result["deadline_expire"] is not None:
-                log(f"    ⏳ 即将过期豆豆（服务端）：{result['deadline_expire']:.2f}")
+                log(f"⏳ 即将过期豆豆（服务端）：{result['deadline_expire']:.2f}")
 
         # 年尾窗口内才查明细对照值，平时不发这些请求
         if ENABLE_EXPIRE_REMIND and in_expire_window():

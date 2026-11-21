@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  君品荟
-# version: 2026-11-18a
+# version: 2026-11-20b
 # cron: 30 4,14 * * *
 # 积分有效期：每年7月19日（7-13 ~ 7-19 含到期当天共7天提醒，用 queryNearExpirePoints 的30天数据）【1】
 =========================================================*/
@@ -191,6 +191,8 @@ function emit(level, text) {
 function log(text) { emit(null, text); }
 function warn(text) { emit('WARN', text); }
 function err(text) { emit('ERROR', text); }
+// 分隔线专用：绕过 emit 的 emoji 补全，按日志模板原样输出 `[INFO] ====`/汇总分隔线
+function logRaw(text) { console.log('[INFO] ' + text); }
 
 // ====================== 日打标（今日完成标记） ======================
 // 记录「今日已完成」的账号，当天再次运行时直接跳过，省下 YYB 取码/取号配额
@@ -262,31 +264,31 @@ function clear_daily_done(key = '') {
 }
 
 // ==================== 账号分隔标识：便于多账号日志区分定位 ====================
-// 注意：本脚本 emit 会对非 emoji 开头行自动补 ℹ️，故分隔线以 ➖ 开头（宽度≈70 列，与其它脚本一致）
-// 仅走 log 输出，不写入 msg，避免污染汇总解析
+// 分隔线按日志模板规范用 '=' x70；走 logRaw 直出，避免 emit 自动补 ℹ️
+// 仅走日志输出，不写入 msg，避免污染汇总解析
 // ========== 启动信息 ==========
 function logStartup(total) {
-  log(ACC_RULE);
+  logRaw(ACC_RULE);
   _title = `📃 脚本名称：君品荟`;
   if (WX_APPID) _title += ` ｜${WX_APPID}`;
   log(_title);
   log(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) log(`🔢 账号数量: ${total}`);
-  log(ACC_RULE);
+  logRaw(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-18a';
-const ACC_RULE = '➖'.repeat(35);
+const SCRIPT_VER = '2026-11-20b';
+const ACC_RULE = '='.repeat(70);
 const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
 
 // 积分每日快照：按账号存每天最后一次的总积分，用于次日对比涨跌。
-const POINTS_HISTORY_FILE = path.join(__dirname, 'exijiu_jph_points_history.json');
+const POINTS_HISTORY_FILE = _qpath.join(__dirname, 'exijiu_jph_points_history.json');
 function load_points_history() {
   try {
     if (_qfs.existsSync(POINTS_HISTORY_FILE)) {
       const d = JSON.parse(_qfs.readFileSync(POINTS_HISTORY_FILE, 'utf8'));
       if (d && typeof d === 'object' && !Array.isArray(d)) return d;
     }
-  } catch (e) { logWarn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
+  } catch (e) { warn(`⚠️ [积分] 历史读取失败: ${e.message || e}`); }
   return {};
 }
 function save_points_history(cache) {
@@ -294,7 +296,7 @@ function save_points_history(cache) {
     const tmp = `${POINTS_HISTORY_FILE}.tmp`;
     _qfs.writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8');
     _qfs.renameSync(tmp, POINTS_HISTORY_FILE);
-  } catch (e) { logErr(`❌ [积分] 历史保存失败: ${e.message || e}`); }
+  } catch (e) { err(`❌ [积分] 历史保存失败: ${e.message || e}`); }
 }
 function record_points_snapshot(account, totalPoints) {
   if (totalPoints === null || totalPoints === undefined) return;
@@ -319,9 +321,9 @@ function points_delta(account, todayVal) {
   } catch (e) { return null; }
 }
 function accBanner(idx, total, ident = '') {
-    log(ACC_RULE);
+    logRaw(ACC_RULE);
     log(`👤 账号 ${idx}/${total}${ident ? ' ｜ ' + ident : ''}`);
-    log(ACC_RULE);
+    logRaw(ACC_RULE);
 }
 function accFooter(idx, total) {
     log(`🔚 账号 ${idx}/${total} 处理结束`);
@@ -580,7 +582,7 @@ function parseYybGoEntry(rawValue) {
         const _pJ = (n) => String(n).padStart(2, '0');
         const _wkJ = '日一二三四五六'[_nowJ.getDay()];
         const _dateJ = `${_nowJ.getFullYear()}-${_pJ(_nowJ.getMonth()+1)}-${_pJ(_nowJ.getDate())}`;
-        log(SUMMARY_SEP);
+        logRaw(SUMMARY_SEP);
         log('📂 汇总日志');
         log('📃 脚本名称：君品荟');
         log(`📅 运行日期：${_dateJ}  周${_wkJ}`);
@@ -655,7 +657,7 @@ function parseYybGoEntry(rawValue) {
                 log(`${_br} ${line}`);
             });
         }
-        log(SUMMARY_SEP);
+        logRaw(SUMMARY_SEP);
         // 错误日志推送：有错误或积分即将过期才发；未配置通知渠道则只提示一行
         let notifySummary = `账号 ${xjhdArr.length} ｜ 成功 ${okCount} ｜ 跳过 ${skipped} ｜ 失败 ${failCount}`;
         const pointLines = [];

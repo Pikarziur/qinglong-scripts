@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*=========================================================
 # name:  创维会员中心
-# version: 2026-11-18a
+# version: 2026-11-20b
 # cron: 18 4,14 * * *
 # 积分有效期：自账号注册日起每 365 天清算一次（按各账号实际注册时间）
 =========================================================*/
@@ -267,9 +267,24 @@ function parseAccounts(raw) {
 }
 
 // ========== 统一日志：[LEVEL] [CHUANGWEI] message ==========
+// 详细日志缓冲：过程细节（token 解析、逐任务上报、状态对比等）默认不打印，
+// 只有本账号出现 WARN/ERROR 时才在账号末尾统一展开，便于排障又保持默认简洁。
+let _detailBuf = [];
+let _detailHadIssue = false;
+function logDetail(msg) { _detailBuf.push(`[INFO] ${msg}`); }
+function resetDetail() { _detailBuf = []; _detailHadIssue = false; }
+function flushDetail() {
+  if (_detailHadIssue && _detailBuf.length) {
+    console.log('[INFO] ── 详细过程（本账号有异常，展开） ──');
+    for (const _l of _detailBuf) console.log(_l);
+  }
+  resetDetail();
+}
+
 function emit(level, msg) {
   const _line = `[${level}] ${msg}`;
   console.log(_line);
+  if (level === 'WARN' || level === 'ERROR') _detailHadIssue = true;
   if (level === 'ERROR') collectError(_line);
 }
 
@@ -347,20 +362,20 @@ function clear_daily_done(key = '') {
   save_daily_done(cache);
 }
 
-function section(title) { logInfo(`━━━ ${title} ━━━`); }
+function section(title) { logDetail(`━━━ ${title} ━━━`); }
 
 // ========== 账号分隔标识：便于多账号日志区分定位 ==========
 // ========== 启动信息 ==========
 function logStartup(total) {
   logInfo(ACC_RULE);
-  _title = `📃 脚本名称：创维会员中心`;
+  let _title = `📃 脚本名称：创维会员中心`;
   if (APPID) _title += ` ｜${APPID}`;
   logInfo(_title);
   logInfo(`📌 脚本版本: ${SCRIPT_VER}`);
   if (total !== undefined) logInfo(`🔢 账号数量: ${total}`);
   logInfo(ACC_RULE);
 }
-const SCRIPT_VER = '2026-11-18a';
+const SCRIPT_VER = '2026-11-20b';
 const ACC_RULE = '='.repeat(70);
 const SUMMARY_SEP = "▶︎ " + "━".repeat(50) + " ◀︎";
 
@@ -473,9 +488,9 @@ function printTokenInfo(token) {
   if (!iat || !exp) return;
   const validM = Math.floor((exp - iat) / 60);
   const leftM = Math.max(0, Math.floor((exp - Math.floor(Date.now() / 1000)) / 60));
-  logInfo(`Token有效期≈${validM}分钟，剩余≈${leftM}分钟`);
-  logInfo(`签发时间: ${fmtTs(iat)}`);
-  logInfo(`过期时间: ${fmtTs(exp)}`);
+  logDetail(`Token有效期≈${validM}分钟，剩余≈${leftM}分钟`);
+  logDetail(`签发时间: ${fmtTs(iat)}`);
+  logDetail(`过期时间: ${fmtTs(exp)}`);
 }
 
 function commonHeaders(extra = {}) {
@@ -1161,7 +1176,7 @@ async function completeTask(token, taskCode) {
 async function runTasks(token) {
   section('任务中心');
   const before = await getWdStatus(token);
-  logInfo(`固定任务(${TASK_CODES.length})：${TASK_CODES.map(c => `${c}(${taskName(c)})`).join('，')}`);
+  logDetail(`固定任务(${TASK_CODES.length})：${TASK_CODES.map(c => `${c}(${taskName(c)})`).join('，')}`);
 
   let execCount = 0;
   let successCount = 0;
@@ -1171,18 +1186,18 @@ async function runTasks(token) {
     const name = taskName(taskCode);
     const b = before.map[taskCode];
     if (Number(b) === 1) {
-      logWarn(`[${i + 1}/${TASK_CODES.length}] ${taskCode} ${name}：已完成，跳过`);
+      logDetail(`[${i + 1}/${TASK_CODES.length}] ${taskCode} ${name}：已完成，跳过`);
       continue;
     }
 
     execCount++;
-    logInfo(`[${i + 1}/${TASK_CODES.length}] 开始上报 ${taskCode} ${name}`);
+    logDetail(`[${i + 1}/${TASK_CODES.length}] 开始上报 ${taskCode} ${name}`);
     try {
       const { ret } = await completeTask(token, taskCode);
       const msg = brief(ret?.data || ret?.msg || ret);
       if (Number(ret?.code) === 0 || String(ret?.code) === '0') {
         successCount++;
-        logOk(`${taskCode} ${name}：${msg || '成功'}`);
+        logDetail(`${taskCode} ${name}：${msg || '成功'}`);
       } else {
         logWarn(`${taskCode} ${name}：${msg || '失败'}`);
       }
@@ -1193,15 +1208,15 @@ async function runTasks(token) {
   }
 
   const after = await getWdStatus(token);
-  logInfo('任务状态对比（执行前 -> 执行后）');
+  logDetail('任务状态对比（执行前 -> 执行后）');
   for (const taskCode of TASK_CODES) {
     const name = taskName(taskCode);
     const b = taskStateText(before.map[taskCode]);
     const a = taskStateText(after.map[taskCode]);
     const icon = a === '已完成' ? '✅' : '▫️';
-    logInfo(`${icon} ${taskCode} ${name}: ${b} -> ${a}`);
+    logDetail(`${icon} ${taskCode} ${name}: ${b} -> ${a}`);
   }
-  logOk(`任务执行结束：尝试 ${execCount} 个，成功 ${successCount} 个，跳过 ${TASK_CODES.length - execCount} 个`);
+  logDetail(`任务执行结束：尝试 ${execCount} 个，成功 ${successCount} 个，跳过 ${TASK_CODES.length - execCount} 个`);
   return `固定任务：尝试${execCount}，成功${successCount}，跳过${TASK_CODES.length - execCount}`;
 }
 
@@ -1209,7 +1224,7 @@ async function runDuibaExtraSign(token) {
   section('额外签到（兑吧连续签到）');
   try {
     const { autoLoginUrl } = await getDuibaAutoLoginUrl(token);
-    logOk('签到入口获取成功');
+    logDetail('签到入口获取成功');
 
     const jar = {};
     const ua = miniH5UA();
@@ -1243,17 +1258,17 @@ async function runDuibaExtraSign(token) {
     if (!signOperatingId) throw new Error(`未找到signOperatingId: ${finalPageUrl}`);
 
     const keyHint = extractDuibaKeyFromPageHtml(pageResp.text);
-    logInfo('已进入签到页');
+    logDetail('已进入签到页');
 
     const before = await getDuibaIndexInfo(origin, signOperatingId, finalPageUrl, jar, ua);
     const bCon = Number(before?.data?.consecutiveCount || 0);
     const bTot = Number(before?.data?.totalCount || 0);
     const beforeSigned = Boolean(before?.data?.signResult);
-    logInfo(`签到前：连签${bCon}天，总签到${bTot}天`);
-    logInfo(`签到前状态：${beforeSigned ? '今日已签到' : '今日未签到'}`);
+    logDetail(`签到前：连签${bCon}天，总签到${bTot}天`);
+    logDetail(`签到前状态：${beforeSigned ? '今日已签到' : '今日未签到'}`);
 
     const signToken = await getDuibaCtoken(origin, finalPageUrl, jar, ua, keyHint);
-    logOk('ctoken解析成功');
+    logDetail('ctoken解析成功');
 
     const signRet = await doDuibaSign(origin, signOperatingId, signToken, finalPageUrl, jar, ua);
     const signResult = Number(signRet?.data?.signResult ?? -1);
@@ -1263,7 +1278,7 @@ async function runDuibaExtraSign(token) {
       2: '今日已签到',
       1: '签到成功',
     };
-    logInfo(`doSign：${signTextMap[signResult] || `状态码 ${signResult}`}${orderNum ? `（单号${orderNum}）` : ''}`);
+    logDetail(`doSign：${signTextMap[signResult] || `状态码 ${signResult}`}${orderNum ? `（单号${orderNum}）` : ''}`);
 
     let finalResult = null;
     if (orderNum) {
@@ -1278,22 +1293,22 @@ async function runDuibaExtraSign(token) {
       const sr = Number(finalResult?.data?.signResult ?? -1);
       finalSignCode = sr;
       const credits = finalResult?.data?.credits;
-      logInfo(`结果确认：状态码 ${sr}${credits !== null && credits !== undefined ? `，奖励 ${credits} 维豆` : ''}`);
+      logDetail(`结果确认：状态码 ${sr}${credits !== null && credits !== undefined ? `，奖励 ${credits} 维豆` : ''}`);
     }
 
     const after = await getDuibaIndexInfo(origin, signOperatingId, finalPageUrl, jar, ua);
     const aCon = Number(after?.data?.consecutiveCount || 0);
     const aTot = Number(after?.data?.totalCount || 0);
     const afterSigned = Boolean(after?.data?.signResult);
-    logInfo(`状态对比: 连签 ${bCon} -> ${aCon}，总签到 ${bTot} -> ${aTot}`);
-    logInfo(`签到后状态：${afterSigned ? '今日已签到' : '今日未签到'}`);
+    logDetail(`状态对比: 连签 ${bCon} -> ${aCon}，总签到 ${bTot} -> ${aTot}`);
+    logDetail(`签到后状态：${afterSigned ? '今日已签到' : '今日未签到'}`);
 
     const progressChanged = aCon > bCon || aTot > bTot;
     const signedNow = !beforeSigned && afterSigned;
     const alreadySigned = beforeSigned && afterSigned && !progressChanged;
 
     if (progressChanged || signedNow || finalSignCode === 1) {
-      logOk('兑吧连续签到成功');
+      logDetail('兑吧连续签到成功');
       return '兑吧签到：成功';
     } else if (alreadySigned || signResult === 2 || finalSignCode === 2) {
       logInfo('今日已签到（可能是你手动签过）');
@@ -1312,13 +1327,13 @@ async function runOne(account, idx, state = {}) {
   const { server, ref, note = '' } = account;
   section(`账号${idx}${note ? ` (${note})` : ''}`);
   const code = await getWxCode(server, ref, APPID);
-  logOk('YYB-Go-Enhanced获取wx.login code成功');
+  logDetail('YYB-Go-Enhanced获取wx.login code成功');
 
   const ticket = await exchangeByCode(code);
-  logOk('exchange成功');
+  logDetail('exchange成功');
 
   const token = await signinByTicket(ticket);
-  logOk('signin成功');
+  logDetail('signin成功');
   printTokenInfo(token);
 
   // 过期提醒独立于任务流程：即使后续任务失败也要能提醒；查询异常只 WARN，不外抛
@@ -1333,8 +1348,8 @@ async function runOne(account, idx, state = {}) {
     throw new Error(`用户状态验证失败(code=${profile?.code ?? '-'})`);
   }
   const beforeScore = scoreSnapshot(profile);
-  logOk('/v1/get-user 成功');
-  logInfo(`执行前积分：${beforeScore.current ?? '接口未返回'}，今日累计：${beforeScore.today ?? '接口未返回'}`);
+  logDetail('/v1/get-user 成功');
+  logDetail(`执行前积分：${beforeScore.current ?? '接口未返回'}，今日累计：${beforeScore.today ?? '接口未返回'}`);
   state.totalPoints = beforeScore.current;
 
   if (RUN_TASKS) {
@@ -1344,7 +1359,7 @@ async function runOne(account, idx, state = {}) {
     const afterProfile = await getUserByToken(token);
     const afterScore = scoreSnapshot(afterProfile);
     const points = scoreSummary(beforeScore, afterScore);
-    logOk(points.replace('💰 ', ''));
+    logDetail(points.replace('💰 ', ''));
     // 总积分以签到后余额为准
     state.totalPoints = afterScore.current !== null ? afterScore.current : beforeScore.current;
     return [points, `✅ ${taskSummary}`, `📅 ${signSummary}`].filter(Boolean).join('\n');
@@ -1379,6 +1394,7 @@ async function runOne(account, idx, state = {}) {
   const points_rows = [];     // [[账号序号, 总积分], ...]
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i] || {};
+    resetDetail();  // 每个账号独立收集详细过程，出错时才展开
     // 今天已经跑完的账号直接跳过，不再消耗 YYB 取码/取号配额（并入 skipped 统计）
     const doneKey = `${acc.server}@${acc.ref}`;
     if (is_done_today(doneKey)) {
@@ -1399,7 +1415,9 @@ async function runOne(account, idx, state = {}) {
       acc.note ? `备注：${acc.note}` : (acc.ref ? `标识：${acc.ref}` : ''));
     const state = {};
     try {
-      await runOne(accounts[i], i + 1, state);
+      const _summary = await runOne(accounts[i], i + 1, state);
+      // 成功账号只打印一行压缩结果（多行摘要压成单行）；详细过程无异常则不展开
+      if (_summary) logInfo(`✅ 账号${i + 1}：${String(_summary).replace(/\s*\n\s*/g, ' ｜ ')}`);
       // 整个流程走完（未抛异常）且确实执行了任务，才算今日完成
       if (RUN_TASKS) mark_done_today(doneKey, '任务完成', state.expireInfo, state.totalPoints);
     } catch (e) {
@@ -1411,6 +1429,7 @@ async function runOne(account, idx, state = {}) {
         failed++;
       }
     }
+    flushDetail();  // 本账号有 WARN/ERROR 时，在此展开此前收集的详细过程
     if (state.expireInfo && Number(state.expireInfo.amount) > 0) {
       expire_alerts.push([i + 1, state.expireInfo]);
     }
@@ -1455,4 +1474,10 @@ async function runOne(account, idx, state = {}) {
   // 有 ERROR 或有过期提醒都推送；未配置通知渠道则只提示一行
   await flushNotify('创维', notifySummary, logInfo, Boolean(expire_alerts.length));
   if (failed > 0) process.exitCode = 1;
-})();
+})().catch(async (e) => {
+  // 顶层未捕获异常（如 logStartup 抛错）原本只被青龙吞成堆栈、退出码仍为 0，
+  // 这里统一收口：记录 ERROR、推通知、失败退出。
+  logErr('💥 脚本异常终止: ' + (e && e.message ? e.message : String(e)));
+  process.exitCode = 1;
+  try { await flushNotify('创维', '', logInfo, false); } catch (_) {}
+});
